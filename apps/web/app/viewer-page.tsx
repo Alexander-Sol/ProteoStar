@@ -164,7 +164,9 @@ export function ViewerPage() {
                   type: "selection/select-nearest-scan",
                   retentionTime: event.point.retentionTime
                 });
-                viewerStore.getState().dispatch({ type: "panel/reset", panelId: "spectrum" });
+                if (!viewerStore.getState().spectrumPanel.pinned) {
+                  viewerStore.getState().dispatch({ type: "panel/reset", panelId: "spectrum" });
+                }
                 setHoveredSpectrumPeak(null);
                 return;
               }
