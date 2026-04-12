@@ -83,10 +83,12 @@ export function PanelActionButton({
 }
 
 const shellStyle: CSSProperties = {
-  minHeight: "100vh",
-  padding: "16px clamp(12px, 2vw, 24px) 20px",
+  height: "100vh",
+  overflow: "hidden",
+  padding: "8px clamp(8px, 1.5vw, 16px)",
   display: "grid",
-  gap: 12
+  gridTemplateRows: "auto 1fr",
+  gap: 6
 };
 
 const headerStyle: CSSProperties = {
@@ -99,7 +101,7 @@ const headerStyle: CSSProperties = {
 
 const eyebrowStyle: CSSProperties = {
   margin: 0,
-  fontSize: "0.76rem",
+  fontSize: "0.65rem",
   textTransform: "uppercase",
   letterSpacing: "0.12em",
   color: "#4b6486",
@@ -107,16 +109,16 @@ const eyebrowStyle: CSSProperties = {
 };
 
 const titleStyle: CSSProperties = {
-  margin: "4px 0 0",
-  fontSize: "clamp(1.5rem, 3vw, 2.1rem)",
+  margin: "2px 0 0",
+  fontSize: "clamp(0.95rem, 1.5vw, 1.2rem)",
   lineHeight: 1.05,
   color: "#13253d"
 };
 
 const subtitleStyle: CSSProperties = {
-  margin: "8px 0 0",
-  fontSize: "0.92rem",
-  lineHeight: 1.45,
+  margin: "3px 0 0",
+  fontSize: "0.75rem",
+  lineHeight: 1.4,
   maxWidth: 560,
   color: "#506279"
 };
@@ -130,54 +132,56 @@ const toolbarStyle: CSSProperties = {
 
 const contentStyle: CSSProperties = {
   display: "grid",
-  gap: 12
+  gridTemplateRows: "1fr 1fr",
+  gap: 0,
+  minHeight: 0,
+  overflow: "hidden"
 };
 
 const panelStyle: CSSProperties = {
   display: "grid",
-  gridTemplateRows: "auto minmax(380px, 1fr)",
+  gridTemplateRows: "auto 1fr",
   backgroundColor: "rgba(255,255,255,0.94)",
-  border: "2px solid #d2ddea",
-  borderRadius: 18,
+  border: "1.5px solid #000",
   overflow: "hidden",
-  boxShadow: "0 10px 28px rgba(22, 32, 51, 0.05)"
+  minHeight: 0
 };
 
 const panelBodyStyle: CSSProperties = {
-  minHeight: 380,
-  padding: 4
+  minHeight: 0,
+  overflow: "hidden"
 };
 
 const panelHeaderStyle: CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
-  gap: 16,
-  padding: "12px 16px 10px",
-  borderBottom: "1px solid #e2e9f3",
+  gap: 8,
+  padding: "6px 10px 5px",
+  borderBottom: "1px solid #c0c0c0",
   alignItems: "flex-start",
   flexWrap: "wrap"
 };
 
 const panelTitleWrapStyle: CSSProperties = {
   display: "grid",
-  gap: 8
+  gap: 4
 };
 
 const panelTitleStyle: CSSProperties = {
   margin: 0,
-  fontSize: "0.98rem",
+  fontSize: "0.85rem",
   color: "#203148"
 };
 
 const panelSubtitleStyle: CSSProperties = {
-  margin: "4px 0 0",
+  margin: "2px 0 0",
   color: "#61738c",
-  fontSize: "0.85rem"
+  fontSize: "0.72rem"
 };
 
 const readoutRowStyle: CSSProperties = {
   display: "flex",
-  gap: 16,
+  gap: 10,
   flexWrap: "wrap"
 };
 

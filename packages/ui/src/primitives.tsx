@@ -43,19 +43,19 @@ const badgeStyle: CSSProperties = {
 
 const metricStyle: CSSProperties = {
   display: "grid",
-  gap: 4,
-  minWidth: 120
+  gap: 2,
+  minWidth: 80
 };
 
 const metricLabelStyle: CSSProperties = {
-  fontSize: "0.73rem",
+  fontSize: "0.62rem",
   textTransform: "uppercase",
   letterSpacing: "0.08em",
   color: "#6a7d96"
 };
 
 const metricValueStyle: CSSProperties = {
-  fontSize: "0.96rem",
+  fontSize: "0.78rem",
   fontWeight: 600,
   color: "#203148"
 };
