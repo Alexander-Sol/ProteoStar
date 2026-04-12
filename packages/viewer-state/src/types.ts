@@ -48,6 +48,17 @@ export interface ViewerStoreState extends ViewerState {
   dispatch(command: ViewerCommand): void;
 }
 
+export interface ViewerStore {
+  getState(): ViewerStoreState;
+  setState(
+    partial:
+      | Partial<ViewerStoreState>
+      | ((state: ViewerStoreState) => Partial<ViewerStoreState>),
+    replace?: boolean
+  ): void;
+  subscribe(listener: () => void): () => void;
+}
+
 export type ViewerCommand =
   | { type: "dataset/load-started" }
   | { type: "dataset/load-succeeded"; dataset: ViewerDataset }

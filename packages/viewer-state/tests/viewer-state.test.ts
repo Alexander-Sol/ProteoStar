@@ -32,7 +32,7 @@ describe("viewer state reducer", () => {
       },
       selectedScanIndex: null,
       ticPanel: { pinned: false, range: null },
-      spectrumPanel: { pinned: false, range: null }
+      spectrumPanel: { pinned: true, range: null }
     });
   });
 
@@ -52,7 +52,7 @@ describe("viewer state reducer", () => {
     });
     expect(readyState.selectedScanIndex).toBeNull();
     expect(readyState.ticPanel).toEqual({ pinned: false, range: null });
-    expect(readyState.spectrumPanel).toEqual({ pinned: false, range: null });
+    expect(readyState.spectrumPanel).toEqual({ pinned: true, range: null });
   });
 
   it("selects the nearest scan without mutating panel view state", () => {
@@ -71,7 +71,7 @@ describe("viewer state reducer", () => {
 
     expect(nextState.selectedScanIndex).toBe(1);
     expect(nextState.ticPanel).toEqual({ pinned: true, range: null });
-    expect(nextState.spectrumPanel).toEqual({ pinned: false, range: null });
+    expect(nextState.spectrumPanel).toEqual({ pinned: true, range: null });
   });
 
   it("only zooms a pinned TIC panel", () => {
@@ -112,12 +112,7 @@ describe("viewer state reducer", () => {
       dataset
     });
 
-    const pinnedState = reduceViewerState(readyState, {
-      type: "panel/toggle-pinned",
-      panelId: "spectrum"
-    });
-
-    const zoomedState = reduceViewerState(pinnedState, {
+    const zoomedState = reduceViewerState(readyState, {
       type: "panel/zoom",
       panelId: "spectrum",
       range: { min: 1000.9, max: 750.56 }

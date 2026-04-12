@@ -11,17 +11,19 @@ This file tracks active work, near-term priorities, decisions, and progress note
 - Dataset query API implemented above the raw parser with fixture-backed tests
 - Viewer-state reducer and Zustand store implemented with semantic commands and interaction tests
 - Initial web UI implemented with local file loading and Plotly-backed TIC/spectrum panels
+- App workflow hardened with integration tests and refined TIC/spectrum behavior
+- Worker-backed dataset provider added behind the stable UI-facing dataset interface
+- TIC rendering updated to lines-only, the spectrum panel now defaults to a pinned `200-1200` m/z view, and the viewer shell was tightened so plots occupy more of the page
+- Large-file smoke coverage now exercises `.imsp` files from `LargeFiles/`
 - `.imsp` format documented and fixtures created
 - Git repository initialized with LFS for large files
 - Root workspace, packages, and initial web app wired together
 
 ## Current Priorities
 
-1. Scaffold the Bun workspace and package structure.
-2. Implement and test the `.imsp` parser in `imsp-core`.
-3. Build the dataset query API for TIC and per-scan spectrum retrieval.
-4. Create viewer state for selection, pinning, and zoom behavior.
-5. Build the initial web UI with Plotly-backed TIC and spectrum panels.
+1. Profile the worker-backed path against realistic medium and large files.
+2. Continue polishing viewer UX and deployment readiness.
+3. Expand realistic fixture and smoke-test coverage where it adds confidence.
 
 ## Decisions Log
 
@@ -61,6 +63,12 @@ This file tracks active work, near-term priorities, decisions, and progress note
 - Added viewer-state tests covering initialization, nearest-scan selection, pin-gated zoom behavior, panel reset isolation, and store dispatch.
 - Completed task `005` by wiring the Next.js app to local `.imsp` file loading, `imsp-core` dataset queries, `viewer-state` semantic commands, and Plotly-backed TIC and spectrum panels through the plot adapter.
 - Added shared UI primitives for panel layout, file open controls, status banners, and readouts, and updated the plot adapter to emit semantic plot events while keeping Plotly client-only in the web app.
+- Added app-level integration tests for local file load, initial spectrum rendering, pin-gated TIC zoom, and spectrum reset on new TIC selection.
+- Refined the viewer workflow to auto-select the first scan after load, clear stale hover state on reload, and reset the spectrum viewport when a new TIC scan is selected.
+- Completed task `007` by adding a browser worker entry point, worker RPC messages, and a worker-backed dataset provider with fallback to direct local parsing when `Worker` is unavailable.
+- Applied the latest requested UI refinements: the TIC now renders as lines without point markers, the mass spectrum panel starts pinned, and its default viewport is `200-1200` m/z.
+- Tightened the viewer shell and panel layout to reduce whitespace, shrink the title block, and make both plots occupy more of the page with a clearer outline.
+- Added smoke coverage for the real datasets under `LargeFiles/` to verify they parse and produce TIC traces.
 
 ## Risks To Track
 
@@ -71,4 +79,4 @@ This file tracks active work, near-term priorities, decisions, and progress note
 
 ## Next Checkpoint
 
-The next meaningful checkpoint is hardening the UI workflow with integration tests, improved empty/loading/error handling, and refinement of spectrum and TIC interaction details.
+The next meaningful checkpoint is profiling medium and large fixtures under the worker-backed path and tightening deployment and UX details for a dependable first release.

@@ -307,8 +307,8 @@ export function parseImsp(buffer: ArrayBuffer): ImspFile {
 
   for (const bin of bins) {
     for (let peakIndex = bin.peakOffset; peakIndex < bin.peakOffset + bin.peakCount; peakIndex += 1) {
-      const peak = readPeak(peakIndex);
-      if (Math.round(peak.mz * header.binsPerDalton) !== bin.binIndex) {
+      const mzTenThousandths = view.getUint32(peakArrayStart + peakIndex * PEAK_BYTES, true);
+      if (!binMatchesMz(bin.binIndex, mzTenThousandths, header.binsPerDalton)) {
         throw new ImspParseError(
           "PEAK_BIN_MISMATCH",
           `Peak ${peakIndex} does not belong to bin ${bin.binIndex}`
@@ -397,6 +397,31 @@ function multiplyChecked(left: number, right: number): number {
   }
 
   return result;
+}
+
+function binMatchesMz(
+  binIndex: number,
+  mzTenThousandths: number,
+  binsPerDalton: number
+): boolean {
+  const unitsPerBin = 10000 / binsPerDalton;
+
+  if (!Number.isInteger(unitsPerBin)) {
+    return Math.round((mzTenThousandths / 10000) * binsPerDalton) === binIndex;
+  }
+
+  const lowerBin = Math.floor(mzTenThousandths / unitsPerBin);
+  const remainder = mzTenThousandths % unitsPerBin;
+
+  if (remainder * 2 < unitsPerBin) {
+    return binIndex === lowerBin;
+  }
+
+  if (remainder * 2 > unitsPerBin) {
+    return binIndex === lowerBin + 1;
+  }
+
+  return binIndex === lowerBin || binIndex === lowerBin + 1;
 }
 
 export function createImspDatasetProvider(buffer: ArrayBuffer): DatasetProvider {

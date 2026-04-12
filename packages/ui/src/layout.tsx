@@ -84,9 +84,9 @@ export function PanelActionButton({
 
 const shellStyle: CSSProperties = {
   minHeight: "100vh",
-  padding: "24px clamp(16px, 3vw, 32px) 32px",
+  padding: "16px clamp(12px, 2vw, 24px) 20px",
   display: "grid",
-  gap: 20
+  gap: 12
 };
 
 const headerStyle: CSSProperties = {
@@ -107,17 +107,17 @@ const eyebrowStyle: CSSProperties = {
 };
 
 const titleStyle: CSSProperties = {
-  margin: "8px 0 0",
-  fontSize: "clamp(1.9rem, 4vw, 2.8rem)",
-  lineHeight: 1.08,
+  margin: "4px 0 0",
+  fontSize: "clamp(1.5rem, 3vw, 2.1rem)",
+  lineHeight: 1.05,
   color: "#13253d"
 };
 
 const subtitleStyle: CSSProperties = {
-  margin: "12px 0 0",
-  fontSize: "1rem",
-  lineHeight: 1.6,
-  maxWidth: 680,
+  margin: "8px 0 0",
+  fontSize: "0.92rem",
+  lineHeight: 1.45,
+  maxWidth: 560,
   color: "#506279"
 };
 
@@ -130,29 +130,29 @@ const toolbarStyle: CSSProperties = {
 
 const contentStyle: CSSProperties = {
   display: "grid",
-  gap: 16
+  gap: 12
 };
 
 const panelStyle: CSSProperties = {
   display: "grid",
-  gridTemplateRows: "auto minmax(320px, 1fr)",
+  gridTemplateRows: "auto minmax(380px, 1fr)",
   backgroundColor: "rgba(255,255,255,0.94)",
-  border: "1px solid #d7e0ec",
-  borderRadius: 24,
+  border: "2px solid #d2ddea",
+  borderRadius: 18,
   overflow: "hidden",
-  boxShadow: "0 16px 36px rgba(22, 32, 51, 0.07)"
+  boxShadow: "0 10px 28px rgba(22, 32, 51, 0.05)"
 };
 
 const panelBodyStyle: CSSProperties = {
-  minHeight: 320,
-  padding: 8
+  minHeight: 380,
+  padding: 4
 };
 
 const panelHeaderStyle: CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   gap: 16,
-  padding: "18px 20px 14px",
+  padding: "12px 16px 10px",
   borderBottom: "1px solid #e2e9f3",
   alignItems: "flex-start",
   flexWrap: "wrap"
@@ -160,19 +160,19 @@ const panelHeaderStyle: CSSProperties = {
 
 const panelTitleWrapStyle: CSSProperties = {
   display: "grid",
-  gap: 10
+  gap: 8
 };
 
 const panelTitleStyle: CSSProperties = {
   margin: 0,
-  fontSize: "1.05rem",
+  fontSize: "0.98rem",
   color: "#203148"
 };
 
 const panelSubtitleStyle: CSSProperties = {
   margin: "4px 0 0",
   color: "#61738c",
-  fontSize: "0.92rem"
+  fontSize: "0.85rem"
 };
 
 const readoutRowStyle: CSSProperties = {

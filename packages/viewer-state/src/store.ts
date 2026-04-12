@@ -2,9 +2,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 import { reduceViewerState } from "./reducer";
 import { createInitialViewerState } from "./state";
-import type { ViewerCommand, ViewerStoreState } from "./types";
-
-export type ViewerStore = StoreApi<ViewerStoreState>;
+import type { ViewerCommand, ViewerStore, ViewerStoreState } from "./types";
 
 export function createViewerStore(): ViewerStore {
   return createStore<ViewerStoreState>()((set) => ({
@@ -12,5 +10,5 @@ export function createViewerStore(): ViewerStore {
     dispatch(command: ViewerCommand) {
       set((state) => reduceViewerState(state, command));
     }
-  }));
+  })) as StoreApi<ViewerStoreState> as ViewerStore;
 }

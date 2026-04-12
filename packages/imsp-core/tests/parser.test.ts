@@ -63,6 +63,13 @@ describe("parseImsp", () => {
     ]);
   });
 
+  it("parses medium-real.imsp without boundary-bin false positives", () => {
+    const imsp = parseImsp(loadFixture("medium-real.imsp"));
+
+    expect(imsp.header.scanCount).toBeGreaterThan(0);
+    expect(imsp.header.totalPeakCount).toBeGreaterThan(1000);
+  });
+
   it("fails cleanly for truncated input", () => {
     const bytes = new Uint8Array(loadFixture("tiny-known.imsp")).slice(0, 251);
 

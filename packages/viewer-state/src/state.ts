@@ -1,7 +1,12 @@
 import type { PanelState, ViewerState } from "./types";
 
-const DEFAULT_PANEL_STATE: PanelState = {
+const DEFAULT_TIC_PANEL_STATE: PanelState = {
   pinned: false,
+  range: null
+};
+
+const DEFAULT_SPECTRUM_PANEL_STATE: PanelState = {
+  pinned: true,
   range: null
 };
 
@@ -14,7 +19,7 @@ export function createInitialViewerState(): ViewerState {
       errorMessage: null
     },
     selectedScanIndex: null,
-    ticPanel: { ...DEFAULT_PANEL_STATE },
-    spectrumPanel: { ...DEFAULT_PANEL_STATE }
+    ticPanel: { ...DEFAULT_TIC_PANEL_STATE },
+    spectrumPanel: { ...DEFAULT_SPECTRUM_PANEL_STATE }
   };
 }

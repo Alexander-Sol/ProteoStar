@@ -12,11 +12,14 @@
     "typecheck": "./node_modules/.bin/tsc -p packages/imsp-core/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/viewer-state/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/plot-adapter/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p apps/web/tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.4.0",
     "@types/plotly.js": "^3.0.7",
     "@types/react-plotly.js": "^2.6.3",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
+    "jsdom": "^26.1.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

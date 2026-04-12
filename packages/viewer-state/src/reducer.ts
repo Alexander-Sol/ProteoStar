@@ -22,8 +22,8 @@ export function reduceViewerState(
           errorMessage: null
         },
         selectedScanIndex: null,
-        ticPanel: resetPanelState(state.ticPanel),
-        spectrumPanel: resetPanelState(state.spectrumPanel)
+        ticPanel: createDefaultPanelState("tic"),
+        spectrumPanel: createDefaultPanelState("spectrum")
       };
 
     case "dataset/load-succeeded":
@@ -35,8 +35,8 @@ export function reduceViewerState(
           errorMessage: null
         },
         selectedScanIndex: null,
-        ticPanel: { pinned: false, range: null },
-        spectrumPanel: { pinned: false, range: null }
+        ticPanel: createDefaultPanelState("tic"),
+        spectrumPanel: createDefaultPanelState("spectrum")
       };
 
     case "dataset/load-failed":
@@ -48,8 +48,8 @@ export function reduceViewerState(
           errorMessage: command.errorMessage
         },
         selectedScanIndex: null,
-        ticPanel: resetPanelState(state.ticPanel),
-        spectrumPanel: resetPanelState(state.spectrumPanel)
+        ticPanel: createDefaultPanelState("tic"),
+        spectrumPanel: createDefaultPanelState("spectrum")
       };
 
     case "selection/set-scan":
@@ -183,10 +183,8 @@ function normalizeRange(range: NumericRange): NumericRange {
       };
 }
 
-function resetPanelState(panel: PanelState): PanelState {
-  return {
-    ...panel,
-    pinned: false,
-    range: null
-  };
+function createDefaultPanelState(panelId: PanelId): PanelState {
+  return panelId === "spectrum"
+    ? { pinned: true, range: null }
+    : { pinned: false, range: null };
 }

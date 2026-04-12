@@ -1,14 +1,9 @@
 "use client";
 
 import {
-  createImspDatasetProvider,
-  type DatasetProvider,
-  type ScanSummary,
   type Spectrum,
-  type TicPoint
 } from "@msbrowser/imsp-core";
 import {
-  type PlotViewport,
   type SpectrumPlotPeak,
   type TicPlotPoint
 } from "@msbrowser/plot-adapter";
@@ -24,25 +19,26 @@ import {
 } from "@msbrowser/ui";
 import {
   createViewerStore,
-  type NumericRange,
-  type ViewerDataset
+  type ViewerStore
 } from "@msbrowser/viewer-state";
-import { useEffect, useMemo, useState, useSyncExternalStore, startTransition } from "react";
+import React, { useEffect, useState, useSyncExternalStore, startTransition } from "react";
 
+import {
+  type LoadedDataset,
+  formatNumber,
+  formatRange,
+  loadViewerDataset,
+  toSpectrumPlotPeaks,
+  toTicPlotPoints,
+  toViewport
+} from "./viewer-controller";
 import { ClientSpectrumPlot, ClientTicPlot } from "./viewer-plots";
 
-const viewerStore = createViewerStore();
-
-interface LoadedDataset {
-  fileName: string;
-  provider: DatasetProvider;
-  metadata: Awaited<ReturnType<DatasetProvider["getMetadata"]>>;
-  scanSummaries: readonly ScanSummary[];
-  ticTrace: readonly TicPoint[];
-}
+const DEFAULT_SPECTRUM_RANGE = { min: 200, max: 1200 };
 
 export function ViewerPage() {
-  const viewerState = useViewerState();
+  const [viewerStore] = useState<ViewerStore>(() => createViewerStore());
+  const viewerState = useViewerState(viewerStore);
   const [loadedDataset, setLoadedDataset] = useState<LoadedDataset | null>(null);
   const [selectedSpectrum, setSelectedSpectrum] = useState<Spectrum | null>(null);
   const [hoveredTicPoint, setHoveredTicPoint] = useState<TicPlotPoint | null>(null);
@@ -50,7 +46,8 @@ export function ViewerPage() {
     useState<SpectrumPlotPeak | null>(null);
 
   const ticViewport = toViewport(viewerState.ticPanel.range);
-  const spectrumViewport = toViewport(viewerState.spectrumPanel.range);
+  const spectrumRange = viewerState.spectrumPanel.range ?? DEFAULT_SPECTRUM_RANGE;
+  const spectrumViewport = toViewport(spectrumRange);
 
   const selectedScanSummary =
     loadedDataset && viewerState.selectedScanIndex !== null
@@ -76,28 +73,26 @@ export function ViewerPage() {
     };
   }, [loadedDataset, viewerState.selectedScanIndex]);
 
-  const ticPoints = useMemo<readonly TicPlotPoint[]>(() => {
-    return (loadedDataset?.ticTrace ?? []).map((point) => ({
-      scanIndex: point.scanIndex,
-      retentionTime: point.retentionTime,
-      intensity: point.tic
-    }));
+  useEffect(() => {
+    return () => {
+      loadedDataset?.dispose?.();
+    };
   }, [loadedDataset]);
 
-  const spectrumPeaks = useMemo<readonly SpectrumPlotPeak[]>(() => {
-    return (selectedSpectrum?.peaks ?? []).map((peak) => ({
-      mz: peak.mz,
-      intensity: peak.intensity
-    }));
-  }, [selectedSpectrum]);
+  const ticPoints = toTicPlotPoints(loadedDataset?.ticTrace ?? []);
+  const spectrumPeaks = toSpectrumPlotPeaks(selectedSpectrum);
 
   return (
     <ViewerShell
-      title="Interactive IMSP Viewer"
-      subtitle="Open a local `.imsp` file, inspect the TIC in the top panel, and click a scan to reconstruct its spectrum in the lower panel."
+      title="IMSP Viewer"
+      subtitle="Open a local `.imsp` file to inspect the TIC and the selected scan spectrum."
       toolbar={
         <>
-          <FileOpenButton onSelect={(file) => void handleFileOpen(file, setLoadedDataset)} />
+          <FileOpenButton
+            onSelect={(file) =>
+              void handleFileOpen(file, viewerStore, setLoadedDataset, setHoveredTicPoint, setHoveredSpectrumPeak)
+            }
+          />
           <WorkspaceBadge
             label={loadedDataset ? loadedDataset.fileName : viewerState.dataset.status}
           />
@@ -120,7 +115,7 @@ export function ViewerPage() {
         header={
           <PanelHeader
             title="Total Ion Chromatogram"
-            subtitle="Click a point to select the nearest scan. Pin the panel to enable drag-to-zoom on retention time."
+            subtitle="Click to select a scan. Pin to drag-zoom retention time."
             readouts={
               <>
                 <MetricReadout
@@ -169,6 +164,8 @@ export function ViewerPage() {
                   type: "selection/select-nearest-scan",
                   retentionTime: event.point.retentionTime
                 });
+                viewerStore.getState().dispatch({ type: "panel/reset", panelId: "spectrum" });
+                setHoveredSpectrumPeak(null);
                 return;
               }
 
@@ -199,7 +196,7 @@ export function ViewerPage() {
         header={
           <PanelHeader
             title="Mass Spectrum"
-            subtitle="The selected scan is reconstructed on demand from the IMSP dataset. Pin the panel to enable drag-to-zoom on m/z."
+            subtitle="The selected scan is reconstructed on demand. Pin to drag-zoom m/z."
             readouts={
               <>
                 <MetricReadout
@@ -212,7 +209,7 @@ export function ViewerPage() {
                 />
                 <MetricReadout
                   label="View"
-                  value={formatRange(viewerState.spectrumPanel.range, 4)}
+                  value={formatRange(spectrumRange, 4)}
                 />
               </>
             }
@@ -270,7 +267,7 @@ export function ViewerPage() {
   );
 }
 
-function useViewerState() {
+function useViewerState(viewerStore: ViewerStore) {
   return useSyncExternalStore(
     viewerStore.subscribe,
     viewerStore.getState,
@@ -280,45 +277,27 @@ function useViewerState() {
 
 async function handleFileOpen(
   file: File,
-  setLoadedDataset: (dataset: LoadedDataset | null) => void
+  viewerStore: ViewerStore,
+  setLoadedDataset: (dataset: LoadedDataset | null) => void,
+  setHoveredTicPoint: (point: TicPlotPoint | null) => void,
+  setHoveredSpectrumPeak: (peak: SpectrumPlotPeak | null) => void
 ): Promise<void> {
   viewerStore.getState().dispatch({ type: "dataset/load-started" });
+  setHoveredTicPoint(null);
+  setHoveredSpectrumPeak(null);
 
   try {
-    const buffer = await file.arrayBuffer();
-    const provider = createImspDatasetProvider(buffer);
-    const [metadata, scanSummaries, ticTrace] = await Promise.all([
-      provider.getMetadata(),
-      provider.getScanSummaries(),
-      provider.getTicTrace()
-    ]);
-
-    const viewerDataset: ViewerDataset = {
-      metadata: {
-        retentionTimeRange: metadata.retentionTimeRange,
-        mzRange: metadata.mzRange,
-        scanCount: metadata.scanCount
-      },
-      scanSummaries: scanSummaries.map((scan) => ({
-        scanIndex: scan.scanIndex,
-        oneBasedScanNumber: scan.oneBasedScanNumber,
-        retentionTime: scan.retentionTime,
-        tic: scan.tic
-      }))
-    };
+    const { loadedDataset, viewerDataset } = await loadViewerDataset(file);
 
     startTransition(() => {
-      setLoadedDataset({
-        fileName: file.name,
-        provider,
-        metadata,
-        scanSummaries,
-        ticTrace
-      });
+      setLoadedDataset(loadedDataset);
       viewerStore.getState().dispatch({
         type: "dataset/load-succeeded",
         dataset: viewerDataset
       });
+      if (viewerDataset.scanSummaries.length > 0) {
+        viewerStore.getState().dispatch({ type: "selection/set-scan", scanIndex: 0 });
+      }
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to open IMSP file";
@@ -329,35 +308,4 @@ async function handleFileOpen(
         .dispatch({ type: "dataset/load-failed", errorMessage: message });
     });
   }
-}
-
-function toViewport(range: NumericRange | null): PlotViewport {
-  return {
-    xMin: range?.min ?? null,
-    xMax: range?.max ?? null
-  };
-}
-
-function formatNumber(
-  value: number | undefined,
-  decimals: number,
-  suffix?: string
-): string {
-  if (value === undefined) {
-    return "-";
-  }
-
-  return `${value.toFixed(decimals)}${suffix ? ` ${suffix}` : ""}`;
-}
-
-function formatRange(
-  range: NumericRange | null,
-  decimals: number,
-  suffix?: string
-): string {
-  if (!range) {
-    return "Full range";
-  }
-
-  return `${formatNumber(range.min, decimals, suffix)} to ${formatNumber(range.max, decimals, suffix)}`;
 }

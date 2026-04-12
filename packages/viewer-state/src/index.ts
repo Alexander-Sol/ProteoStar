@@ -12,6 +12,7 @@ export type {
   ViewerDataset,
   ViewerDatasetMetadata,
   ViewerScanSummary,
+  ViewerStore,
   ViewerState,
   ViewerStoreState
 } from "./types";

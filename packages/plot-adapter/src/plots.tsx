@@ -26,17 +26,11 @@ export function TicPlot(props: TicPlotProps): ReactElement {
   const data: PlotData[] = [
     {
       type: "scattergl",
-      mode: "lines+markers",
+      mode: "lines",
       x: points.map((point) => point.retentionTime),
       y: points.map((point) => point.intensity),
       customdata: points.map((point) => ({ ...point })) as unknown as PlotData["customdata"],
       line: { color: "#2b6cb0", width: 2 },
-      marker: {
-        color: points.map((point) =>
-          point.scanIndex === selectedScanIndex ? "#d9485f" : "#2b6cb0"
-        ),
-        size: points.map((point) => (point.scanIndex === selectedScanIndex ? 8 : 6))
-      },
       hovertemplate: "RT %{x:.3f} min<br>TIC %{y:.0f}<extra></extra>"
     } as unknown as PlotData
   ];

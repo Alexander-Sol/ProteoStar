@@ -1,0 +1,15 @@
+Notes on MsBrowser
+
+UI issues
+ For the TIC plot, each scan is show as a dot on a connected line plot. There shouldn't be any points. It should just show the lines. 
+ 
+ For the spectrum plot, we need a default scan range. We shouldn't start completely zoomed in on the x-axis. Make the default 200 - 1200.
+ 
+ There is too much text and whitespacee around the plots. They should take up most of the page. There should be a clear outline around each plot.
+ 
+ The header/title should be smaller. 
+ 
+ On start-up, the mass spectrum plot should be pinned.
+ 
+ Testing
+ Begin using the files in the LargeFiles folder for testing to ensure they can be read in
