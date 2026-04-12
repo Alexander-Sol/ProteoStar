@@ -64,7 +64,7 @@ Use this section for fast m/z-range queries without scanning the full peak array
 
 | Relative offset | Bytes | Type    | Field       | Description                                          |
 |----------------:|------:|---------|-------------|------------------------------------------------------|
-|               0 |     4 | int32   | BinIndex    | `round(representativeMz × BinsPerDalton)`            |
+|               0 |     4 | uint32  | BinIndex    | `round(representativeMz × BinsPerDalton)`            |
 |               4 |     4 | uint32  | PeakOffset  | 0-based index of the first peak for this bin in §4   |
 |               8 |     4 | uint32  | PeakCount   | Number of peaks belonging to this bin                |
 
@@ -156,7 +156,7 @@ function parseImsp(buffer: ArrayBuffer) {
   for (let i = 0; i < header.nonEmptyBinCount; i++) {
     const off = binDirStart + i * BIN_BYTES;
     bins.push({
-      binIndex:   v.getInt32 (off,     true),
+      binIndex:   v.getUint32(off,     true),
       peakOffset: v.getUint32(off + 4, true),
       peakCount:  v.getUint32(off + 8, true),
     });
@@ -221,7 +221,7 @@ leaving the rest of the peak array untouched.
 - Magic bytes: `IMSP`
 - Canonical file extension: `.imsp`
 - Scan table entries: 16 bytes (uint32 scanNumber + float64 RT + float32 TIC)
-- Bin directory entries: 12 bytes (uint32 binIndex + uint32 peakOffset + uint32 peakCount)
+- Bin directory entries: 12 bytes (uint32 BinIndex + uint32 PeakOffset + uint32 PeakCount)
 - Peak records: 12 bytes (uint32 mzTenThousandths + float32 intensity + uint32 scanIndex)
 - Intensity threshold applied during indexing: peaks below threshold are excluded from both the peak array and the TIC
 - All values little-endian
