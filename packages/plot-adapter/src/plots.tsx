@@ -6,6 +6,7 @@ import Plot from "react-plotly.js";
 
 import type {
   NumericRange,
+  PlotViewport,
   SlotIndex,
   SpectrumPlotProps,
   SpectrumPlotTrace,
