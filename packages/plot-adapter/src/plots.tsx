@@ -54,6 +54,7 @@ export function TicPlot(props: TicPlotProps): ReactElement {
     },
     yaxis: {
       title: { text: "TIC" },
+      range: visibleYRange(traces, viewport),
       gridcolor: "#dfe7f2",
       zeroline: false
     },
@@ -236,6 +237,22 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       }}
     />
   );
+}
+
+/** Compute the y-axis range from points visible within the current x viewport. */
+function visibleYRange(
+  traces: readonly TicPlotTrace[],
+  viewport: PlotViewport
+): [number, number] | undefined {
+  const { xMin, xMax } = viewport;
+  const points = traces.flatMap((t) =>
+    xMin !== null && xMax !== null
+      ? t.points.filter((p) => p.retentionTime >= xMin && p.retentionTime <= xMax)
+      : t.points
+  );
+  if (points.length === 0) return undefined;
+  const maxY = Math.max(...points.map((p) => p.intensity));
+  return [0, maxY * 1.05];
 }
 
 function toPlotlyRange(viewport: { xMin: number | null; xMax: number | null }):
