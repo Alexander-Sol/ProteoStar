@@ -244,11 +244,16 @@ export function ViewerPage() {
           <ClientTicPlot
             onEvent={(event) => {
               if (event.type === "point-click") {
-                const slotIndex = event.slotIndex as SlotIndex;
-                viewerStore.getState().dispatch({
-                  type: "selection/select-nearest-scan",
-                  slotIndex,
-                  retentionTime: event.point.retentionTime
+                const { retentionTime } = event.point;
+                const currentState = viewerStore.getState();
+                (([0, 1]) as SlotIndex[]).forEach((slotIndex) => {
+                  if (currentState.datasetSlots[slotIndex].load.status === "ready") {
+                    viewerStore.getState().dispatch({
+                      type: "selection/select-nearest-scan",
+                      slotIndex,
+                      retentionTime
+                    });
+                  }
                 });
                 if (!viewerStore.getState().spectrumPanel.pinned) {
                   viewerStore.getState().dispatch({ type: "panel/reset", panelId: "spectrum" });
