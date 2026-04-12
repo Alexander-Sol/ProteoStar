@@ -2,7 +2,7 @@
 
 ## Overview
 
-An `.ind` file contains all MS1 peaks from a single mass-spec run, organised into
+An `.imsp` file contains all MS1 peaks from a single mass-spec run, organised into
 a sparse m/z bin index.  The binning strategy is identical to that used by the
 FlashLFQ `PeakIndexingEngine`: every peak is placed in a bin whose index is
 
