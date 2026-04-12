@@ -104,6 +104,11 @@ export function ViewerPage() {
     return () => { loadedDatasets[1]?.dispose?.(); };
   }, [loadedDatasets[1]]);
 
+  // Auto-load pre-bundled datasets on first mount.
+  useEffect(() => {
+    void loadPreloadedDatasets(viewerStore, setLoadedDatasets, setHoveredTicPoint, setHoveredSpectrumPeak);
+  }, []); // stable refs — intentional empty deps
+
   // Build TIC traces — one per loaded dataset.
   const ticTraces: TicPlotTrace[] = [];
   if (loadedDatasets[0]) {
@@ -368,6 +373,31 @@ function useViewerState(viewerStore: ViewerStore) {
     viewerStore.subscribe,
     viewerStore.getState,
     viewerStore.getState
+  );
+}
+
+async function loadPreloadedDatasets(
+  viewerStore: ViewerStore,
+  setLoadedDatasets: React.Dispatch<React.SetStateAction<DatasetPair>>,
+  setHoveredTicPoint: (point: TicPlotPoint | null) => void,
+  setHoveredSpectrumPeak: (peak: null) => void
+): Promise<void> {
+  const preloaded: Array<{ url: string; name: string; slotIndex: SlotIndex }> = [
+    { url: "/datasets/real.imsp", name: "real.imsp", slotIndex: 0 },
+    { url: "/datasets/simulated.imsp", name: "simulated.imsp", slotIndex: 1 }
+  ];
+  await Promise.all(
+    preloaded.map(async ({ url, name, slotIndex }) => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const buffer = await res.arrayBuffer();
+        const file = new File([buffer], name);
+        await handleFileOpen(file, slotIndex, viewerStore, setLoadedDatasets, setHoveredTicPoint, setHoveredSpectrumPeak);
+      } catch {
+        // pre-load failed; user can open files manually
+      }
+    })
   );
 }
 
