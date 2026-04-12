@@ -8,6 +8,7 @@ import type {
   NumericRange,
   SlotIndex,
   SpectrumPlotProps,
+  SpectrumPlotTrace,
   TicPlotPoint,
   TicPlotProps,
   TicPlotTrace
@@ -195,6 +196,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     },
     yaxis: {
       title: { text: "Intensity" },
+      range: visibleSpectrumYRange(traces, viewport),
       gridcolor: "#dfe7f2",
       zeroline: false
     },
@@ -252,6 +254,22 @@ function visibleYRange(
   );
   if (points.length === 0) return undefined;
   const maxY = Math.max(...points.map((p) => p.intensity));
+  return [0, maxY * 1.05];
+}
+
+/** Compute the y-axis range from peaks visible within the current x viewport. */
+function visibleSpectrumYRange(
+  traces: readonly SpectrumPlotTrace[],
+  viewport: PlotViewport
+): [number, number] | undefined {
+  const { xMin, xMax } = viewport;
+  const peaks = traces.flatMap((t) =>
+    xMin !== null && xMax !== null
+      ? t.peaks.filter((p) => p.mz >= xMin && p.mz <= xMax)
+      : t.peaks
+  );
+  if (peaks.length === 0) return undefined;
+  const maxY = Math.max(...peaks.map((p) => p.intensity));
   return [0, maxY * 1.05];
 }
 
