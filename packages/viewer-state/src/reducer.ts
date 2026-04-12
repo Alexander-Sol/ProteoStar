@@ -1,8 +1,10 @@
 import { ViewerStateError } from "./errors";
 import type {
+  DatasetSlotState,
   NumericRange,
   PanelId,
   PanelState,
+  SlotIndex,
   ViewerCommand,
   ViewerScanSummary,
   ViewerState
@@ -13,72 +15,74 @@ export function reduceViewerState(
   command: ViewerCommand
 ): ViewerState {
   switch (command.type) {
-    case "dataset/load-started":
-      return {
-        ...state,
-        dataset: {
-          status: "loading",
-          dataset: null,
-          errorMessage: null
-        },
-        selectedScanIndex: null,
-        ticPanel: createDefaultPanelState("tic"),
-        spectrumPanel: createDefaultPanelState("spectrum")
+    case "dataset/load-started": {
+      const { slotIndex } = command;
+      const otherIndex: SlotIndex = slotIndex === 0 ? 1 : 0;
+      const shouldResetPanels =
+        slotIndex === 0 && state.datasetSlots[otherIndex].load.status === "idle";
+      const newSlot: DatasetSlotState = {
+        load: { status: "loading", dataset: null, errorMessage: null },
+        selectedScanIndex: null
       };
-
-    case "dataset/load-succeeded":
-      return {
-        ...state,
-        dataset: {
-          status: "ready",
-          dataset: command.dataset,
-          errorMessage: null
-        },
-        selectedScanIndex: null,
-        ticPanel: createDefaultPanelState("tic"),
-        spectrumPanel: createDefaultPanelState("spectrum")
-      };
-
-    case "dataset/load-failed":
-      return {
-        ...state,
-        dataset: {
-          status: "error",
-          dataset: null,
-          errorMessage: command.errorMessage
-        },
-        selectedScanIndex: null,
-        ticPanel: createDefaultPanelState("tic"),
-        spectrumPanel: createDefaultPanelState("spectrum")
-      };
-
-    case "selection/set-scan":
-      if (command.scanIndex === null) {
-        return {
-          ...state,
-          selectedScanIndex: null
+      let next = updateSlot(state, slotIndex, newSlot);
+      if (shouldResetPanels) {
+        next = {
+          ...next,
+          ticPanel: createDefaultPanelState("tic"),
+          spectrumPanel: createDefaultPanelState("spectrum")
         };
       }
+      return next;
+    }
 
-      assertDatasetReady(state);
-      assertScanIndexExists(state, command.scanIndex);
+    case "dataset/load-succeeded": {
+      const { slotIndex, dataset } = command;
+      return updateSlot(state, slotIndex, {
+        load: { status: "ready", dataset, errorMessage: null },
+        selectedScanIndex: null
+      });
+    }
 
-      return {
-        ...state,
+    case "dataset/load-failed": {
+      const { slotIndex, errorMessage } = command;
+      return updateSlot(state, slotIndex, {
+        load: { status: "error", dataset: null, errorMessage },
+        selectedScanIndex: null
+      });
+    }
+
+    case "selection/set-scan": {
+      const { slotIndex } = command;
+      if (command.scanIndex === null) {
+        return updateSlot(state, slotIndex, {
+          ...getSlot(state, slotIndex),
+          selectedScanIndex: null
+        });
+      }
+
+      const slot = getSlot(state, slotIndex);
+      assertSlotDatasetReady(slot);
+      assertScanIndexExists(slot, command.scanIndex);
+
+      return updateSlot(state, slotIndex, {
+        ...slot,
         selectedScanIndex: command.scanIndex
-      };
+      });
+    }
 
     case "selection/select-nearest-scan": {
-      assertDatasetReady(state);
+      const { slotIndex } = command;
+      const slot = getSlot(state, slotIndex);
+      assertSlotDatasetReady(slot);
       const nearestScan = findNearestScan(
-        state.dataset.dataset.scanSummaries,
+        slot.load.dataset.scanSummaries,
         command.retentionTime
       );
 
-      return {
-        ...state,
+      return updateSlot(state, slotIndex, {
+        ...slot,
         selectedScanIndex: nearestScan?.scanIndex ?? null
-      };
+      });
     }
 
     case "panel/set-active":
@@ -131,6 +135,47 @@ export function reduceViewerState(
   }
 }
 
+// --- Slot helpers ---
+
+function getSlot(state: ViewerState, slotIndex: SlotIndex): DatasetSlotState {
+  return state.datasetSlots[slotIndex];
+}
+
+function updateSlot(
+  state: ViewerState,
+  slotIndex: SlotIndex,
+  slot: DatasetSlotState
+): ViewerState {
+  const slots: [DatasetSlotState, DatasetSlotState] = [
+    state.datasetSlots[0],
+    state.datasetSlots[1]
+  ];
+  slots[slotIndex] = slot;
+  return { ...state, datasetSlots: slots };
+}
+
+// --- Panel helpers ---
+
+function getPanel(state: ViewerState, panelId: PanelId): PanelState {
+  return panelId === "tic" ? state.ticPanel : state.spectrumPanel;
+}
+
+function getOtherPanelId(panelId: PanelId): PanelId {
+  return panelId === "tic" ? "spectrum" : "tic";
+}
+
+function updatePanel(
+  state: ViewerState,
+  panelId: PanelId,
+  panelState: PanelState
+): ViewerState {
+  return panelId === "tic"
+    ? { ...state, ticPanel: panelState }
+    : { ...state, spectrumPanel: panelState };
+}
+
+// --- Scan helpers ---
+
 function findNearestScan(
   scanSummaries: readonly ViewerScanSummary[],
   retentionTime: number
@@ -149,10 +194,12 @@ function findNearestScan(
   return nearestScan;
 }
 
-function assertDatasetReady(state: ViewerState): asserts state is ViewerState & {
-  dataset: { status: "ready"; dataset: NonNullable<ViewerState["dataset"]["dataset"]> };
+function assertSlotDatasetReady(
+  slot: DatasetSlotState
+): asserts slot is DatasetSlotState & {
+  load: { status: "ready"; dataset: NonNullable<DatasetSlotState["load"]["dataset"]> };
 } {
-  if (state.dataset.status !== "ready" || !state.dataset.dataset) {
+  if (slot.load.status !== "ready" || !slot.load.dataset) {
     throw new ViewerStateError(
       "DATASET_NOT_READY",
       "A loaded dataset is required for this viewer command"
@@ -160,32 +207,14 @@ function assertDatasetReady(state: ViewerState): asserts state is ViewerState & 
   }
 }
 
-function assertScanIndexExists(state: ViewerState, scanIndex: number): void {
-  const scan = state.dataset.dataset?.scanSummaries[scanIndex];
+function assertScanIndexExists(slot: DatasetSlotState, scanIndex: number): void {
+  const scan = slot.load.dataset?.scanSummaries[scanIndex];
   if (!scan) {
     throw new ViewerStateError(
       "SCAN_INDEX_OUT_OF_RANGE",
       `Scan index ${scanIndex} is outside the valid range`
     );
   }
-}
-
-function getPanel(state: ViewerState, panelId: PanelId): PanelState {
-  return panelId === "tic" ? state.ticPanel : state.spectrumPanel;
-}
-
-function getOtherPanelId(panelId: PanelId): PanelId {
-  return panelId === "tic" ? "spectrum" : "tic";
-}
-
-function updatePanel(
-  state: ViewerState,
-  panelId: PanelId,
-  panelState: PanelState
-): ViewerState {
-  return panelId === "tic"
-    ? { ...state, ticPanel: panelState }
-    : { ...state, spectrumPanel: panelState };
 }
 
 function normalizeRange(range: NumericRange): NumericRange {

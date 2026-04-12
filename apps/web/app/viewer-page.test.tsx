@@ -8,15 +8,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@msbrowser/plot-adapter", () => ({}));
 
 vi.mock("./viewer-plots", () => ({
-  ClientTicPlot: ({ onEvent, selectedScanIndex, rangeSelectionEnabled, viewport, points }: any) => (
+  ClientTicPlot: ({ onEvent, traces, rangeSelectionEnabled, viewport }: any) => (
     <div>
-      <div data-testid="tic-selected">{selectedScanIndex ?? "none"}</div>
+      <div data-testid="tic-selected-0">{traces[0]?.selectedScanIndex ?? "none"}</div>
       <div data-testid="tic-range-enabled">{String(rangeSelectionEnabled)}</div>
       <div data-testid="tic-viewport">
         {viewport.xMin ?? "null"}:{viewport.xMax ?? "null"}
       </div>
       <button
-        onClick={() => onEvent({ type: "point-click", point: points[2] })}
+        onClick={() =>
+          onEvent({ type: "point-click", slotIndex: 0, point: traces[0]?.points[2] })
+        }
         type="button"
       >
         Select Third TIC Point
@@ -29,9 +31,9 @@ vi.mock("./viewer-plots", () => ({
       </button>
     </div>
   ),
-  ClientSpectrumPlot: ({ onEvent, peaks, rangeSelectionEnabled, viewport }: any) => (
+  ClientSpectrumPlot: ({ onEvent, traces, rangeSelectionEnabled, viewport }: any) => (
     <div>
-      <div data-testid="spectrum-peak-count">{peaks.length}</div>
+      <div data-testid="spectrum-peak-count">{traces[0]?.peaks?.length ?? 0}</div>
       <div data-testid="spectrum-range-enabled">{String(rangeSelectionEnabled)}</div>
       <div data-testid="spectrum-viewport">
         {viewport.xMin ?? "null"}:{viewport.xMax ?? "null"}
@@ -66,7 +68,7 @@ describe("ViewerPage", () => {
     expect(await screen.findByText("1.000 min")).toBeTruthy();
     expect(screen.getByText("1")).toBeTruthy();
     expect((await screen.findByTestId("spectrum-peak-count")).textContent).toBe("3");
-    expect(screen.getByTestId("tic-selected").textContent).toBe("0");
+    expect(screen.getByTestId("tic-selected-0").textContent).toBe("0");
     expect(screen.getByTestId("spectrum-range-enabled").textContent).toBe("true");
     expect(screen.getByTestId("spectrum-viewport").textContent).toBe("200:1200");
     expect(screen.getByText("200.0000 to 1200.0000")).toBeTruthy();
@@ -76,7 +78,7 @@ describe("ViewerPage", () => {
     render(<ViewerPage />);
 
     await uploadFixture("tiny-known.imsp");
-    await screen.findByTestId("tic-selected");
+    await screen.findByTestId("tic-selected-0");
     await screen.findByTestId("spectrum-peak-count");
 
     fireEvent.click(screen.getByRole("button", { name: "Zoom Spectrum Range" }));
@@ -88,7 +90,7 @@ describe("ViewerPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select Third TIC Point" }));
 
     await waitFor(() => {
-      expect(screen.getByTestId("tic-selected").textContent).toBe("2");
+      expect(screen.getByTestId("tic-selected-0").textContent).toBe("2");
       expect(screen.getByText("3.000 min")).toBeTruthy();
       expect(screen.getAllByText("Full range").length).toBeGreaterThan(0);
     });
@@ -98,7 +100,7 @@ describe("ViewerPage", () => {
     render(<ViewerPage />);
 
     await uploadFixture("tiny-known.imsp");
-    await screen.findByTestId("tic-selected");
+    await screen.findByTestId("tic-selected-0");
 
     fireEvent.click(screen.getByRole("button", { name: "Zoom TIC Range" }));
     expect(screen.getAllByText("Full range").length).toBeGreaterThan(0);

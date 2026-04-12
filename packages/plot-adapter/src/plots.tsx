@@ -6,9 +6,11 @@ import Plot from "react-plotly.js";
 
 import type {
   NumericRange,
+  SlotIndex,
   SpectrumPlotProps,
   TicPlotPoint,
-  TicPlotProps
+  TicPlotProps,
+  TicPlotTrace
 } from "./types";
 
 interface PlotPointEvent {
@@ -21,19 +23,14 @@ interface PlotSelectionEvent {
   };
 }
 
+type TicCustomData = TicPlotPoint & { slotIndex: SlotIndex };
+
 export function TicPlot(props: TicPlotProps): ReactElement {
-  const { points, selectedScanIndex, viewport, rangeSelectionEnabled, onEvent } = props;
-  const data: PlotData[] = [
-    {
-      type: "scattergl",
-      mode: "lines",
-      x: points.map((point) => point.retentionTime),
-      y: points.map((point) => point.intensity),
-      customdata: points.map((point) => ({ ...point })) as unknown as PlotData["customdata"],
-      line: { color: "#2b6cb0", width: 2 },
-      hovertemplate: "RT %{x:.3f} min<br>TIC %{y:.0f}<extra></extra>"
-    } as unknown as PlotData
-  ];
+  const { traces, viewport, rangeSelectionEnabled, onEvent } = props;
+
+  const data: PlotData[] = traces.flatMap((trace) =>
+    buildTicTraceData(trace)
+  );
 
   const layout: Partial<Layout> = {
     autosize: true,
@@ -75,13 +72,15 @@ export function TicPlot(props: TicPlotProps): ReactElement {
       style={{ width: "100%", height: "100%" }}
       useResizeHandler
       onClick={(event: PlotPointEvent) => {
-        const point = readCustomData<TicPlotPoint>(event?.points?.[0]?.customdata);
-        if (point) {
-          onEvent({ type: "point-click", point });
+        const raw = readCustomData<TicCustomData>(event?.points?.[0]?.customdata);
+        if (raw) {
+          const { slotIndex, ...point } = raw;
+          onEvent({ type: "point-click", slotIndex, point });
         }
       }}
       onHover={(event: PlotPointEvent) => {
-        const point = readCustomData<TicPlotPoint>(event?.points?.[0]?.customdata);
+        const raw = readCustomData<TicCustomData>(event?.points?.[0]?.customdata);
+        const point = raw ? (({ slotIndex: _s, ...p }) => p)(raw) as TicPlotPoint : null;
         onEvent({ type: "point-hover", point });
       }}
       onUnhover={() => {
@@ -97,18 +96,34 @@ export function TicPlot(props: TicPlotProps): ReactElement {
   );
 }
 
+function buildTicTraceData(trace: TicPlotTrace): PlotData[] {
+  const lineTrace = {
+    type: "scattergl",
+    mode: "lines",
+    x: trace.points.map((p) => p.retentionTime),
+    y: trace.points.map((p) => p.intensity),
+    customdata: trace.points.map((p) => ({
+      ...p,
+      slotIndex: trace.slotIndex
+    })) as unknown as PlotData["customdata"],
+    line: { color: trace.color, width: 2 },
+    hovertemplate: "RT %{x:.3f} min<br>TIC %{y:.0f}<extra></extra>"
+  } as unknown as PlotData;
+
+  return [lineTrace];
+}
+
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
-  const { peaks, viewport, rangeSelectionEnabled, onEvent } = props;
-  const data: PlotData[] = [
-    {
-      type: "bar",
-      x: peaks.map((peak) => peak.mz),
-      y: peaks.map((peak) => peak.intensity),
-      customdata: peaks.map((peak) => ({ ...peak })) as unknown as PlotData["customdata"],
-      marker: { color: "#4c51bf" },
-      hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
-    } as unknown as PlotData
-  ];
+  const { traces, viewport, rangeSelectionEnabled, onEvent } = props;
+
+  const data: PlotData[] = traces.map((trace) => ({
+    type: "bar",
+    x: trace.peaks.map((p) => p.mz),
+    y: trace.peaks.map((p) => p.intensity),
+    customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
+    marker: { color: trace.color },
+    hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
+  } as unknown as PlotData));
 
   const layout: Partial<Layout> = {
     autosize: true,
@@ -129,7 +144,8 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       zeroline: false
     },
     showlegend: false,
-    hovermode: "closest"
+    hovermode: "closest",
+    barmode: "overlay"
   };
 
   return (
@@ -150,7 +166,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       style={{ width: "100%", height: "100%" }}
       useResizeHandler
       onHover={(event: PlotPointEvent) => {
-        const peak = readCustomData<SpectrumPlotProps["peaks"][number]>(
+        const peak = readCustomData<SpectrumPlotProps["traces"][number]["peaks"][number]>(
           event?.points?.[0]?.customdata
         );
         onEvent({ type: "point-hover", peak: peak ?? null });

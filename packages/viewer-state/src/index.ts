@@ -4,10 +4,12 @@ export { createInitialViewerState } from "./state";
 export { createViewerStore } from "./store";
 export type {
   DatasetLoadState,
+  DatasetSlotState,
   DatasetStatus,
   NumericRange,
   PanelId,
   PanelState,
+  SlotIndex,
   ViewerCommand,
   ViewerDataset,
   ViewerDatasetMetadata,

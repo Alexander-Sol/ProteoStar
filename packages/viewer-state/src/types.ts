@@ -1,4 +1,5 @@
 export type PanelId = "tic" | "spectrum";
+export type SlotIndex = 0 | 1;
 
 export interface NumericRange {
   min: number;
@@ -31,6 +32,11 @@ export interface DatasetLoadState {
   errorMessage: string | null;
 }
 
+export interface DatasetSlotState {
+  load: DatasetLoadState;
+  selectedScanIndex: number | null;
+}
+
 export interface PanelState {
   pinned: boolean;
   range: NumericRange | null;
@@ -38,8 +44,7 @@ export interface PanelState {
 
 export interface ViewerState {
   activePanel: PanelId;
-  dataset: DatasetLoadState;
-  selectedScanIndex: number | null;
+  datasetSlots: [DatasetSlotState, DatasetSlotState];
   ticPanel: PanelState;
   spectrumPanel: PanelState;
 }
@@ -60,11 +65,11 @@ export interface ViewerStore {
 }
 
 export type ViewerCommand =
-  | { type: "dataset/load-started" }
-  | { type: "dataset/load-succeeded"; dataset: ViewerDataset }
-  | { type: "dataset/load-failed"; errorMessage: string }
-  | { type: "selection/set-scan"; scanIndex: number | null }
-  | { type: "selection/select-nearest-scan"; retentionTime: number }
+  | { type: "dataset/load-started"; slotIndex: SlotIndex }
+  | { type: "dataset/load-succeeded"; slotIndex: SlotIndex; dataset: ViewerDataset }
+  | { type: "dataset/load-failed"; slotIndex: SlotIndex; errorMessage: string }
+  | { type: "selection/set-scan"; slotIndex: SlotIndex; scanIndex: number | null }
+  | { type: "selection/select-nearest-scan"; slotIndex: SlotIndex; retentionTime: number }
   | { type: "panel/set-active"; panelId: PanelId }
   | { type: "panel/set-pinned"; panelId: PanelId; pinned: boolean }
   | { type: "panel/toggle-pinned"; panelId: PanelId }

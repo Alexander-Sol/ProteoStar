@@ -5,10 +5,13 @@ export { createDefaultViewport } from "./viewport";
 export type {
   NumericRange,
   PlotViewport,
+  SlotIndex,
   SpectrumPlotEvent,
   SpectrumPlotPeak,
   SpectrumPlotProps,
+  SpectrumPlotTrace,
   TicPlotEvent,
   TicPlotPoint,
-  TicPlotProps
+  TicPlotProps,
+  TicPlotTrace
 } from "./types";

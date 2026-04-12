@@ -1,3 +1,5 @@
+export type SlotIndex = 0 | 1;
+
 export interface PlotViewport {
   xMin: number | null;
   xMax: number | null;
@@ -19,8 +21,21 @@ export interface SpectrumPlotPeak {
   intensity: number;
 }
 
+export interface TicPlotTrace {
+  slotIndex: SlotIndex;
+  points: readonly TicPlotPoint[];
+  selectedScanIndex: number | null;
+  color: string;
+}
+
+export interface SpectrumPlotTrace {
+  slotIndex: SlotIndex;
+  peaks: readonly SpectrumPlotPeak[];
+  color: string;
+}
+
 export type TicPlotEvent =
-  | { type: "point-click"; point: TicPlotPoint }
+  | { type: "point-click"; slotIndex: SlotIndex; point: TicPlotPoint }
   | { type: "point-hover"; point: TicPlotPoint | null }
   | { type: "range-select"; range: NumericRange };
 
@@ -29,15 +44,14 @@ export type SpectrumPlotEvent =
   | { type: "range-select"; range: NumericRange };
 
 export interface TicPlotProps {
-  points: readonly TicPlotPoint[];
+  traces: readonly TicPlotTrace[];
   viewport: PlotViewport;
-  selectedScanIndex: number | null;
   rangeSelectionEnabled: boolean;
   onEvent(event: TicPlotEvent): void;
 }
 
 export interface SpectrumPlotProps {
-  peaks: readonly SpectrumPlotPeak[];
+  traces: readonly SpectrumPlotTrace[];
   viewport: PlotViewport;
   rangeSelectionEnabled: boolean;
   onEvent(event: SpectrumPlotEvent): void;
