@@ -1,13 +1,17 @@
-export type PanelId = "tic" | "spectrum";
-
-export interface ViewerState {
-  activePanel: PanelId;
-  pinnedPanel: PanelId | null;
-}
-
-export function createInitialViewerState(): ViewerState {
-  return {
-    activePanel: "tic",
-    pinnedPanel: null
-  };
-}
+export { ViewerStateError } from "./errors";
+export { reduceViewerState } from "./reducer";
+export { createInitialViewerState } from "./state";
+export { createViewerStore } from "./store";
+export type {
+  DatasetLoadState,
+  DatasetStatus,
+  NumericRange,
+  PanelId,
+  PanelState,
+  ViewerCommand,
+  ViewerDataset,
+  ViewerDatasetMetadata,
+  ViewerScanSummary,
+  ViewerState,
+  ViewerStoreState
+} from "./types";

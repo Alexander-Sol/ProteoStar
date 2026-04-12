@@ -33,6 +33,55 @@ export interface ImspPeak {
   scanIndex: number;
 }
 
+export interface NumericRange {
+  min: number;
+  max: number;
+}
+
+export interface DatasetMetadata {
+  version: number;
+  binsPerDalton: number;
+  scanCount: number;
+  nonEmptyBinCount: number;
+  totalPeakCount: number;
+  retentionTimeRange: NumericRange | null;
+  mzRange: NumericRange | null;
+}
+
+export interface ScanSummary {
+  scanIndex: number;
+  oneBasedScanNumber: number;
+  retentionTime: number;
+  tic: number;
+}
+
+export interface SpectrumPeak {
+  mz: number;
+  intensity: number;
+}
+
+export interface Spectrum {
+  scanIndex: number;
+  oneBasedScanNumber: number;
+  retentionTime: number;
+  peaks: readonly SpectrumPeak[];
+}
+
+export interface TicPoint {
+  scanIndex: number;
+  retentionTime: number;
+  tic: number;
+}
+
+export interface DatasetProvider {
+  getMetadata(): Promise<DatasetMetadata>;
+  getScanSummaries(): Promise<readonly ScanSummary[]>;
+  getNearestScan(retentionTime: number): Promise<ScanSummary | null>;
+  getSpectrumForScan(scanIndex: number): Promise<Spectrum>;
+  getPeaksInMzRange(mzMin: number, mzMax: number): Promise<readonly ImspPeak[]>;
+  getTicTrace(rtRange?: NumericRange): Promise<readonly TicPoint[]>;
+}
+
 export type ImspParseErrorCode =
   | "BUFFER_TOO_SMALL"
   | "INVALID_MAGIC"
@@ -48,7 +97,8 @@ export type ImspParseErrorCode =
   | "INVALID_PEAK_SCAN_INDEX"
   | "PEAK_BIN_MISMATCH"
   | "PEAK_INDEX_OUT_OF_RANGE"
-  | "BIN_NOT_FOUND";
+  | "BIN_NOT_FOUND"
+  | "SCAN_INDEX_OUT_OF_RANGE";
 
 export class ImspParseError extends Error {
   constructor(
@@ -347,4 +397,131 @@ function multiplyChecked(left: number, right: number): number {
   }
 
   return result;
+}
+
+export function createImspDatasetProvider(buffer: ArrayBuffer): DatasetProvider {
+  return createDatasetProviderFromImsp(parseImsp(buffer));
+}
+
+export function createDatasetProviderFromImsp(imsp: ImspFile): DatasetProvider {
+  const scanSummaries = imsp.scans.map<ScanSummary>((scan, scanIndex) => ({
+    scanIndex,
+    oneBasedScanNumber: scan.oneBasedScanNumber,
+    retentionTime: scan.retentionTime,
+    tic: scan.tic
+  }));
+
+  const ticTrace = scanSummaries.map<TicPoint>((scan) => ({
+    scanIndex: scan.scanIndex,
+    retentionTime: scan.retentionTime,
+    tic: scan.tic
+  }));
+
+  const peakIndexesByScan = Array.from({ length: imsp.header.scanCount }, () => [] as number[]);
+  let mzMin = Number.POSITIVE_INFINITY;
+  let mzMax = Number.NEGATIVE_INFINITY;
+
+  for (let peakIndex = 0; peakIndex < imsp.header.totalPeakCount; peakIndex += 1) {
+    const peak = imsp.readPeak(peakIndex);
+    peakIndexesByScan[peak.scanIndex]?.push(peakIndex);
+    mzMin = Math.min(mzMin, peak.mz);
+    mzMax = Math.max(mzMax, peak.mz);
+  }
+
+  const metadata: DatasetMetadata = {
+    version: imsp.header.version,
+    binsPerDalton: imsp.header.binsPerDalton,
+    scanCount: imsp.header.scanCount,
+    nonEmptyBinCount: imsp.header.nonEmptyBinCount,
+    totalPeakCount: imsp.header.totalPeakCount,
+    retentionTimeRange:
+      scanSummaries.length > 0
+        ? {
+            min: scanSummaries[0].retentionTime,
+            max: scanSummaries[scanSummaries.length - 1].retentionTime
+          }
+        : null,
+    mzRange:
+      Number.isFinite(mzMin) && Number.isFinite(mzMax)
+        ? {
+            min: mzMin,
+            max: mzMax
+          }
+        : null
+  };
+
+  const spectrumCache = new Map<number, Spectrum>();
+
+  return {
+    async getMetadata(): Promise<DatasetMetadata> {
+      return metadata;
+    },
+    async getScanSummaries(): Promise<readonly ScanSummary[]> {
+      return scanSummaries;
+    },
+    async getNearestScan(retentionTime: number): Promise<ScanSummary | null> {
+      if (scanSummaries.length === 0) {
+        return null;
+      }
+
+      let nearestScan = scanSummaries[0] ?? null;
+      let smallestDistance = nearestScan
+        ? Math.abs(nearestScan.retentionTime - retentionTime)
+        : Number.POSITIVE_INFINITY;
+
+      for (const scan of scanSummaries) {
+        const distance = Math.abs(scan.retentionTime - retentionTime);
+        if (distance < smallestDistance) {
+          nearestScan = scan;
+          smallestDistance = distance;
+        }
+      }
+
+      return nearestScan;
+    },
+    async getSpectrumForScan(scanIndex: number): Promise<Spectrum> {
+      const cachedSpectrum = spectrumCache.get(scanIndex);
+      if (cachedSpectrum) {
+        return cachedSpectrum;
+      }
+
+      const scan = scanSummaries[scanIndex];
+      if (!scan) {
+        throw new ImspParseError(
+          "SCAN_INDEX_OUT_OF_RANGE",
+          `Scan index ${scanIndex} is outside the valid range`
+        );
+      }
+
+      const spectrum: Spectrum = {
+        scanIndex,
+        oneBasedScanNumber: scan.oneBasedScanNumber,
+        retentionTime: scan.retentionTime,
+        peaks: (peakIndexesByScan[scanIndex] ?? []).map((peakIndex) => {
+          const peak = imsp.readPeak(peakIndex);
+          return {
+            mz: peak.mz,
+            intensity: peak.intensity
+          };
+        })
+      };
+
+      spectrumCache.set(scanIndex, spectrum);
+      return spectrum;
+    },
+    async getPeaksInMzRange(mzMinQuery: number, mzMaxQuery: number): Promise<readonly ImspPeak[]> {
+      return imsp.peaksInMzRange(mzMinQuery, mzMaxQuery);
+    },
+    async getTicTrace(rtRange?: NumericRange): Promise<readonly TicPoint[]> {
+      if (!rtRange) {
+        return ticTrace;
+      }
+
+      const lower = Math.min(rtRange.min, rtRange.max);
+      const upper = Math.max(rtRange.min, rtRange.max);
+      return ticTrace.filter(
+        (point) => point.retentionTime >= lower && point.retentionTime <= upper
+      );
+    }
+  };
 }

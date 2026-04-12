@@ -1,13 +1,14 @@
 export const PLOT_ADAPTER_NAME = "plot-adapter";
 
-export interface PlotViewport {
-  xMin: number | null;
-  xMax: number | null;
-}
-
-export function createDefaultViewport(): PlotViewport {
-  return {
-    xMin: null,
-    xMax: null
-  };
-}
+export { TicPlot, SpectrumPlot } from "./plots";
+export { createDefaultViewport } from "./viewport";
+export type {
+  NumericRange,
+  PlotViewport,
+  SpectrumPlotEvent,
+  SpectrumPlotPeak,
+  SpectrumPlotProps,
+  TicPlotEvent,
+  TicPlotPoint,
+  TicPlotProps
+} from "./types";

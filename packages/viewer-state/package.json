@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "zustand": "^5.0.8"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
