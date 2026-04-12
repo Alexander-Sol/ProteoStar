@@ -17,7 +17,7 @@ vi.mock("./viewer-plots", () => ({
       </div>
       <button
         onClick={() =>
-          onEvent({ type: "point-click", slotIndex: 0, point: traces[0]?.points[2] })
+          onEvent({ type: "area-click", retentionTime: traces[0]?.points[2]?.retentionTime ?? 3 })
         }
         type="button"
       >

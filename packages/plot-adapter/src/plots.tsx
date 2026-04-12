@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactElement } from "react";
+import { useRef, type ReactElement } from "react";
 import type { Layout, PlotData } from "plotly.js";
 import Plot from "react-plotly.js";
 
@@ -25,16 +25,23 @@ interface PlotSelectionEvent {
 
 type TicCustomData = TicPlotPoint & { slotIndex: SlotIndex };
 
+// Margins must match the layout margin values below.
+const TIC_MARGIN = { l: 56, r: 18, t: 20, b: 44 };
+// A mousedown–mouseup that moves more than this (px) is a drag, not a click.
+const DRAG_THRESHOLD_PX = 4;
+
 export function TicPlot(props: TicPlotProps): ReactElement {
   const { traces, viewport, rangeSelectionEnabled, onEvent } = props;
 
-  const data: PlotData[] = traces.flatMap((trace) =>
-    buildTicTraceData(trace)
-  );
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mousedownPos = useRef<{ x: number; y: number } | null>(null);
+  const wasDrag = useRef(false);
+
+  const data: PlotData[] = traces.flatMap((trace) => buildTicTraceData(trace));
 
   const layout: Partial<Layout> = {
     autosize: true,
-    margin: { l: 56, r: 18, t: 20, b: 44 },
+    margin: TIC_MARGIN,
     dragmode: rangeSelectionEnabled ? "select" : "pan",
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "#ffffff",
@@ -54,45 +61,91 @@ export function TicPlot(props: TicPlotProps): ReactElement {
     hovermode: "closest"
   };
 
+  // Compute the effective x range so we can convert pixel → RT.
+  // When viewport is unset Plotly auto-ranges to the data extents.
+  function effectiveXRange(): { min: number; max: number } | null {
+    if (viewport.xMin !== null && viewport.xMax !== null) {
+      return { min: viewport.xMin, max: viewport.xMax };
+    }
+    const rts = traces.flatMap((t) => t.points.map((p) => p.retentionTime));
+    if (rts.length === 0) return null;
+    return { min: Math.min(...rts), max: Math.max(...rts) };
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    mousedownPos.current = { x: e.clientX, y: e.clientY };
+    wasDrag.current = false;
+  }
+
+  function handleMouseMove(e: React.MouseEvent) {
+    if (!mousedownPos.current) return;
+    const dx = Math.abs(e.clientX - mousedownPos.current.x);
+    const dy = Math.abs(e.clientY - mousedownPos.current.y);
+    if (dx > DRAG_THRESHOLD_PX || dy > DRAG_THRESHOLD_PX) {
+      wasDrag.current = true;
+    }
+  }
+
+  function handleClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (wasDrag.current) return;
+    if (!containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const plotLeft = TIC_MARGIN.l;
+    const plotRight = rect.width - TIC_MARGIN.r;
+    const x = e.clientX - rect.left;
+
+    // Ignore clicks in the axis / margin areas.
+    if (x < plotLeft || x > plotRight) return;
+
+    const range = effectiveXRange();
+    if (!range) return;
+
+    const fraction = (x - plotLeft) / (plotRight - plotLeft);
+    const retentionTime = range.min + fraction * (range.max - range.min);
+    onEvent({ type: "area-click", retentionTime });
+  }
+
   return (
-    <Plot
-      data={data}
-      layout={layout}
-      config={{
-        responsive: true,
-        displaylogo: false,
-        modeBarButtonsToRemove: [
-          "lasso2d",
-          "zoomIn2d",
-          "zoomOut2d",
-          "autoScale2d",
-          "toggleSpikelines"
-        ]
-      }}
+    <div
+      ref={containerRef}
       style={{ width: "100%", height: "100%" }}
-      useResizeHandler
-      onClick={(event: PlotPointEvent) => {
-        const raw = readCustomData<TicCustomData>(event?.points?.[0]?.customdata);
-        if (raw) {
-          const { slotIndex, ...point } = raw;
-          onEvent({ type: "point-click", slotIndex, point });
-        }
-      }}
-      onHover={(event: PlotPointEvent) => {
-        const raw = readCustomData<TicCustomData>(event?.points?.[0]?.customdata);
-        const point = raw ? (({ slotIndex: _s, ...p }) => p)(raw) as TicPlotPoint : null;
-        onEvent({ type: "point-hover", point });
-      }}
-      onUnhover={() => {
-        onEvent({ type: "point-hover", point: null });
-      }}
-      onSelected={(event: PlotSelectionEvent) => {
-        const range = readRange(event?.range?.x);
-        if (range) {
-          onEvent({ type: "range-select", range });
-        }
-      }}
-    />
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onClick={handleClick}
+    >
+      <Plot
+        data={data}
+        layout={layout}
+        config={{
+          responsive: true,
+          displaylogo: false,
+          modeBarButtonsToRemove: [
+            "lasso2d",
+            "zoomIn2d",
+            "zoomOut2d",
+            "autoScale2d",
+            "toggleSpikelines"
+          ]
+        }}
+        style={{ width: "100%", height: "100%" }}
+        useResizeHandler
+        onHover={(event: PlotPointEvent) => {
+          const raw = readCustomData<TicCustomData>(event?.points?.[0]?.customdata);
+          const point = raw ? (({ slotIndex: _s, ...p }) => p)(raw) as TicPlotPoint : null;
+          onEvent({ type: "point-hover", point });
+        }}
+        onUnhover={() => {
+          onEvent({ type: "point-hover", point: null });
+        }}
+        onSelected={(event: PlotSelectionEvent) => {
+          const range = readRange(event?.range?.x);
+          if (range) {
+            onEvent({ type: "range-select", range });
+          }
+        }}
+      />
+    </div>
   );
 }
 

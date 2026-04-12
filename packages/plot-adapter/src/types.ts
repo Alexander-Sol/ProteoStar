@@ -35,7 +35,7 @@ export interface SpectrumPlotTrace {
 }
 
 export type TicPlotEvent =
-  | { type: "point-click"; slotIndex: SlotIndex; point: TicPlotPoint }
+  | { type: "area-click"; retentionTime: number }
   | { type: "point-hover"; point: TicPlotPoint | null }
   | { type: "range-select"; range: NumericRange };
 

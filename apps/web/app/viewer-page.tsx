@@ -243,8 +243,8 @@ export function ViewerPage() {
         {ticTraces.length > 0 ? (
           <ClientTicPlot
             onEvent={(event) => {
-              if (event.type === "point-click") {
-                const { retentionTime } = event.point;
+              if (event.type === "area-click") {
+                const { retentionTime } = event;
                 const currentState = viewerStore.getState();
                 (([0, 1]) as SlotIndex[]).forEach((slotIndex) => {
                   if (currentState.datasetSlots[slotIndex].load.status === "ready") {
