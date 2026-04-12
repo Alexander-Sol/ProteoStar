@@ -175,6 +175,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     y: trace.peaks.map((p) => p.intensity),
     customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
     marker: { color: trace.color },
+    width: 0.001,
     hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
   } as unknown as PlotData));
 
