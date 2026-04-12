@@ -1,4 +1,4 @@
-# IMSP Peak Index File Format (`.ind`)
+# IMSP Peak Index File Format (`.imsp`)
 
 ## Overview
 
@@ -19,7 +19,7 @@ All numeric values are **little-endian**.
 
 ```
 [ Section 1 ] File Header          –  24 bytes  (fixed)
-[ Section 2 ] Scan Table           –  S × 12 bytes
+[ Section 2 ] Scan Table           –  S × 16 bytes
 [ Section 3 ] Bin Directory        –  N × 12 bytes
 [ Section 4 ] Peak Array           –  T × 12 bytes
 ```
@@ -57,7 +57,7 @@ The zero-based position of an entry is the `ScanIndex` referenced in the peak ar
 
 ---
 
-## Section 3 — Bin Directory (offset `24 + S×12`, N × 12 bytes)
+## Section 3 — Bin Directory (offset `24 + S×16`, N × 12 bytes)
 
 One entry per non-empty bin, ordered by ascending `BinIndex`.
 Use this section for fast m/z-range queries without scanning the full peak array.
@@ -145,7 +145,7 @@ function parseImsp(buffer: ArrayBuffer) {
   for (let i = 0; i < header.scanCount; i++) {
     const off = scanTableStart + i * SCAN_BYTES;
     scans.push({
-      oneBasedScanNumber: v.getInt32  (off,      true),
+      oneBasedScanNumber: v.getUint32 (off,      true),
       retentionTime:      v.getFloat64(off +  4, true),
       tic:                v.getFloat32(off + 12, true),
     });
@@ -194,15 +194,38 @@ function parseImsp(buffer: ArrayBuffer) {
 
 ## Visualisation Notes
 
-The natural 2-D view is a TIC (total ion chromatogram) plot of retention time (x-axis) vs. the summed intensity of all peaks in each scan (y-axis).  For a more detailed view, plot retention time vs. m/z, with point color representing intensity. This is referred to as an XIC, or extracted ion chromatogram, plot:
+**TIC chromatogram** — render immediately from the scan table alone, no peak data required:
 
-| Axis  | Source field      | Typical range           |
-|-------|-------------------|-------------------------|
-| X     | `RetentionTime`   | 0 – ~120 min            |
-| Y     | `Mz`              | ~200 – ~2000 Th         |
-| Color | `Intensity`       | log₁₀ scale recommended |
+| Axis | Source field           |
+|------|------------------------|
+| X    | `scans[i].retentionTime` |
+| Y    | `scans[i].tic`           |
 
-For large files, down-sample by binning peaks into a 2-D grid before rendering.
-The bin directory lets you restrict reads to an m/z window without touching the
-rest of the file — combine with a retention-time filter on the returned peaks for
-a sub-region zoom.
+**XIC (Extracted Ion Chromatogram)** — shows the intensity of a specific m/z across retention time.
+Use `peaksInMzRange(mzMin, mzMax)` to retrieve peaks within a narrow m/z window, then plot:
+
+| Axis | Source field                                    |
+|------|-------------------------------------------------|
+| X    | `scans[peak.scanIndex].retentionTime`           |
+| Y    | `peak.intensity`                                |
+
+The bin directory makes m/z-range extraction efficient — only the relevant bins are read,
+leaving the rest of the peak array untouched.
+
+---
+
+## Version Notes
+
+### v1 (2026-04-11)
+- Initial format definition
+- Magic bytes: `IMSP`
+- Canonical file extension: `.imsp`
+- Scan table entries: 16 bytes (uint32 scanNumber + float64 RT + float32 TIC)
+- Bin directory entries: 12 bytes (uint32 binIndex + uint32 peakOffset + uint32 peakCount)
+- Peak records: 12 bytes (uint32 mzTenThousandths + float32 intensity + uint32 scanIndex)
+- Intensity threshold applied during indexing: peaks below threshold are excluded from both the peak array and the TIC
+- All values little-endian
+
+### v1 Clarifications
+- 2026-04-11: Confirmed scan table entry size is 16 bytes (earlier drafts incorrectly stated 12)
+- 2026-04-11: Confirmed `OneBasedScanNumber` is written and read as uint32
