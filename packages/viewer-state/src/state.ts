@@ -1,12 +1,12 @@
 import type { DatasetSlotState, PanelState, ViewerState } from "./types";
 
 const DEFAULT_TIC_PANEL_STATE: PanelState = {
-  pinned: false,
+  pinned: true,
   range: null
 };
 
 const DEFAULT_SPECTRUM_PANEL_STATE: PanelState = {
-  pinned: true,
+  pinned: false,
   range: null
 };
 

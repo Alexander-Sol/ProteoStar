@@ -31,8 +31,8 @@ describe("viewer state reducer", () => {
     expect(createInitialViewerState()).toEqual({
       activePanel: "tic",
       datasetSlots: [idleSlot, idleSlot],
-      ticPanel: { pinned: false, range: null },
-      spectrumPanel: { pinned: true, range: null }
+      ticPanel: { pinned: true, range: null },
+      spectrumPanel: { pinned: false, range: null }
     });
   });
 
@@ -57,17 +57,17 @@ describe("viewer state reducer", () => {
   });
 
   it("resets panels only when slot 0 loads and slot 1 is idle", () => {
-    // Load slot 0 first — should reset panels.
+    // Start with panels at non-default values to verify the reset.
     const afterLoad0 = reduceViewerState(
       {
         ...createInitialViewerState(),
-        ticPanel: { pinned: true, range: { min: 1, max: 2 } },
-        spectrumPanel: { pinned: false, range: { min: 700, max: 900 } }
+        ticPanel: { pinned: false, range: { min: 1, max: 2 } },
+        spectrumPanel: { pinned: true, range: { min: 700, max: 900 } }
       },
       { type: "dataset/load-started", slotIndex: 0 }
     );
-    expect(afterLoad0.ticPanel).toEqual({ pinned: false, range: null });
-    expect(afterLoad0.spectrumPanel).toEqual({ pinned: true, range: null });
+    expect(afterLoad0.ticPanel).toEqual({ pinned: true, range: null });
+    expect(afterLoad0.spectrumPanel).toEqual({ pinned: false, range: null });
 
     // Load slot 1 while slot 0 is already loaded — panels must not change.
     const withSlot0Ready = reduceViewerState(afterLoad0, {
@@ -114,30 +114,26 @@ describe("viewer state reducer", () => {
       dataset
     });
 
-    const ignoredZoomState = reduceViewerState(readyState, {
+    // TIC is pinned by default — zoom applies immediately.
+    const zoomedState = reduceViewerState(readyState, {
       type: "panel/zoom",
       panelId: "tic",
       range: { min: 2.5, max: 1.5 }
     });
+    expect(zoomedState.ticPanel).toEqual({ pinned: true, range: { min: 1.5, max: 2.5 } });
 
-    expect(ignoredZoomState.ticPanel.range).toBeNull();
-
-    const pinnedState = reduceViewerState(readyState, {
+    // Unpin TIC — zoom should now be ignored.
+    const unpinnedState = reduceViewerState(readyState, {
       type: "panel/set-pinned",
       panelId: "tic",
-      pinned: true
+      pinned: false
     });
-
-    const zoomedState = reduceViewerState(pinnedState, {
+    const ignoredZoomState = reduceViewerState(unpinnedState, {
       type: "panel/zoom",
       panelId: "tic",
       range: { min: 2.5, max: 1.5 }
     });
-
-    expect(zoomedState.ticPanel).toEqual({
-      pinned: true,
-      range: { min: 1.5, max: 2.5 }
-    });
+    expect(ignoredZoomState.ticPanel.range).toBeNull();
   });
 
   it("only zooms a pinned spectrum panel", () => {
@@ -147,12 +143,25 @@ describe("viewer state reducer", () => {
       dataset
     });
 
-    const zoomedState = reduceViewerState(readyState, {
+    // Spectrum is not pinned by default — zoom should be ignored.
+    const ignoredZoomState = reduceViewerState(readyState, {
       type: "panel/zoom",
       panelId: "spectrum",
       range: { min: 1000.9, max: 750.56 }
     });
+    expect(ignoredZoomState.spectrumPanel.range).toBeNull();
 
+    // Pin the spectrum panel (unpins TIC due to mutual exclusion) and zoom.
+    const pinnedState = reduceViewerState(readyState, {
+      type: "panel/set-pinned",
+      panelId: "spectrum",
+      pinned: true
+    });
+    const zoomedState = reduceViewerState(pinnedState, {
+      type: "panel/zoom",
+      panelId: "spectrum",
+      range: { min: 1000.9, max: 750.56 }
+    });
     expect(zoomedState.spectrumPanel).toEqual({
       pinned: true,
       range: { min: 750.56, max: 1000.9 }

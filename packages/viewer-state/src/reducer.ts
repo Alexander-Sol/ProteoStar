@@ -227,7 +227,7 @@ function normalizeRange(range: NumericRange): NumericRange {
 }
 
 function createDefaultPanelState(panelId: PanelId): PanelState {
-  return panelId === "spectrum"
+  return panelId === "tic"
     ? { pinned: true, range: null }
     : { pinned: false, range: null };
 }

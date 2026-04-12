@@ -69,48 +69,58 @@ describe("ViewerPage", () => {
     expect(screen.getByText("1")).toBeTruthy();
     expect((await screen.findByTestId("spectrum-peak-count")).textContent).toBe("3");
     expect(screen.getByTestId("tic-selected-0").textContent).toBe("0");
-    expect(screen.getByTestId("spectrum-range-enabled").textContent).toBe("true");
+    // TIC is pinned by default; spectrum is not.
+    expect(screen.getByTestId("tic-range-enabled").textContent).toBe("true");
+    expect(screen.getByTestId("spectrum-range-enabled").textContent).toBe("false");
     expect(screen.getByTestId("spectrum-viewport").textContent).toBe("200:1200");
     expect(screen.getByText("200.0000 to 1200.0000")).toBeTruthy();
   });
 
-  it("resets spectrum zoom when a new TIC scan is selected", async () => {
+  it("applies TIC zoom immediately since TIC is pinned by default", async () => {
+    render(<ViewerPage />);
+
+    await uploadFixture("tiny-known.imsp");
+    await screen.findByTestId("tic-selected-0");
+
+    fireEvent.click(screen.getByRole("button", { name: "Zoom TIC Range" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("1.100 min to 2.200 min")).toBeTruthy();
+    });
+  });
+
+  it("applies spectrum zoom only after the spectrum panel is pinned", async () => {
+    render(<ViewerPage />);
+
+    await uploadFixture("tiny-known.imsp");
+    await screen.findByTestId("tic-selected-0");
+
+    // Spectrum is not pinned — zoom should be ignored.
+    fireEvent.click(screen.getByRole("button", { name: "Zoom Spectrum Range" }));
+    expect(screen.getAllByText("Full range").length).toBeGreaterThan(0);
+
+    // Pin the spectrum panel (second "Pin Zoom" button).
+    const buttons = screen.getAllByRole("button", { name: "Pin Zoom" });
+    fireEvent.click(buttons[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom Spectrum Range" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("700.0000 to 900.0000")).toBeTruthy();
+    });
+  });
+
+  it("selecting a TIC scan updates the selected spectrum", async () => {
     render(<ViewerPage />);
 
     await uploadFixture("tiny-known.imsp");
     await screen.findByTestId("tic-selected-0");
     await screen.findByTestId("spectrum-peak-count");
 
-    fireEvent.click(screen.getByRole("button", { name: "Zoom Spectrum Range" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("700.0000 to 900.0000")).toBeTruthy();
-    });
-
     fireEvent.click(screen.getByRole("button", { name: "Select Third TIC Point" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("tic-selected-0").textContent).toBe("2");
       expect(screen.getByText("3.000 min")).toBeTruthy();
-      expect(screen.getAllByText("Full range").length).toBeGreaterThan(0);
-    });
-  });
-
-  it("only applies TIC zoom after the panel is pinned", async () => {
-    render(<ViewerPage />);
-
-    await uploadFixture("tiny-known.imsp");
-    await screen.findByTestId("tic-selected-0");
-
-    fireEvent.click(screen.getByRole("button", { name: "Zoom TIC Range" }));
-    expect(screen.getAllByText("Full range").length).toBeGreaterThan(0);
-
-    const buttons = screen.getAllByRole("button", { name: "Pin Zoom" });
-    fireEvent.click(buttons[0]);
-    fireEvent.click(screen.getByRole("button", { name: "Zoom TIC Range" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("1.100 min to 2.200 min")).toBeTruthy();
     });
   });
 });
