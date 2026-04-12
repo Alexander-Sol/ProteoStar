@@ -87,18 +87,28 @@ export function reduceViewerState(
         activePanel: command.panelId
       };
 
-    case "panel/set-pinned":
-      return updatePanel(state, command.panelId, {
+    case "panel/set-pinned": {
+      const nextPinned = command.pinned;
+      let next = updatePanel(state, command.panelId, {
         ...getPanel(state, command.panelId),
-        pinned: command.pinned
+        pinned: nextPinned
       });
+      if (nextPinned) {
+        const otherId = getOtherPanelId(command.panelId);
+        next = updatePanel(next, otherId, { ...getPanel(next, otherId), pinned: false });
+      }
+      return next;
+    }
 
     case "panel/toggle-pinned": {
       const panel = getPanel(state, command.panelId);
-      return updatePanel(state, command.panelId, {
-        ...panel,
-        pinned: !panel.pinned
-      });
+      const nextPinned = !panel.pinned;
+      let next = updatePanel(state, command.panelId, { ...panel, pinned: nextPinned });
+      if (nextPinned) {
+        const otherId = getOtherPanelId(command.panelId);
+        next = updatePanel(next, otherId, { ...getPanel(next, otherId), pinned: false });
+      }
+      return next;
     }
 
     case "panel/zoom": {
@@ -162,6 +172,10 @@ function assertScanIndexExists(state: ViewerState, scanIndex: number): void {
 
 function getPanel(state: ViewerState, panelId: PanelId): PanelState {
   return panelId === "tic" ? state.ticPanel : state.spectrumPanel;
+}
+
+function getOtherPanelId(panelId: PanelId): PanelId {
+  return panelId === "tic" ? "spectrum" : "tic";
 }
 
 function updatePanel(

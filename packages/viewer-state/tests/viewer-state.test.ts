@@ -71,7 +71,7 @@ describe("viewer state reducer", () => {
 
     expect(nextState.selectedScanIndex).toBe(1);
     expect(nextState.ticPanel).toEqual({ pinned: true, range: null });
-    expect(nextState.spectrumPanel).toEqual({ pinned: true, range: null });
+    expect(nextState.spectrumPanel).toEqual({ pinned: false, range: null });
   });
 
   it("only zooms a pinned TIC panel", () => {
@@ -158,7 +158,7 @@ describe("viewer state reducer", () => {
     });
 
     expect(nextState.selectedScanIndex).toBe(2);
-    expect(nextState.ticPanel).toEqual({ pinned: true, range: null });
+    expect(nextState.ticPanel).toEqual({ pinned: false, range: null });
     expect(nextState.spectrumPanel).toEqual({
       pinned: true,
       range: { min: 700, max: 900 }
