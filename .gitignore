@@ -1,0 +1,29 @@
+# --- Rust ---
+# (rust/.gitignore also covers target/, .venv/, __pycache__, egg-info, xic plot)
+target/
+**/*.rs.bk
+Cargo.lock
+
+# --- Python (smoke-test venv + maturin artifacts) ---
+.venv/
+**/*.egg-info/
+**/__pycache__/
+**/*.pyc
+**/xic_smoke_plot.png
+
+# --- C# golden generator build output (parity/csharp_golden) ---
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+
+# --- Automation / agent tooling ---
+.ralph-logs/
+.claude/
+.serena/
+.pr_comments/
+AGENTS.md
+
+# --- OS / editor ---
+Thumbs.db
+.DS_Store

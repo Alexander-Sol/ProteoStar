@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    L5/L6 golden generator for the FlashLFQ to Rust port (PLAN.md task P1.17).
+    Runs the REAL FlashLfqEngine (MS2 path, default params) over the corpus
+    (AllPSMs.psmtsv plus the two K562 mzML files) and dumps:
+      * L5_chromatographic_peaks.tsv  : one row per ChromatographicPeak
+      * L6_peptide_intensities.tsv    : one row per (modified sequence, file)
+    into ../golden/. The Rust L5/L6 parity gate diffs against these.
+
+    This project is intentionally NOT part of mzLib.sln so it never affects the
+    normal solution build. It references FlashLFQ.csproj from an EXTERNAL mzLib
+    checkout (this port is a separate project and does not vendor mzLib): the
+    location is $(MZLIB_DIR), defaulting to F:\mzLib. Override with e.g.
+    `$env:MZLIB_DIR = 'D:\src\mzLib'; dotnet run -c Release` (see README).
+    Run: dotnet run -c Release from this directory.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>flashlfq_golden</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Locate the external mzLib checkout. MSBuild surfaces the MZLIB_DIR
+       environment variable as a property; fall back to F:\mzLib if unset. -->
+  <PropertyGroup>
+    <MzLibDir Condition="'$(MzLibDir)' == ''">$(MZLIB_DIR)</MzLibDir>
+    <MzLibDir Condition="'$(MzLibDir)' == ''">F:\mzLib</MzLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(MzLibDir)\mzLib\FlashLFQ\FlashLFQ.csproj" />
+  </ItemGroup>
+
+</Project>

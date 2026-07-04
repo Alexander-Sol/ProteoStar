@@ -1,0 +1,25 @@
+[package]
+name = "flashlfq-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "PyO3 bindings for flashlfq-core (type translation + error mapping only)."
+
+[lib]
+name = "flashlfq_py"
+# cdylib: the Python extension module. rlib so the crate can also be unit-tested.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+flashlfq-core = { path = "../flashlfq-core" }
+# abi3-py39: build against the stable CPython ABI so one wheel covers 3.9+.
+# extension-module: don't link libpython on unix (the wheel pulls it in at load time).
+pyo3 = { workspace = true, features = ["macros", "extension-module", "abi3-py39"] }
+# numpy 0.23 pairs with pyo3 0.23; provides `into_pyarray` (the move/no-copy path).
+numpy = { workspace = true }
+# arrow 54.x `pyarrow` feature pins pyo3 ^0.23 (matches ours); arrow 55+ needs pyo3 0.24+.
+# This feature provides the `IntoPyArrow` handoff over the Arrow C Data Interface.
+arrow = { workspace = true, features = ["pyarrow"] }

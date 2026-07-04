@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock
+# P0.5 smoke-test virtualenv (maturin develop target) and build artifacts
+.venv/
+**/*.egg-info/
+**/__pycache__/
+# P1.19 XIC smoke-test plot output (regenerate via xic_smoke_test.py)
+**/xic_smoke_plot.png

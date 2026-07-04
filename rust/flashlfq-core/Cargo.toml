@@ -1,0 +1,33 @@
+[package]
+name = "flashlfq-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust port of FlashLFQ quantification core (no Python)."
+
+[lib]
+name = "flashlfq_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Spectra reader. Defaults pull in zlib-ng-compat (needs a C/CMake toolchain); we disable
+# defaults and select a pure-Rust zlib backend so the core builds without a C compiler.
+# `thermo` (P2.1) adds Thermo `.raw` reading via the `thermorawfilereader` crate, which hosts a
+# self-contained **.NET 8 runtime** — so a build/run with `.raw` is NOT a pure-Rust wheel and
+# requires a .NET 8 runtime on the machine (mzML stays pure-Rust). `MZReader::open_path` sniffs
+# the format and dispatches to the mzML or Thermo reader transparently.
+mzdata = { version = "0.65", default-features = false, features = ["mzml", "miniz_oxide", "thermo"] }
+# Columnar interchange. Core builds plain Arrow RecordBatches (no `pyarrow` feature here —
+# the Python handoff is the bindings crate's job, see flashlfq-py).
+arrow = { workspace = true }
+# Parquet writer for the peptide-level results table (P1.16). Pinned to the same 54.x line as
+# `arrow` — the two crates version in lockstep (a `parquet` major must match its `arrow` major,
+# they share the same `arrow-*` sub-crates). 54.x keeps us off pyo3 0.24 (see workspace notes).
+parquet = "54"
+# psmtsv parsing (P1.9). The reader rides the `csv` crate with quoting disabled and a tab
+# delimiter to mirror mzLib's plain `line.Split('\t')` (it does its own quote trimming, not
+# RFC-4180 CSV quoting). `serde` derive lets `Identification` serialize for later output.
+csv = "1.3"
+serde = { version = "1", features = ["derive"] }

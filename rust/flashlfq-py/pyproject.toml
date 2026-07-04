@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "flashlfq"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# Build the abi3 wheel from the bindings crate; the Rust module is `flashlfq_py`.
+module-name = "flashlfq_py"
+features = ["pyo3/extension-module"]
