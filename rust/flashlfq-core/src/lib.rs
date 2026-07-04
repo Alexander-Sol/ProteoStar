@@ -9,8 +9,10 @@
 
 pub mod chemical_formula;
 pub mod chromatographic_peak;
+pub mod deconvolution;
 pub mod detection_type;
 pub mod engine;
+pub mod feature_refinement;
 pub mod isotopic_distribution;
 pub mod isotopic_envelope;
 pub mod mbr;
@@ -24,8 +26,10 @@ pub mod periodic_table;
 pub mod psm_tsv;
 pub mod results;
 pub mod special_functions;
+pub mod spectral_averaging;
 pub mod theoretical_isotope_distribution;
 pub mod tolerance;
+pub mod trace_kernel;
 
 use std::path::PathBuf;
 use std::sync::Arc;

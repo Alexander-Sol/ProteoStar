@@ -80,6 +80,14 @@ impl IndexedMassSpectralPeak {
     pub fn m(&self) -> f32 {
         self.mz
     }
+
+    /// The structural identity key used to mark this peak as claimed (see [`PeakKey`]).
+    /// Exposed so callers outside this module (e.g. the trace-kernel detector) can maintain
+    /// their own claim sets with the same identity semantics `get_all_xics` uses internally.
+    #[inline]
+    pub fn key(&self) -> PeakKey {
+        peak_key(self)
+    }
 }
 
 /// Per-scan metadata kept alongside the index. Port of mzLib `MassSpectrometry.ScanInfo`.
@@ -210,6 +218,19 @@ impl PeakIndexingEngine {
     /// Per-scan metadata array, indexed by zero-based scan index.
     pub fn scan_info(&self) -> &[ScanInfo] {
         &self.scan_info
+    }
+
+    /// Every indexed peak, flattened in bin-then-scan order.
+    ///
+    /// The order matches `get_all_xics`' pre-sort traversal (ascending bin, then scan order
+    /// within a bin). Callers that want intensity-descending seeds sort the result themselves.
+    /// Exposed for the trace-kernel detector, which seeds from the full peak set.
+    pub fn all_peaks(&self) -> Vec<IndexedMassSpectralPeak> {
+        self.indexed_peaks
+            .iter()
+            .flatten()
+            .flat_map(|bin| bin.iter().copied())
+            .collect()
     }
 
     /// Finds the peak closest to `m` in scan `zero_based_scan_index` and within `ppm`
