@@ -360,21 +360,19 @@ pub fn resolve_charge_state_consensus(
 /// Whether two refined features should be grouped: co-elution AND off-by-one-aware neutral-mass
 /// agreement.
 ///
-/// Co-elution is satisfied when the apexes are within `rt_tolerance_minutes` **or** the features'
-/// RT ranges overlap (padded by `rt_tolerance_minutes`). The overlap arm is what collapses a single
-/// broad elution that the detector split into several partially-overlapping features (same mass,
-/// apexes >tolerance apart but ranges overlapping) into one resolved feature — while genuinely
-/// distinct same-mass species eluting at separate times keep disjoint ranges and stay separate.
+/// Co-elution requires the two **apexes** to fall within `rt_tolerance_minutes` — the signature of one
+/// peptide seen at two charge states, which co-elute apex-to-apex. An earlier RT-range-*overlap* arm
+/// was removed: since a detected feature spans ~1 min and single-linkage is transitive, overlapping
+/// ranges daisy-chained long runs of features (apex A ≈ apex B's tail ≈ apex C's tail …) into one
+/// component, inflating the resolved RT extent to many minutes (megagroups of 1000+ members). Charge
+/// states of the same peptide share an apex, so apex proximity is the correct, chain-resistant test.
 fn features_link(
     a: &RefinedFeature,
     b: &RefinedFeature,
     mass_tolerance_ppm: f64,
     rt_tolerance_minutes: f64,
 ) -> bool {
-    let apex_close = (a.detected.apex_rt - b.detected.apex_rt).abs() <= rt_tolerance_minutes;
-    let ranges_overlap = a.detected.start_rt - rt_tolerance_minutes <= b.detected.end_rt
-        && b.detected.start_rt - rt_tolerance_minutes <= a.detected.end_rt;
-    if !(apex_close || ranges_overlap) {
+    if (a.detected.apex_rt - b.detected.apex_rt).abs() > rt_tolerance_minutes {
         return false;
     }
     let ma = a.refined_monoisotopic_mass;

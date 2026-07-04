@@ -21,10 +21,12 @@
 //! - **The comb runs both directions** from the seed: the seed is the *most intense* peak, which for
 //!   heavier masses is not the monoisotopic one, so the mono is placed at `seed − i*·spacing/z` where
 //!   `i*` is the most-abundant isotope index of the envelope model.
-//! - **Comb weights: closed-form Poisson is the default.** The peptide isotope envelope is
-//!   `Binomial(n_C, 0.0107) ≈ Poisson(λ)`, `λ ≈ 0.00048·M` — one parameter, no table lookup
-//!   ([`poisson_comb_weights`]). An averagine-table alternative is planned to benchmark against; the
-//!   [`CombWeightModel`] enum is the seam for it.
+//! - **Comb weights: the averagine table is the default.** The comb teeth are weighted by the real
+//!   averagine isotope envelope ([`crate::deconvolution::averagine_comb_weights`], a table lookup),
+//!   which places the monoisotope correctly across the mass range — including near ~1.8 kDa where the
+//!   envelope mode shifts off the monoisotope and a single-parameter Poisson `i*` can be off by one
+//!   ¹³C unit. The closed-form `Poisson(λ = 0.00048·M)` ([`poisson_comb_weights`]) is retained as a
+//!   faster, table-free alternative selectable via [`CombWeightModel`].
 //! - **Evaluate sparsely.** Only the comb's expected `(m/z, scan)` points are looked up in the index;
 //!   nothing is rasterised.
 //!
@@ -55,12 +57,12 @@ pub const FWHM_TO_SIGMA: f64 = 2.354_820_045_030_949;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombWeightModel {
     /// Closed-form `Poisson(λ = 0.00048·M)` over the ¹³C-substitution count. One parameter, no table
-    /// lookup; the fast default.
+    /// lookup; a faster, table-free alternative to [`Self::Averagine`].
     Poisson,
     /// The real averagine isotope envelope
-    /// ([`crate::deconvolution::averagine_comb_weights`]), a table lookup. More accurate than Poisson
-    /// near ~1.8 kDa where the envelope mode shifts off the monoisotope — the regime where a Poisson
-    /// `i*` can misplace the monoisotope by one ¹³C unit (off-by-one).
+    /// ([`crate::deconvolution::averagine_comb_weights`]), a table lookup. **The default.** More
+    /// accurate than Poisson near ~1.8 kDa where the envelope mode shifts off the monoisotope — the
+    /// regime where a Poisson `i*` can misplace the monoisotope by one ¹³C unit (off-by-one).
     Averagine,
 }
 
@@ -106,7 +108,7 @@ pub struct TraceKernelParameters {
 }
 
 impl Default for TraceKernelParameters {
-    /// Bottom-up defaults: charge 1–6, 10 ppm, Poisson weights, ≥2 observed isotopes. The RT σ and
+    /// Bottom-up defaults: charge 1–6, 10 ppm, averagine weights, ≥2 observed isotopes. The RT σ and
     /// window are left at ~6 s / ±3 scans placeholders — callers should set them from the data via
     /// [`TraceKernelParameters::with_rt_from_scans`].
     fn default() -> Self {
@@ -116,7 +118,7 @@ impl Default for TraceKernelParameters {
             ppm_tolerance: 10.0,
             rt_sigma_minutes: 0.1,
             half_window_scans: 3,
-            weight_model: CombWeightModel::Poisson,
+            weight_model: CombWeightModel::Averagine,
             min_isotope_weight: 1e-3,
             max_isotopes: 12,
             min_isotopes_observed: 2,
@@ -223,9 +225,13 @@ fn most_abundant_index(weights: &[f64]) -> usize {
     best
 }
 
-/// Gaussian value `exp(-½ (Δ/σ)²)`.
+/// Gaussian value `exp(-½ (Δ/σ)²)`. A non-positive σ degenerates to a delta function (only the
+/// apex, `Δ == 0`, contributes) rather than dividing by zero and poisoning the response with `NaN`.
 #[inline]
 fn gaussian(delta: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 {
+        return if delta == 0.0 { 1.0 } else { 0.0 };
+    }
     let z = delta / sigma;
     (-0.5 * z * z).exp()
 }
@@ -260,10 +266,46 @@ struct HypothesisScore {
     num_isotopes_observed: usize,
 }
 
+/// The RT window a seed's matched filter evaluates: `(scan_index, gaussian_weight)` for every scan
+/// within `rt_half_window_minutes` of the seed apex. Walks outward from the apex in both directions,
+/// stopping as soon as RT leaves the window — scans are RT-ordered, so this is a bounded walk that
+/// adapts to the local (uneven) MS1 spacing instead of a fixed scan count.
+///
+/// This is **charge-independent**, so `detect_features` computes it once per seed and shares it
+/// across every charge hypothesis (the Gaussian weight likewise depends only on the seed apex).
+fn seed_rt_window(
+    engine: &PeakIndexingEngine,
+    seed: &IndexedMassSpectralPeak,
+    params: &TraceKernelParameters,
+) -> Vec<(i32, f64)> {
+    let scan_info = engine.scan_info();
+    let n_scans = scan_info.len() as i32;
+    let apex = seed.zero_based_scan_index;
+    let rt_apex = seed.retention_time as f64;
+    let rt_win = params.rt_half_window_minutes;
+    let sigma = params.rt_sigma_minutes;
+
+    let mut window: Vec<(i32, f64)> = Vec::new();
+    let mut s = apex;
+    while s >= 0 && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
+        window.push((s, gaussian(scan_info[s as usize].retention_time - rt_apex, sigma)));
+        s -= 1;
+    }
+    let mut s = apex + 1;
+    while s < n_scans && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
+        window.push((s, gaussian(scan_info[s as usize].retention_time - rt_apex, sigma)));
+        s += 1;
+    }
+    window
+}
+
 /// Scores a single charge hypothesis for a seed peak: lays the isotope comb (anchored so the
 /// most-abundant tooth sits on the seed), evaluates the RT Gaussian across the scan window, and
 /// sums `weight · gaussian · observed_intensity` over every comb `(m/z, scan)` point. Peaks already
 /// in `claimed` are treated as absent (this is what makes cross-feature NMS work).
+///
+/// `window` is the seed's precomputed [`seed_rt_window`] — `(scan_index, gaussian_weight)` pairs,
+/// shared across all charge hypotheses of the same seed.
 fn score_hypothesis(
     engine: &PeakIndexingEngine,
     seed: &IndexedMassSpectralPeak,
@@ -271,6 +313,7 @@ fn score_hypothesis(
     params: &TraceKernelParameters,
     ppm: &PpmTolerance,
     claimed: &HashSet<PeakKey>,
+    window: &[(i32, f64)],
 ) -> HypothesisScore {
     let seed_mz = seed.m() as f64;
     let seed_mass = mz_to_mass(seed_mz, charge);
@@ -284,14 +327,20 @@ fn score_hypothesis(
             params.max_isotopes,
         ),
     };
+    // An empty envelope (e.g. a degenerate weight model) has no comb to lay — score it as a miss
+    // rather than indexing into an empty vector.
+    if weights.is_empty() {
+        return HypothesisScore {
+            response: 0.0,
+            charge,
+            mono_mz: seed_mz,
+            peaks: Vec::new(),
+            num_isotopes_observed: 0,
+        };
+    }
     let i_star = most_abundant_index(&weights);
     let spacing = C13_MINUS_C12 / charge as f64;
     let mono_mz = seed_mz - (i_star as f64) * spacing;
-
-    let scan_info = engine.scan_info();
-    let n_scans = scan_info.len() as i32;
-    let apex = seed.zero_based_scan_index;
-    let rt_apex = seed.retention_time as f64;
 
     let mut response = 0.0;
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
@@ -301,26 +350,7 @@ fn score_hypothesis(
     // would be double-counted in the response and intensity and would inflate the isotope count.
     let mut used: HashSet<PeakKey> = HashSet::new();
 
-    // Collect the scans within the *time* window, walking outward from the apex in both directions
-    // and stopping as soon as RT leaves the window. Scans are RT-ordered, so this is a bounded walk
-    // that adapts to the local (uneven) MS1 spacing instead of a fixed scan count.
-    let rt_win = params.rt_half_window_minutes;
-    let mut window_scans: Vec<i32> = Vec::new();
-    let mut s = apex;
-    while s >= 0 && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
-        window_scans.push(s);
-        s -= 1;
-    }
-    let mut s = apex + 1;
-    while s < n_scans && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
-        window_scans.push(s);
-        s += 1;
-    }
-
-    for &s in &window_scans {
-        let rt_s = scan_info[s as usize].retention_time;
-        let g = gaussian(rt_s - rt_apex, params.rt_sigma_minutes);
-
+    for &(s, g) in window {
         for (k, &wk) in weights.iter().enumerate() {
             let expected_mz = mono_mz + (k as f64) * spacing;
             let peak = match engine.get_indexed_peak(expected_mz, s, ppm) {
@@ -369,10 +399,15 @@ pub fn detect_features(
     seeds.sort_by(|a, b| b.intensity.total_cmp(&a.intensity));
 
     // Coverage bookkeeping: denominator = Σ all peak intensities; stop once the claimed fraction
-    // reaches `coverage_target`.
-    let total_intensity: f64 = seeds.iter().map(|p| p.intensity as f64).sum();
-    let coverage_stop = if params.coverage_target < 1.0 && total_intensity > 0.0 {
-        params.coverage_target * total_intensity
+    // reaches `coverage_target`. The sum is only needed when the cap is actually engaged
+    // (`coverage_target < 1.0`), so skip the O(peaks) pass for the common "detect everything" case.
+    let coverage_stop = if params.coverage_target < 1.0 {
+        let total_intensity: f64 = seeds.iter().map(|p| p.intensity as f64).sum();
+        if total_intensity > 0.0 {
+            params.coverage_target * total_intensity
+        } else {
+            f64::INFINITY
+        }
     } else {
         f64::INFINITY
     };
@@ -391,13 +426,17 @@ pub fn detect_features(
             continue;
         }
 
+        // The RT window (scan indices + Gaussian weights) is charge-independent — compute it once
+        // per seed and share it across every charge hypothesis.
+        let window = seed_rt_window(engine, seed, params);
+
         // Score every charge hypothesis; keep the highest response (cross-z non-max suppression).
         let mut best: Option<HypothesisScore> = None;
         for z in params.min_charge..=params.max_charge {
             if z == 0 {
                 continue;
             }
-            let score = score_hypothesis(engine, seed, z, params, &ppm, &claimed);
+            let score = score_hypothesis(engine, seed, z, params, &ppm, &claimed, &window);
             let better = match &best {
                 None => true,
                 Some(b) => score.response > b.response,
@@ -422,7 +461,7 @@ pub fn detect_features(
         for p in &best.peaks {
             claimed.insert(p.key());
         }
-        let feature = build_feature(&best);
+        let feature = build_feature(best);
         explained_intensity += feature.summed_intensity;
         features.push(feature);
 
@@ -436,13 +475,16 @@ pub fn detect_features(
 }
 
 /// Assembles a [`DetectedFeature`] from an accepted hypothesis (apex = tallest claimed peak;
-/// RT bounds and summed intensity from the claimed peaks).
-fn build_feature(hyp: &HypothesisScore) -> DetectedFeature {
+/// RT bounds and summed intensity from the claimed peaks). Consumes the hypothesis so its peak
+/// vector is moved into the feature rather than cloned.
+fn build_feature(hyp: HypothesisScore) -> DetectedFeature {
     let apex = hyp
         .peaks
         .iter()
         .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
         .expect("accepted hypothesis has at least one peak");
+    let apex_scan_index = apex.zero_based_scan_index;
+    let apex_rt = apex.retention_time as f64;
     let start_rt = hyp
         .peaks
         .iter()
@@ -459,20 +501,21 @@ fn build_feature(hyp: &HypothesisScore) -> DetectedFeature {
         monoisotopic_mass: mz_to_mass(hyp.mono_mz, hyp.charge),
         charge: hyp.charge,
         mono_mz: hyp.mono_mz,
-        apex_scan_index: apex.zero_based_scan_index,
-        apex_rt: apex.retention_time as f64,
+        apex_scan_index,
+        apex_rt,
         start_rt,
         end_rt,
         summed_intensity,
         score: hyp.response,
         num_isotopes_observed: hyp.num_isotopes_observed,
-        peaks: hyp.peaks.clone(),
+        peaks: hyp.peaks,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deconvolution::averagine_intensities_from_mono;
     use crate::isotopic_envelope::mass_to_mz_f64;
     use crate::peak_indexing::Scan;
 
@@ -604,9 +647,10 @@ mod tests {
         seeds.sort_by(|a, b| b.intensity.total_cmp(&a.intensity));
         let seed = seeds[0];
 
-        let s1 = score_hypothesis(&engine, &seed, 1, &params, &ppm, &claimed).response;
-        let s2 = score_hypothesis(&engine, &seed, 2, &params, &ppm, &claimed).response;
-        let s4 = score_hypothesis(&engine, &seed, 4, &params, &ppm, &claimed).response;
+        let window = seed_rt_window(&engine, &seed, &params);
+        let s1 = score_hypothesis(&engine, &seed, 1, &params, &ppm, &claimed, &window).response;
+        let s2 = score_hypothesis(&engine, &seed, 2, &params, &ppm, &claimed, &window).response;
+        let s4 = score_hypothesis(&engine, &seed, 4, &params, &ppm, &claimed, &window).response;
         assert!(s2 > s1, "z=2 ({s2}) should beat z=1 ({s1})");
         assert!(s2 > s4, "z=2 ({s2}) should beat z=4 ({s4})");
     }
@@ -636,5 +680,108 @@ mod tests {
             .with_rt_from_scans(engine.scan_info(), 36.0);
         approx(params.rt_sigma_minutes, (36.0 / 60.0) / FWHM_TO_SIGMA, 1e-9);
         assert_eq!(params.half_window_scans, 5);
+    }
+
+    #[test]
+    fn default_weight_model_is_averagine() {
+        // The detector defaults to the table-driven averagine envelope (Poisson is opt-in now).
+        assert_eq!(
+            TraceKernelParameters::default().weight_model,
+            CombWeightModel::Averagine
+        );
+    }
+
+    /// Builds a synthetic isotope envelope whose per-tooth intensities come from the **real averagine
+    /// distribution** (not Poisson), for a peptide of monoisotopic neutral mass `mono_mass` at
+    /// `charge`, eluting across `n_scans` with a Gaussian RT profile (apex at the middle scan).
+    /// Returns the scans and the true mono m/z. This exercises the averagine comb model on
+    /// averagine-shaped data (the previous averagine test reused Poisson-shaped input).
+    fn averagine_envelope_scans(mono_mass: f64, charge: i32, n_scans: i32) -> (Vec<Scan>, f64) {
+        let mono_mz = mass_to_mz_f64(mono_mass, charge);
+        let spacing = C13_MINUS_C12 / charge as f64;
+        // Mono-keyed averagine intensities: index 0 is the monoisotope, then +1 ¹³C, +2, …
+        let weights = averagine_intensities_from_mono(mono_mass, 1e-4, 20);
+        let apex_intensity = 1.0e7;
+        let rt_sigma = 0.15;
+        let apex_scan = n_scans / 2;
+        let mut scans = Vec::new();
+        for s in 0..n_scans {
+            let rt = 10.0 + s as f64 * 0.1;
+            let g = gaussian(rt - (10.0 + apex_scan as f64 * 0.1), rt_sigma);
+            let mut mz = Vec::new();
+            let mut intensity = Vec::new();
+            for (k, &wk) in weights.iter().enumerate() {
+                mz.push(mono_mz + k as f64 * spacing);
+                intensity.push(apex_intensity * wk * g);
+            }
+            scans.push(Scan {
+                mz,
+                intensity,
+                one_based_scan_number: s + 1,
+                retention_time: rt,
+                msn_order: 1,
+            });
+        }
+        (scans, mono_mz)
+    }
+
+    #[test]
+    fn averagine_detects_light_envelope_default_model() {
+        // A light peptide with the default (now averagine) params — mono is the tallest tooth here,
+        // so this is the easy case that must keep working after the default flip.
+        let (scans, mono_mz) = averagine_envelope_scans(1200.0, 2, 9);
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+        let params = TraceKernelParameters {
+            ppm_tolerance: 5.0,
+            rt_sigma_minutes: 0.15,
+            half_window_scans: 4,
+            ..TraceKernelParameters::default()
+        };
+        assert_eq!(params.weight_model, CombWeightModel::Averagine);
+        let features = detect_features(&engine, &params);
+        assert!(!features.is_empty(), "should detect the light averagine envelope");
+        let top = &features[0];
+        assert_eq!(top.charge, 2);
+        approx(top.monoisotopic_mass, 1200.0, 0.02);
+        approx(top.mono_mz, mono_mz, 1e-3);
+        assert!(top.num_isotopes_observed >= 2);
+    }
+
+    #[test]
+    fn averagine_places_mono_below_seed_in_mode_shift_regime() {
+        // The regime that motivates averagine: heavy peptides whose envelope mode sits *above* the
+        // monoisotope. The seed (tallest peak) is then NOT the mono, so the comb must look below it
+        // by exactly `i*` ¹³C units. If averagine misplaces `i*`, the recovered mono mass is off by
+        // ~1 Da/charge; a tight tolerance here is what proves the placement is correct.
+        for &(mono_mass, charge) in &[(2400.0, 3), (4000.0, 4), (5200.0, 4)] {
+            let (scans, mono_mz) = averagine_envelope_scans(mono_mass, charge, 9);
+            let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+            let params = TraceKernelParameters {
+                ppm_tolerance: 5.0,
+                rt_sigma_minutes: 0.15,
+                half_window_scans: 4,
+                ..TraceKernelParameters::default()
+            };
+            let features = detect_features(&engine, &params);
+            assert!(
+                !features.is_empty(),
+                "should detect the averagine envelope at mono {mono_mass}, z{charge}"
+            );
+            let top = &features[0];
+            assert_eq!(top.charge, charge, "charge for mono {mono_mass}");
+            // Recovered mono within ~1/4 of a ¹³C unit at this charge — far tighter than an
+            // off-by-one error (which would be ~1 Da) would allow.
+            approx(top.monoisotopic_mass, mono_mass, 0.05);
+            approx(top.mono_mz, mono_mz, 1e-3);
+        }
+    }
+
+    #[test]
+    fn averagine_seed_is_above_mono_for_heavy_mass() {
+        // Sanity-check the fixture itself: for a heavy peptide the most-intense (seed) tooth really
+        // is above the monoisotope, so the mode-shift test above is exercising the intended path.
+        let w = averagine_intensities_from_mono(4000.0, 1e-4, 20);
+        let mode = most_abundant_index(&w);
+        assert!(mode >= 1, "heavy averagine mode should sit above the mono, got {mode}");
     }
 }

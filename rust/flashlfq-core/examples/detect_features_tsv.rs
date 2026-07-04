@@ -98,15 +98,20 @@ fn main() {
     );
 
     // --- detect --------------------------------------------------------------------------------
-    // Comb-weight model selectable via COMB_MODEL=averagine|poisson (default poisson) for benchmarking.
+    // Comb-weight model selectable via COMB_MODEL=averagine|poisson (default averagine) for benchmarking.
     let weight_model = match std::env::var("COMB_MODEL").as_deref() {
-        Ok("averagine") => CombWeightModel::Averagine,
-        _ => CombWeightModel::Poisson,
+        Ok("poisson") => CombWeightModel::Poisson,
+        _ => CombWeightModel::Averagine,
     };
+    // Coverage target (fraction of ΣTIC to explain) selectable via COVERAGE_TARGET=0.80|0.90|0.99…
+    let coverage_target = std::env::var("COVERAGE_TARGET")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.90);
     let params = TraceKernelParameters {
         ppm_tolerance: 10.0,
         min_seed_intensity: 1000.0,
-        coverage_target: 0.90,
+        coverage_target,
         weight_model,
         ..TraceKernelParameters::default()
     }
@@ -310,38 +315,48 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
         Some(w) => w,
         None => return,
     };
+    // `Mono m/z` is the monoisotopic-peak m/z; `Most-Abundant m/z` is the m/z of the tallest observed
+    // isotope peak (the detector seed) — the direct analogue of base FlashLFQ's observed `Peak MZ`,
+    // which for heavier peptides sits ~1 ¹³C step above the monoisotope.
     writeln!(
         w,
         "Monoisotopic Mass\tCharge States\tNum Charge States\tPrimary Charge\tMono m/z (primary)\t\
-         RT Start\tRT Apex\tRT End\tSummed Intensity\tCross-Charge Support\tNum Members"
+         Most-Abundant m/z\tRT Start\tRT Apex\tRT End\tSummed Intensity\tCross-Charge Support\tNum Members"
     )
     .unwrap();
     for r in rows {
-        // Primary charge = the tallest member's charge.
-        let primary_charge = r
-            .members
-            .iter()
-            .max_by(|a, b| {
-                a.detected
-                    .summed_intensity
-                    .total_cmp(&b.detected.summed_intensity)
-            })
-            .map(|m| m.refined_charge)
-            .unwrap_or(0);
+        // Primary member = the tallest member; its charge and its seed (tallest) peak drive the m/z.
+        let primary_member = r.members.iter().max_by(|a, b| {
+            a.detected
+                .summed_intensity
+                .total_cmp(&b.detected.summed_intensity)
+        });
+        let primary_charge = primary_member.map(|m| m.refined_charge).unwrap_or(0);
         let mono_mz = if primary_charge != 0 {
             mass_to_mz_f64(r.monoisotopic_mass, primary_charge)
         } else {
             0.0
         };
+        // Most-abundant isotope m/z = the tallest claimed peak of the primary member's detection.
+        let most_abundant_mz = primary_member
+            .and_then(|m| {
+                m.detected
+                    .peaks
+                    .iter()
+                    .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+            })
+            .map(|p| p.m() as f64)
+            .unwrap_or(0.0);
         let charges: Vec<String> = r.charge_states.iter().map(|c| c.to_string()).collect();
         writeln!(
             w,
-            "{:.5}\t{}\t{}\t{}\t{:.5}\t{:.4}\t{:.4}\t{:.4}\t{:.4e}\t{}\t{}",
+            "{:.5}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4}\t{:.4}\t{:.4}\t{:.4e}\t{}\t{}",
             r.monoisotopic_mass,
             charges.join(";"),
             r.charge_states.len(),
             primary_charge,
             mono_mz,
+            most_abundant_mz,
             r.start_rt,
             r.apex_rt,
             r.end_rt,
