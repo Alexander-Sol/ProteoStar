@@ -108,6 +108,13 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.90);
+    // Assumed chromatographic FWHM (seconds) that sets the RT Gaussian σ and matched-filter window,
+    // selectable via ASSUMED_FWHM_SEC (default 36). Real CA/Lumos peaks are ~3-20 s wide, so smaller
+    // values narrow the window to the data and reduce broad-hypothesis interference.
+    let assumed_fwhm_sec = std::env::var("ASSUMED_FWHM_SEC")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(36.0);
     let params = TraceKernelParameters {
         ppm_tolerance: 10.0,
         min_seed_intensity: 1000.0,
@@ -115,7 +122,8 @@ fn main() {
         weight_model,
         ..TraceKernelParameters::default()
     }
-    .with_rt_from_scans(engine.scan_info(), 36.0);
+    .with_rt_from_scans(engine.scan_info(), assumed_fwhm_sec);
+    eprintln!("assumed FWHM: {assumed_fwhm_sec} s");
     eprintln!("comb weight model: {weight_model:?}");
     eprintln!(
         "detecting (charge {}..={}, {} ppm, σ_rt {:.4} min, ±{} scans, seed floor {:.0}, coverage {:.0}%) ...",
@@ -140,6 +148,13 @@ fn main() {
     );
     write_detected_tsv(&detected_path, &detected);
     eprintln!("  wrote {} detected features -> {detected_path}", detected.len());
+
+    // Escape hatch for diagnostics: skip the (potentially intractable at huge feature counts)
+    // refine + O(n^2) charge-consensus and stop after detection.
+    if std::env::var("DETECT_ONLY").is_ok() {
+        eprintln!("DETECT_ONLY set — skipping refine/resolve/compare after {} detected features.", detected.len());
+        return;
+    }
 
     // --- refine --------------------------------------------------------------------------------
     let avg = flashlfq_core::spectral_averaging::SpectralAveragingParameters::default();
