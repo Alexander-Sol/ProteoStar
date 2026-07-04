@@ -35,7 +35,9 @@
 //!   Ties break by candidate count, then by summed contributing intensity. The strict "present in all
 //!   charges" is softened to "the max-support cluster" (design's "≥2 charges, weighted by support").
 
-use crate::deconvolution::{classic_deconvolute, ClassicDeconvolutionParameters};
+use crate::deconvolution::{
+    averagine_intensities_from_mono, classic_deconvolute, ClassicDeconvolutionParameters,
+};
 use crate::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12};
 use crate::peak_indexing::Scan;
 use crate::spectral_averaging::{average_spectra, SpectralAveragingParameters};
@@ -44,6 +46,12 @@ use crate::trace_kernel::DetectedFeature;
 /// Absolute mass-clustering floor (Da) for small masses, where a ppm window would be tighter than
 /// real mass precision. Applied as `max(mass · ppm/1e6, MASS_CLUSTER_ABS_FLOOR_DA)`.
 pub const MASS_CLUSTER_ABS_FLOOR_DA: f64 = 0.01;
+
+/// Hard cap on how many MS1 scans [`refine_feature`] averages into the composite. The composite is a
+/// high-SNR snapshot at the feature apex, so this stays small (≈ SpectralAveraging's default of 5);
+/// averaging more pulls in co-eluting interference. A `> MAX_SCANS_TO_AVERAGE` window is treated as
+/// a bug (asserted), not silently accepted.
+pub const MAX_SCANS_TO_AVERAGE: usize = 7;
 
 /// Largest integer ¹³C off-by-one offset tolerated when grouping features by neutral mass. The mono
 /// off-by-one is normally ±1; ±2 is allowed for robustness against a doubly-mis-assigned monoisotope.
@@ -111,18 +119,25 @@ pub fn refine_feature(
         return None;
     }
 
-    // Window = the scan-index extent actually spanned by the feature's claimed peaks.
-    let mut min_scan = i32::MAX;
-    let mut max_scan = i32::MIN;
-    for p in &feature.peaks {
-        min_scan = min_scan.min(p.zero_based_scan_index);
-        max_scan = max_scan.max(p.zero_based_scan_index);
-    }
-    let lo = min_scan.max(0) as usize;
-    let hi = (max_scan.max(0) as usize).min(scans.len() - 1);
+    // Averaging window = a SMALL number of scans centred on the feature's apex. The composite is a
+    // high-SNR snapshot of the envelope at its strongest point, NOT the whole elution — a wide
+    // window pulls in co-eluting interference and defeats the purpose (SpectralAveraging's own
+    // default is 5 scans). We deliberately do NOT use the feature's full claimed-peak scan extent:
+    // the detector's RT window is ~±2σ, which in dense MS1 regions is ~100 scans.
+    let apex = feature.apex_scan_index;
+    let half = (MAX_SCANS_TO_AVERAGE / 2) as i32; // 3 → up to 7 scans
+    let lo = (apex - half).max(0) as usize;
+    let hi = ((apex + half).max(0) as usize).min(scans.len() - 1);
     if lo > hi {
         return None;
     }
+    // Safety invariant: averaging more than a handful of scans means the window logic is wrong.
+    let n_avg = hi - lo + 1;
+    assert!(
+        n_avg <= MAX_SCANS_TO_AVERAGE,
+        "refine_feature would average {n_avg} scans (> {MAX_SCANS_TO_AVERAGE}); the averaging \
+         window must stay small — something is wrong with the window computation"
+    );
 
     // m/z window around the feature. This is both the deconvolution range AND the slice we average
     // over: averaging only the local neighbourhood — instead of binning every peak of every window
@@ -173,6 +188,11 @@ pub fn refine_feature(
             da.total_cmp(&db)
         })?;
 
+    // NOTE: an averagine off-by-one corrector ([`correct_monoisotope_offbyone`]) is implemented and
+    // unit-tested, but on the real K562/CA data it *regressed* PSM recall (it flipped more correct
+    // monos than it fixed — the cosine metric is not yet discriminative enough on real, chimeric
+    // composites). It is therefore deliberately **not** applied here; the deconvolution's mono is
+    // trusted. Re-enable only once the corrector is made strictly non-regressive (see its docs).
     Some(RefinedFeature {
         detected: feature.clone(),
         refined_monoisotopic_mass: best.monoisotopic_mass,
@@ -180,6 +200,96 @@ pub fn refine_feature(
         candidate_masses: best.monoisotopic_mass_predictions.clone(),
         decon_score: best.score,
     })
+}
+
+/// Cosine-similarity margin an off-by-one shift must beat the deconvolution's own mono by before the
+/// corrector will move it. Keeps the correction conservative — it never overrides a correct
+/// deconvolution on noise-level differences.
+#[allow(dead_code)]
+const OFFBYONE_COSINE_MARGIN: f64 = 0.03;
+
+/// Averagine off-by-one correction. `classic_deconvolute` occasionally anchors the monoisotope one
+/// (or two) ¹³C units too high (it locked onto a heavier isotope) or one too low (it swept in a
+/// noise peak just below the true mono). Given the averaged composite and the deconvolution's
+/// `(mono_mass, charge)`, this scores candidate monos shifted by `s ∈ {0, −1, −2, +1}` ¹³C units by
+/// the cosine similarity between the observed composite intensities at the isotope positions and the
+/// expected averagine envelope anchored at that candidate, and returns the best-scoring candidate.
+/// It only moves off the deconvolution's mono on a clear improvement (`OFFBYONE_COSINE_MARGIN`).
+///
+/// Not currently wired into [`refine_feature`] — see the note there (it regressed real-data recall).
+#[allow(dead_code)]
+fn correct_monoisotope_offbyone(
+    comp_mz: &[f64],
+    comp_intensity: &[f64],
+    mono_mass: f64,
+    charge: i32,
+    ppm: f64,
+) -> f64 {
+    const K_MAX: usize = 6;
+    let score = |cand: f64| -> f64 {
+        let expected = averagine_intensities_from_mono(cand, 1e-3, K_MAX);
+        if expected.len() < 2 {
+            return 0.0;
+        }
+        let observed: Vec<f64> = (0..expected.len())
+            .map(|k| {
+                let mz = mass_to_mz_f64(cand + k as f64 * C13_MINUS_C12, charge);
+                composite_intensity_at(comp_mz, comp_intensity, mz, ppm)
+            })
+            .collect();
+        cosine(&expected, &observed)
+    };
+
+    let mut best_mass = mono_mass;
+    let mut best_score = score(mono_mass);
+    for s in [-1.0, -2.0, 1.0] {
+        let cand = mono_mass + s * C13_MINUS_C12;
+        if cand <= 0.0 {
+            continue;
+        }
+        let sc = score(cand);
+        if sc > best_score + OFFBYONE_COSINE_MARGIN {
+            best_score = sc;
+            best_mass = cand;
+        }
+    }
+    best_mass
+}
+
+/// Intensity of the composite peak closest to `target_mz` within `ppm`, or 0.0 if none. `comp_mz`
+/// is ascending (as `average_spectra` returns it), so the two neighbours of the insertion point are
+/// the only candidates.
+#[allow(dead_code)]
+fn composite_intensity_at(comp_mz: &[f64], comp_intensity: &[f64], target_mz: f64, ppm: f64) -> f64 {
+    if comp_mz.is_empty() {
+        return 0.0;
+    }
+    let i = comp_mz.partition_point(|&m| m < target_mz);
+    let mut best = 0.0;
+    let mut best_d = f64::INFINITY;
+    for cand in [i.checked_sub(1), Some(i)].into_iter().flatten() {
+        if cand < comp_mz.len() {
+            let d = (comp_mz[cand] - target_mz).abs();
+            if d < best_d && d / target_mz * 1e6 <= ppm {
+                best_d = d;
+                best = comp_intensity[cand];
+            }
+        }
+    }
+    best
+}
+
+/// Cosine similarity between two equal-length vectors; 0.0 if either has zero norm.
+#[allow(dead_code)]
+fn cosine(a: &[f64], b: &[f64]) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let nb: f64 = b.iter().map(|y| y * y).sum::<f64>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 /// Resolves refined features into peptide features by grouping co-eluting charge states of the same
@@ -249,13 +359,22 @@ pub fn resolve_charge_state_consensus(
 
 /// Whether two refined features should be grouped: co-elution AND off-by-one-aware neutral-mass
 /// agreement.
+///
+/// Co-elution is satisfied when the apexes are within `rt_tolerance_minutes` **or** the features'
+/// RT ranges overlap (padded by `rt_tolerance_minutes`). The overlap arm is what collapses a single
+/// broad elution that the detector split into several partially-overlapping features (same mass,
+/// apexes >tolerance apart but ranges overlapping) into one resolved feature — while genuinely
+/// distinct same-mass species eluting at separate times keep disjoint ranges and stay separate.
 fn features_link(
     a: &RefinedFeature,
     b: &RefinedFeature,
     mass_tolerance_ppm: f64,
     rt_tolerance_minutes: f64,
 ) -> bool {
-    if (a.detected.apex_rt - b.detected.apex_rt).abs() > rt_tolerance_minutes {
+    let apex_close = (a.detected.apex_rt - b.detected.apex_rt).abs() <= rt_tolerance_minutes;
+    let ranges_overlap = a.detected.start_rt - rt_tolerance_minutes <= b.detected.end_rt
+        && b.detected.start_rt - rt_tolerance_minutes <= a.detected.end_rt;
+    if !(apex_close || ranges_overlap) {
         return false;
     }
     let ma = a.refined_monoisotopic_mass;
@@ -577,6 +696,43 @@ mod tests {
             r.monoisotopic_mass,
             true_mass,
             ppm_of(r.monoisotopic_mass, true_mass)
+        );
+    }
+
+    /// Builds a clean averagine composite anchored at `true_mono`/`charge` (m/z ascending), for the
+    /// off-by-one corrector tests.
+    fn averagine_composite(true_mono: f64, charge: i32) -> (Vec<f64>, Vec<f64>) {
+        let env = averagine_intensities_from_mono(true_mono, 1e-3, 8);
+        let mz: Vec<f64> = (0..env.len())
+            .map(|k| mass_to_mz_f64(true_mono + k as f64 * C13_MINUS_C12, charge))
+            .collect();
+        (mz, env)
+    }
+
+    #[test]
+    fn corrector_fixes_off_by_one_high() {
+        // Deconvolution anchored the mono one ¹³C too high; the corrector must shift it back down.
+        let true_mono = 1500.0;
+        let charge = 2;
+        let (mz, inten) = averagine_composite(true_mono, charge);
+        let wrong = true_mono + C13_MINUS_C12;
+        let corrected = correct_monoisotope_offbyone(&mz, &inten, wrong, charge, 20.0);
+        assert!(
+            (corrected - true_mono).abs() < 1e-6,
+            "expected correction to {true_mono}, got {corrected}"
+        );
+    }
+
+    #[test]
+    fn corrector_leaves_correct_mono_untouched() {
+        // A composite already anchored at the true mono must not be moved.
+        let true_mono = 1500.0;
+        let charge = 2;
+        let (mz, inten) = averagine_composite(true_mono, charge);
+        let corrected = correct_monoisotope_offbyone(&mz, &inten, true_mono, charge, 20.0);
+        assert!(
+            (corrected - true_mono).abs() < 1e-6,
+            "corrector should not move a correct mono; got {corrected}"
         );
     }
 

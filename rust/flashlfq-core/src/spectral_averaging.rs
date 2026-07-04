@@ -26,10 +26,16 @@
 //! the relevant surface is just `AverageSpectra(double[][] xArrays, double[][] yArrays, params)`.
 //!
 //! ## Parity
-//! Control flow, summation order, the `floor((x - minX) / binSize)` bin index, the zero-padding of
-//! bins missing a spectrum, and the "divide the bin's summed intensity by the *spectrum* count (not
-//! the present-peak count)" behaviour are transcribed verbatim so a future C# golden matches at the
-//! standard tolerance (counts exact, floats rel-1e-6). Where mzLib mutates the caller's `yArrays`
+//! Control flow, summation order, the `floor((x - minX) / binSize)` bin index, and the "divide the
+//! bin's summed intensity by the *spectrum* count (not the present-peak count)" behaviour are
+//! preserved so a future C# golden matches at the standard tolerance (counts exact, floats
+//! rel-1e-6). The one deliberate departure is performance-motivated: mzLib pads every bin with a
+//! zero-intensity peak for each spectrum that did not contribute a real peak, then averages over
+//! the padded set. That padding is algebraically inert — a zero peak adds nothing to the weighted
+//! numerator and sits at the running m/z mean — so this port elides it and folds its only real
+//! effect (dividing by the full spectrum count, via the summed weight) into the averaging
+//! denominator directly (see [`average_bin`]). Results are identical up to floating-point
+//! summation order, well within the rel-1e-6 tolerance. Where mzLib mutates the caller's `yArrays`
 //! in place during normalization, this port normalizes an internal clone instead — the arithmetic
 //! is identical; only the (undesirable) side effect on the caller is dropped.
 
@@ -168,28 +174,42 @@ fn mz_binning(
         assert_eq!(x.len(), y.len(), "each spectrum's x and y arrays must match in length");
     }
 
-    // get tics (from the *original* intensities, before normalization mutates them)
-    let tics: Vec<f64> = y_arrays.iter().map(|y| sum(y)).collect();
-    let average_tic = sum(&tics) / tics.len() as f64;
+    // Only NoRejection is ported. Dispatch up front so the clipping stubs still panic: their
+    // per-peak semantics operate on the zero-padded bins that this fast path deliberately elides,
+    // so they cannot share it. (See module scope.)
+    match parameters.outlier_rejection_type {
+        OutlierRejectionType::NoRejection => {}
+        other => unimplemented!(
+            "outlier rejection {:?} is outside the default-config subset; only NoRejection is \
+             ported (see module scope)",
+            other
+        ),
+    }
 
-    // normalize spectra — mzLib mutates the caller's arrays here; we normalize an internal clone.
-    let mut y_norm: Vec<Vec<f64>> = y_arrays.to_vec();
-    normalize_spectra(&mut y_norm, parameters.normalization_type);
+    // normalize spectra — mzLib mutates the caller's arrays here; we normalize an internal clone
+    // (and skip even that allocation when there is nothing to normalize).
+    let mut owned;
+    let y_norm: &[Vec<f64>] = match parameters.normalization_type {
+        NormalizationType::NoNormalization => y_arrays,
+        nt => {
+            owned = y_arrays.to_vec();
+            normalize_spectra(&mut owned, nt);
+            &owned
+        }
+    };
 
-    // get bins
-    let bins = get_bins(x_arrays, &y_norm, parameters.bin_size);
+    // get bins (real peaks only; the zero padding is folded into average_bin below)
+    let bins = get_bins(x_arrays, y_norm, parameters.bin_size);
 
-    // get weights
-    let weights = calculate_spectra_weights(x_arrays, &y_norm, parameters.spectral_weighting_type);
+    // get weights. The averaging denominator is the summed weight over *all* spectra — this is the
+    // padding's only real effect, hoisted out of the per-bin loop since it is bin-independent.
+    let weights = calculate_spectra_weights(x_arrays, y_norm, parameters.spectral_weighting_type);
+    let total_weight = sum(&weights);
 
-    // reject outliers and average bins
+    // average bins
     let mut averaged_peaks: Vec<(f64, f64)> = Vec::with_capacity(bins.len());
     for peaks_from_bin in &bins {
-        let kept = reject_outliers(peaks_from_bin, parameters);
-        if kept.is_empty() {
-            continue;
-        }
-        averaged_peaks.push(average_bin(&kept, &weights));
+        averaged_peaks.push(average_bin(peaks_from_bin, &weights, total_weight));
     }
 
     // return averaged: drop zero-intensity bins, order by m/z; AbsoluteToTic re-scales by averageTic
@@ -198,13 +218,15 @@ fn mz_binning(
     ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     let mzs: Vec<f64> = ordered.iter().map(|p| p.0).collect();
-    let intensities: Vec<f64> = ordered
-        .iter()
-        .map(|p| match parameters.normalization_type {
-            NormalizationType::AbsoluteToTic => p.1 * average_tic,
-            _ => p.1,
-        })
-        .collect();
+    let intensities: Vec<f64> = match parameters.normalization_type {
+        // Only this branch needs the average TIC, so only this branch pays for computing it.
+        NormalizationType::AbsoluteToTic => {
+            let average_tic =
+                y_arrays.iter().map(|y| sum(y)).sum::<f64>() / y_arrays.len() as f64;
+            ordered.iter().map(|p| p.1 * average_tic).collect()
+        }
+        _ => ordered.iter().map(|p| p.1).collect(),
+    };
     (mzs, intensities)
 }
 
@@ -212,10 +234,11 @@ fn mz_binning(
 // Binning (mirroring SpectraAveraging.GetBins / AverageBin)
 // ---------------------------------------------------------------------------
 
-/// Faithful port of `SpectraAveraging.GetBins`. Sorts every peak of every spectrum into an m/z bin
-/// (`floor((mz - minX) / binSize)`), then, for each bin, pads a **zero-intensity** peak for every
-/// spectrum that did not contribute a real peak — so outlier rejection and averaging see one peak
-/// per spectrum per bin.
+/// Port of `SpectraAveraging.GetBins`, minus the zero-padding step. Sorts every peak of every
+/// spectrum into an m/z bin (`floor((mz - minX) / binSize)`) and returns the per-bin groups of
+/// **real** peaks. mzLib additionally pads each bin with a zero-intensity peak for every absent
+/// spectrum; that padding is algebraically inert (see the module "Parity" note) and is folded into
+/// [`average_bin`] instead of being materialized here.
 ///
 /// Returned as a `Vec` of bins rather than a keyed map: the bin *index* never affects the output
 /// (the final spectrum is re-sorted by m/z), so only the per-bin peak groups matter. Bins are
@@ -243,34 +266,27 @@ fn get_bins(x_arrays: &[Vec<f64>], y_arrays: &[Vec<f64>], bin_size: f64) -> Vec<
         }
     }
 
-    // Pad each bin with zero-intensity peaks for absent spectra. The padded m/z is the running
-    // average of the bin's current peaks — evaluated after each insertion, exactly as mzLib does
-    // (which, because a zero peak is added at the current mean, leaves the mean unchanged).
-    for bin in bins.values_mut() {
-        let spectra_in_bin: Vec<usize> = bin.iter().map(|p| p.spectra_id).collect();
-        for i in 0..num_spectra {
-            if !spectra_in_bin.contains(&i) {
-                let mz = mean(bin.iter().map(|p| p.mz));
-                bin.push(BinnedPeak { mz, intensity: 0.0, spectra_id: i });
-            }
-        }
-    }
-
     bins.into_values().collect()
 }
 
-/// Faithful port of `SpectraAveraging.AverageBin`. Weighted mean intensity (numerator
-/// `Σ intensity·weight`, denominator `Σ weight` over **all** peaks including the zero-intensity
-/// padding), and the plain arithmetic mean of the peaks' m/z.
-fn average_bin(peaks_in_bin: &[BinnedPeak], weights: &[f64]) -> (f64, f64) {
+/// Port of `SpectraAveraging.AverageBin` with the zero-intensity padding folded in analytically.
+///
+/// mzLib computes the weighted mean over the *padded* peak set (real peaks plus one zero-intensity
+/// peak per absent spectrum): numerator `Σ intensity·weight`, denominator `Σ weight`, and the plain
+/// arithmetic mean of every peak's m/z. Because a padded peak has zero intensity and sits exactly at
+/// the bin's running m/z mean, it changes neither the numerator nor the mean — its sole effect is to
+/// add its spectrum's weight to the denominator. Summed over the whole bin that denominator is just
+/// the weight over *all* spectra (`total_weight`, passed in), so this operates on the real peaks
+/// alone: numerator over them, denominator `total_weight`, m/z = their arithmetic mean.
+fn average_bin(real_peaks: &[BinnedPeak], weights: &[f64], total_weight: f64) -> (f64, f64) {
     let mut numerator = 0.0;
-    let mut denominator = 0.0;
-    for peak in peaks_in_bin {
+    let mut mz_sum = 0.0;
+    for peak in real_peaks {
         numerator += peak.intensity * weights[peak.spectra_id];
-        denominator += weights[peak.spectra_id];
+        mz_sum += peak.mz;
     }
-    let mz = mean(peaks_in_bin.iter().map(|p| p.mz));
-    let intensity = numerator / denominator;
+    let mz = mz_sum / real_peaks.len() as f64;
+    let intensity = numerator / total_weight;
     (mz, intensity)
 }
 
@@ -355,25 +371,11 @@ fn weight_by_tic_value(y_arrays: &[Vec<f64>]) -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------
-// Outlier rejection (mirroring OutlierRejection.RejectOutliers)
+// Outlier rejection: only the default `NoRejection` config is ported, and it is a no-op folded
+// directly into `mz_binning` (all bins pass through). The six clipping variants are dispatched up
+// front in `mz_binning` and panic — they operate on the zero-padded bin representation this fast
+// path elides, so they belong with the not-yet-ported alternate-config work (see module scope).
 // ---------------------------------------------------------------------------
-
-/// Faithful port of the `OutlierRejection.RejectOutliers(List<BinnedPeak>, ...)` overload for the
-/// **default** `NoRejection` config. The six clipping variants are stubbed (they belong to the
-/// not-yet-ported alternate-config work) and panic if dispatched.
-fn reject_outliers(
-    peaks: &[BinnedPeak],
-    parameters: &SpectralAveragingParameters,
-) -> Vec<BinnedPeak> {
-    match parameters.outlier_rejection_type {
-        OutlierRejectionType::NoRejection => peaks.to_vec(),
-        other => unimplemented!(
-            "outlier rejection {:?} is outside the default-config subset; only NoRejection is \
-             ported (see module scope)",
-            other
-        ),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Small numeric helpers (kept explicit for summation-order parity)
@@ -383,18 +385,6 @@ fn reject_outliers(
 #[inline]
 fn sum(values: &[f64]) -> f64 {
     values.iter().copied().sum()
-}
-
-/// Arithmetic mean, matching `IEnumerable<double>.Average()` (sum then divide by count).
-#[inline]
-fn mean(values: impl Iterator<Item = f64>) -> f64 {
-    let mut total = 0.0;
-    let mut count = 0usize;
-    for v in values {
-        total += v;
-        count += 1;
-    }
-    total / count as f64
 }
 
 #[cfg(test)]

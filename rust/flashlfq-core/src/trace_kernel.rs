@@ -51,12 +51,17 @@ pub const POISSON_LAMBDA_PER_DA: f64 = 0.00048;
 /// Full-width-at-half-maximum → Gaussian σ conversion factor: `FWHM = 2·√(2·ln2)·σ ≈ 2.3548·σ`.
 pub const FWHM_TO_SIGMA: f64 = 2.354_820_045_030_949;
 
-/// How the isotope comb's per-peak weights are produced. Poisson is the closed-form default; an
-/// averagine-table model is planned as a benchmark alternative (see module docs).
+/// How the isotope comb's per-peak weights are produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombWeightModel {
-    /// Closed-form `Poisson(λ = 0.00048·M)` over the ¹³C-substitution count. Default.
+    /// Closed-form `Poisson(λ = 0.00048·M)` over the ¹³C-substitution count. One parameter, no table
+    /// lookup; the fast default.
     Poisson,
+    /// The real averagine isotope envelope
+    /// ([`crate::deconvolution::averagine_comb_weights`]), a table lookup. More accurate than Poisson
+    /// near ~1.8 kDa where the envelope mode shifts off the monoisotope — the regime where a Poisson
+    /// `i*` can misplace the monoisotope by one ¹³C unit (off-by-one).
+    Averagine,
 }
 
 /// Parameters governing the trace-kernel detector.
@@ -70,8 +75,9 @@ pub struct TraceKernelParameters {
     pub ppm_tolerance: f64,
     /// Gaussian σ along retention time, in **minutes** (the same unit as `ScanInfo::retention_time`).
     pub rt_sigma_minutes: f64,
-    /// How many scans on each side of the seed's apex scan to evaluate the RT Gaussian over.
-    /// Typically ≈ `round(2σ / median_scan_spacing)` so the window spans ±2σ.
+    /// **Legacy / superseded by [`Self::rt_half_window_minutes`].** Formerly bounded the window by a
+    /// fixed scan count; retained for API/compat but no longer consumed by the detector (the window
+    /// is now a time window). Still set by `with_rt_from_scans` for reference.
     pub half_window_scans: i32,
     /// Which comb-weight model to use.
     pub weight_model: CombWeightModel,
@@ -91,6 +97,12 @@ pub struct TraceKernelParameters {
     /// signal, not every peak". Denominator = Σ of all indexed peak intensities. `1.0` (or more)
     /// disables the cap and detects until seeds are exhausted / fall below `min_seed_intensity`.
     pub coverage_target: f64,
+    /// Half-width of the retention-time window (minutes) the matched filter evaluates around the
+    /// seed apex. This bounds the window **in time**, not in scan count: DDA interleaves a variable
+    /// number of MS2 scans between MS1 scans, so a fixed scan-count window spans wildly different
+    /// times — producing over-wide features that over-claim and split one elution into several.
+    /// Typically ≈ 2σ (`with_rt_from_scans` sets it there). Supersedes `half_window_scans`.
+    pub rt_half_window_minutes: f64,
 }
 
 impl Default for TraceKernelParameters {
@@ -110,6 +122,7 @@ impl Default for TraceKernelParameters {
             min_isotopes_observed: 2,
             min_seed_intensity: 0.0,
             coverage_target: 1.0,
+            rt_half_window_minutes: 0.5,
         }
     }
 }
@@ -127,6 +140,8 @@ impl TraceKernelParameters {
         let spacing = median_ms1_scan_spacing_minutes(scan_info).max(f64::MIN_POSITIVE);
         self.rt_sigma_minutes = sigma_minutes;
         self.half_window_scans = ((2.0 * sigma_minutes) / spacing).round().max(1.0) as i32;
+        // The matched filter is bounded in *time* (see `rt_half_window_minutes`); ±2σ covers the peak.
+        self.rt_half_window_minutes = 2.0 * sigma_minutes;
         self
     }
 }
@@ -263,6 +278,11 @@ fn score_hypothesis(
         CombWeightModel::Poisson => {
             poisson_comb_weights(seed_mass, params.min_isotope_weight, params.max_isotopes)
         }
+        CombWeightModel::Averagine => crate::deconvolution::averagine_comb_weights(
+            seed_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
     };
     let i_star = most_abundant_index(&weights);
     let spacing = C13_MINUS_C12 / charge as f64;
@@ -276,11 +296,28 @@ fn score_hypothesis(
     let mut response = 0.0;
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
     let mut observed_isotopes: HashSet<usize> = HashSet::new();
+    // Peaks already used *within this hypothesis*. For higher charges the comb spacing (1.0033/z) is
+    // small, so two adjacent isotope slots can resolve to the same physical peak; without this a peak
+    // would be double-counted in the response and intensity and would inflate the isotope count.
+    let mut used: HashSet<PeakKey> = HashSet::new();
 
-    for s in (apex - params.half_window_scans)..=(apex + params.half_window_scans) {
-        if s < 0 || s >= n_scans {
-            continue;
-        }
+    // Collect the scans within the *time* window, walking outward from the apex in both directions
+    // and stopping as soon as RT leaves the window. Scans are RT-ordered, so this is a bounded walk
+    // that adapts to the local (uneven) MS1 spacing instead of a fixed scan count.
+    let rt_win = params.rt_half_window_minutes;
+    let mut window_scans: Vec<i32> = Vec::new();
+    let mut s = apex;
+    while s >= 0 && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
+        window_scans.push(s);
+        s -= 1;
+    }
+    let mut s = apex + 1;
+    while s < n_scans && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
+        window_scans.push(s);
+        s += 1;
+    }
+
+    for &s in &window_scans {
         let rt_s = scan_info[s as usize].retention_time;
         let g = gaussian(rt_s - rt_apex, params.rt_sigma_minutes);
 
@@ -290,7 +327,12 @@ fn score_hypothesis(
                 Some(p) => p,
                 None => continue,
             };
-            if claimed.contains(&peak.key()) {
+            let key = peak.key();
+            if claimed.contains(&key) {
+                continue;
+            }
+            // Skip a peak already consumed by another isotope slot of this same hypothesis.
+            if !used.insert(key) {
                 continue;
             }
             response += wk * g * peak.intensity as f64;
@@ -519,6 +561,27 @@ mod tests {
         assert!(top.num_isotopes_observed >= 2);
         assert_eq!(top.apex_scan_index, 4, "apex is the max-intensity scan");
         assert!(top.score > 0.0);
+    }
+
+    #[test]
+    fn detects_charge_two_envelope_with_averagine_weights() {
+        // The averagine comb-weight model should detect the same synthetic z=2 envelope with the
+        // correct mass/charge, exercising the CombWeightModel::Averagine path end to end.
+        let (scans, mono_mz) = synthetic_envelope_scans();
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+        let params = TraceKernelParameters {
+            ppm_tolerance: 5.0,
+            rt_sigma_minutes: 0.15,
+            half_window_scans: 4,
+            weight_model: CombWeightModel::Averagine,
+            ..TraceKernelParameters::default()
+        };
+        let features = detect_features(&engine, &params);
+        assert!(!features.is_empty(), "averagine model should detect the envelope");
+        let top = &features[0];
+        assert_eq!(top.charge, 2);
+        approx(top.monoisotopic_mass, 1000.0, 0.01);
+        approx(top.mono_mz, mono_mz, 1e-4);
     }
 
     #[test]

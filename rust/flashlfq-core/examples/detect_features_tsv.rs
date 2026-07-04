@@ -21,7 +21,8 @@ use flashlfq_core::feature_refinement::{
 use flashlfq_core::isotopic_envelope::mass_to_mz_f64;
 use flashlfq_core::peak_indexing::{read_ms1_scans, PeakIndexingEngine};
 use flashlfq_core::trace_kernel::{
-    detect_features, median_ms1_scan_spacing_minutes, DetectedFeature, TraceKernelParameters,
+    detect_features, median_ms1_scan_spacing_minutes, CombWeightModel, DetectedFeature,
+    TraceKernelParameters,
 };
 
 /// Derives a sibling output path from the final path: `out.tsv` + tag `detected` -> `out.detected.tsv`.
@@ -29,6 +30,26 @@ fn sibling(out: &str, tag: &str) -> String {
     match out.strip_suffix(".tsv") {
         Some(stem) => format!("{stem}.{tag}.tsv"),
         None => format!("{out}.{tag}.tsv"),
+    }
+}
+
+/// Opens an output writer, tolerating a locked target (e.g. the file is open in Excel for manual
+/// validation): on failure it falls back to `<path>.new` and warns, rather than panicking and
+/// discarding the whole run. Returns `None` only if even the fallback cannot be created.
+fn open_out(path: &str) -> Option<BufWriter<File>> {
+    match File::create(path) {
+        Ok(f) => Some(BufWriter::new(f)),
+        Err(e) => {
+            let alt = format!("{path}.new");
+            eprintln!("  WARN: could not write {path} ({e}) — is it open? writing {alt} instead");
+            match File::create(&alt) {
+                Ok(f) => Some(BufWriter::new(f)),
+                Err(e2) => {
+                    eprintln!("  WARN: fallback {alt} also failed ({e2}); skipping this file");
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -44,10 +65,19 @@ fn main() {
 
     let detected_path = sibling(out_path, "detected");
     let refined_path = sibling(out_path, "refined");
+    let log_path = match out_path.strip_suffix(".tsv") {
+        Some(stem) => format!("{stem}.log"),
+        None => format!("{out_path}.log"),
+    };
     eprintln!("output files:");
     eprintln!("  detected (pre-refinement): {detected_path}");
     eprintln!("  refined (post-decon):      {refined_path}");
     eprintln!("  resolved (final):          {out_path}");
+    eprintln!("  timing log:                {log_path}");
+
+    // Per-step wall-clock timings, reported to the chat and written to the log file at the end.
+    let run_start = Instant::now();
+    let mut timings: Vec<(String, f64)> = Vec::new();
 
     // --- read + index --------------------------------------------------------------------------
     let t0 = Instant::now();
@@ -56,23 +86,32 @@ fn main() {
     let engine = PeakIndexingEngine::index_peaks(&scans).expect("no indexable MS1 peaks");
     let n_peaks: usize = scans.iter().map(|s| s.mz.len()).sum();
     let total_intensity: f64 = scans.iter().flat_map(|s| s.intensity.iter()).sum();
+    let read_dur = t0.elapsed();
+    timings.push(("read + index".into(), read_dur.as_secs_f64()));
     eprintln!(
-        "  {} MS1 scans, {} peaks, ΣTIC {:.3e}, median scan spacing {:.4} min  ({:?})",
+        "  {} MS1 scans, {} peaks, ΣTIC {:.3e}, median scan spacing {:.4} min  ({:.1?})",
         scans.len(),
         n_peaks,
         total_intensity,
         median_ms1_scan_spacing_minutes(engine.scan_info()),
-        t0.elapsed()
+        read_dur
     );
 
     // --- detect --------------------------------------------------------------------------------
+    // Comb-weight model selectable via COMB_MODEL=averagine|poisson (default poisson) for benchmarking.
+    let weight_model = match std::env::var("COMB_MODEL").as_deref() {
+        Ok("averagine") => CombWeightModel::Averagine,
+        _ => CombWeightModel::Poisson,
+    };
     let params = TraceKernelParameters {
         ppm_tolerance: 10.0,
         min_seed_intensity: 1000.0,
-        coverage_target: 0.75,
+        coverage_target: 0.90,
+        weight_model,
         ..TraceKernelParameters::default()
     }
     .with_rt_from_scans(engine.scan_info(), 36.0);
+    eprintln!("comb weight model: {weight_model:?}");
     eprintln!(
         "detecting (charge {}..={}, {} ppm, σ_rt {:.4} min, ±{} scans, seed floor {:.0}, coverage {:.0}%) ...",
         params.min_charge,
@@ -85,12 +124,14 @@ fn main() {
     );
     let t1 = Instant::now();
     let detected = detect_features(&engine, &params);
+    let detect_dur = t1.elapsed();
+    timings.push(("detect".into(), detect_dur.as_secs_f64()));
     let detected_intensity: f64 = detected.iter().map(|f| f.summed_intensity).sum();
     eprintln!(
-        "  {} features detected, explained {:.1}% of ΣTIC  ({:?})",
+        "  {} features detected, explained {:.1}% of ΣTIC  ({:.1?})",
         detected.len(),
         100.0 * detected_intensity / total_intensity,
-        t1.elapsed()
+        detect_dur
     );
     write_detected_tsv(&detected_path, &detected);
     eprintln!("  wrote {} detected features -> {detected_path}", detected.len());
@@ -121,11 +162,13 @@ fn main() {
             );
         }
     }
+    let refine_dur = t2.elapsed();
+    timings.push(("refine".into(), refine_dur.as_secs_f64()));
     eprintln!(
-        "  {} / {} features refined against averaged composites  ({:?})",
+        "  {} / {} features refined against averaged composites  ({:.1?})",
         refined.len(),
         detected.len(),
-        t2.elapsed()
+        refine_dur
     );
     write_refined_tsv(&refined_path, &refined);
     eprintln!("  wrote {} refined features -> {refined_path}", refined.len());
@@ -133,17 +176,57 @@ fn main() {
     // --- resolve charge-state consensus --------------------------------------------------------
     let t3 = Instant::now();
     let resolved = resolve_charge_state_consensus(&refined, 10.0, 0.1);
+    let consensus_dur = t3.elapsed();
+    timings.push(("charge-state consensus".into(), consensus_dur.as_secs_f64()));
     eprintln!(
-        "  {} peptide-level features after charge-state consensus  ({:?})",
+        "  {} peptide-level features after charge-state consensus  ({:.1?})",
         resolved.len(),
-        t3.elapsed()
+        consensus_dur
     );
 
+    let t4 = Instant::now();
     write_tsv(out_path, &resolved);
+    let write_dur = t4.elapsed();
+    timings.push(("write resolved".into(), write_dur.as_secs_f64()));
     eprintln!("wrote {} -> {}", resolved.len(), out_path);
 
     if let Some(ref_path) = reference_path {
+        let t5 = Instant::now();
         compare_to_reference(ref_path, &resolved);
+        timings.push(("compare".into(), t5.elapsed().as_secs_f64()));
+    }
+
+    // --- timing summary (chat + log file) ------------------------------------------------------
+    let total = run_start.elapsed().as_secs_f64();
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("=== timing summary ===".into());
+    lines.push(format!("spectra file: {spectra_path}"));
+    lines.push(format!(
+        "{} MS1 scans, {} peaks, {} detected, {} refined, {} resolved features",
+        scans.len(),
+        n_peaks,
+        detected.len(),
+        refined.len(),
+        resolved.len()
+    ));
+    for (name, secs) in &timings {
+        lines.push(format!("  {name:<24} {secs:8.2} s  ({:4.1}%)", 100.0 * secs / total));
+    }
+    lines.push(format!("  {:<24} {total:8.2} s", "TOTAL"));
+
+    for l in &lines {
+        eprintln!("{l}");
+    }
+    // Append to the log file so repeated runs accumulate a history (never blocks the run).
+    match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(mut f) => {
+            for l in &lines {
+                let _ = writeln!(f, "{l}");
+            }
+            let _ = writeln!(f);
+            eprintln!("timing log appended to {log_path}");
+        }
+        Err(e) => eprintln!("  WARN: could not write timing log {log_path} ({e})"),
     }
 }
 
@@ -152,8 +235,10 @@ fn main() {
 fn write_detected_tsv(path: &str, detected: &[DetectedFeature]) {
     let mut rows: Vec<&DetectedFeature> = detected.iter().collect();
     rows.sort_by(|a, b| b.summed_intensity.total_cmp(&a.summed_intensity));
-    let f = File::create(path).expect("cannot create detected tsv");
-    let mut w = BufWriter::new(f);
+    let mut w = match open_out(path) {
+        Some(w) => w,
+        None => return,
+    };
     writeln!(
         w,
         "Monoisotopic Mass\tCharge\tMono m/z\tApex RT\tRT Start\tRT End\tSummed Intensity\t\
@@ -189,8 +274,10 @@ fn write_refined_tsv(path: &str, refined: &[RefinedFeature]) {
             .summed_intensity
             .total_cmp(&a.detected.summed_intensity)
     });
-    let f = File::create(path).expect("cannot create refined tsv");
-    let mut w = BufWriter::new(f);
+    let mut w = match open_out(path) {
+        Some(w) => w,
+        None => return,
+    };
     writeln!(
         w,
         "Refined Monoisotopic Mass\tCharge\tApex RT\tSummed Intensity\tDecon Score\t\
@@ -219,12 +306,14 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
     let mut rows: Vec<&ResolvedFeature> = resolved.iter().collect();
     rows.sort_by(|a, b| b.summed_intensity.total_cmp(&a.summed_intensity));
 
-    let f = File::create(path).expect("cannot create output tsv");
-    let mut w = BufWriter::new(f);
+    let mut w = match open_out(path) {
+        Some(w) => w,
+        None => return,
+    };
     writeln!(
         w,
         "Monoisotopic Mass\tCharge States\tNum Charge States\tPrimary Charge\tMono m/z (primary)\t\
-         Apex RT\tRT Start\tRT End\tSummed Intensity\tCross-Charge Support\tNum Members"
+         RT Start\tRT Apex\tRT End\tSummed Intensity\tCross-Charge Support\tNum Members"
     )
     .unwrap();
     for r in rows {
@@ -253,8 +342,8 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             r.charge_states.len(),
             primary_charge,
             mono_mz,
-            r.apex_rt,
             r.start_rt,
+            r.apex_rt,
             r.end_rt,
             r.summed_intensity,
             r.cross_charge_support,

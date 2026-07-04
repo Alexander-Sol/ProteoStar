@@ -229,3 +229,59 @@ is `DeconEnvelope`). Default `ClassicDeconvolutionParameters` are bottom-up: cha
 - ~~The **`SpectralAveraging`** port (default-config subset).~~ **Done** —
   `src/spectral_averaging.rs`.
 - ~~A small **`DeconEnvelope`** extension to expose `monoisotopic_mass_predictions`.~~ **Done.**
+
+### Session 3 (2026-07-04) — first real-data run + hardening
+First end-to-end run on a real file (`04-17-23_CA_Tryp_HCD_10min.raw`, 2689 MS1 scans, 17.6M
+peaks) via `examples/detect_features_tsv.rs`. Changes made from what it exposed:
+- **Coverage stop + seed floor.** `TraceKernelParameters` gained `coverage_target` (stop once
+  that fraction of ΣTIC is explained — the design's primary stopping criterion; run used 0.75)
+  and `min_seed_intensity` (noise floor; early-breaks the intensity-sorted seed loop). Together
+  they bound runtime and focus on the big signal.
+- **RT window is now a *time* window, not a scan count.** `rt_half_window_minutes` (≈2σ) replaces
+  the scan-count `half_window_scans` (kept, legacy/unused): DDA interleaves variable MS2 counts
+  between MS1 scans, so a fixed ±N-scan window spanned ~2 min and made over-wide features that
+  over-claimed and split one elution into several. The matched filter now walks scans outward from
+  the apex, gated by RT distance.
+- **Intra-hypothesis peak dedup.** For high z the comb spacing `(C13−C12)/z` is small, so two
+  isotope slots could resolve to the *same* physical peak — double-counting response/intensity and
+  inflating the observed-isotope count. `score_hypothesis` now tracks a per-hypothesis `used` set.
+  (Cross-feature claiming was already correct: one sequential `HashSet<PeakKey>`, accepted peaks
+  inserted, scoring skips claimed peaks — no peak is ever assigned to two features.)
+- **Consensus merges on RT-range *overlap*, not just apex proximity.** `features_link` now groups
+  same-mass features whose RT ranges overlap (padded), collapsing residual duplicate features into
+  one. Result: output duplication went 9% → **0%**.
+- **Refinement windowing (perf).** `refine_feature` slices each window scan to the feature's local
+  m/z neighbourhood before averaging (binary-searched), instead of binning the full scan — the fix
+  for a multi-minute stall. Trade-off noted: `RelativeToTics` then uses the sliced TIC (negligible
+  for the charge/mass inference).
+- **Validation snapshot** (untargeted vs base-FlashLFQ PSM peaks; run is on the *uncalibrated* raw,
+  reference reports *theoretical* masses): 75% of ΣTIC explained; ~2840 resolved features vs
+  ~620 PSM peaks; recall 29% at (20 ppm, 0.3 min) rising to ~70% at (100 ppm, 1 min, ±2 Da) and
+  ~84% loose — i.e. **good sensitivity, gated by mass accuracy**. A systematic **+10 ppm** measured
+  vs theoretical bias is the raw's own (uncalibrated) mass error, not a detector fault; off-by-one
+  monoisotope assignment is the next-biggest lever. `examples/detect_features_tsv.rs` writes
+  resolved + `.detected`/`.refined` intermediate TSVs and reports recall against a reference.
+
+### Session 4 (2026-07-04) — averagine comb weights, off-by-one, averaging-window cap
+Higher-coverage runs + a PSM/untargeted join (`untargeted_vs_psm_join.tsv`) showed the
+discrepancy breakdown vs the wide-tol PSM set: **exact 43%, mass-shift (off-by-one) 17%,
+ppm-off 19%, rt-only 21%, unmatched 0.2%** — i.e. off-by-one is the biggest *fixable* bucket.
+- **Averagine comb weights — implemented** (`CombWeightModel::Averagine`;
+  `deconvolution::averagine_comb_weights`, keyed by most-intense mass, plus
+  `averagine_intensities_from_mono`, keyed by the monoisotope). Benchmarked against Poisson at
+  90% coverage: **240 vs 249** PSM peaks — *slightly worse*. Conclusion: the off-by-one is **not**
+  in the detector's comb weights (the resolved mass comes from `classic_deconvolute`, not the
+  comb). Poisson stays the default; averagine kept as a selectable option (`COMB_MODEL=averagine`).
+- **Averagine off-by-one corrector — implemented + tested, NOT wired.**
+  `feature_refinement::correct_monoisotope_offbyone` scores mono candidates (0, ±1, −2 ¹³C) by
+  cosine similarity of the observed composite vs the averagine envelope. On real data it
+  **regressed** recall (233 vs 249 — flips more correct monos than it fixes; the cosine metric
+  isn't discriminative enough on chimeric composites), so it is left behind `#[allow(dead_code)]`
+  with a note. Needs a strictly non-regressive gate before wiring.
+- **Averaging-window cap — fixed (net win).** `refine_feature` was averaging the feature's *full*
+  claimed-peak scan extent, which under the ±2σ detection window is ~100 MS1 scans in dense
+  regions. Now capped to `MAX_SCANS_TO_AVERAGE = 7` scans centred on the apex (asserted), matching
+  SpectralAveraging's small-window intent. Result at 90% coverage: **refine 124 s → 35 s**
+  (3.5× faster), total 203 s → 126 s, and recall **40.2% → 41.0%** (tighter composite = cleaner
+  deconvolution, less co-eluting interference).
+- **Runtime profile** now logged per-step to chat + a `.log` file (appends across runs).

@@ -352,6 +352,10 @@ struct Averagine {
     all_intensities: Vec<Vec<f64>>,
     most_intense_masses: Vec<f64>,
     diff_to_monoisotopic: Vec<f64>,
+    /// Monoisotopic mass of each entry (`most_intense − diff_to_monoisotopic`), ascending. Not part
+    /// of the C# model; added so an arbitrary mono mass can be looked up (for the off-by-one
+    /// corrector), which the intensity-keyed `most_intense_masses` table cannot do directly.
+    monoisotopic_masses: Vec<f64>,
 }
 
 impl Averagine {
@@ -415,11 +419,18 @@ impl Averagine {
             all_intensities.push(intensities);
         }
 
+        let monoisotopic_masses = most_intense_masses
+            .iter()
+            .zip(diff_to_monoisotopic.iter())
+            .map(|(mi, d)| mi - d)
+            .collect();
+
         Averagine {
             all_masses,
             all_intensities,
             most_intense_masses,
             diff_to_monoisotopic,
+            monoisotopic_masses,
         }
     }
 
@@ -443,6 +454,82 @@ impl Averagine {
 
 /// Process-wide, lazily built averagine model (mirrors the C# static tables).
 static AVERAGINE: LazyLock<Averagine> = LazyLock::new(Averagine::build);
+
+/// Averagine isotope envelope as per-isotope **comb weights**, for the untargeted trace kernel's
+/// `CombWeightModel::Averagine`. Given the neutral mass of the **most intense** isotope peak (the
+/// trace-kernel seed), returns intensities indexed from the monoisotope (`k = 0`, then `k = 1` at
+/// `+ (C13 − C12)`, …), summed per isotope index and normalized so the maximum weight is `1.0`.
+///
+/// This is the table-driven analogue of the closed-form Poisson comb
+/// ([`crate::trace_kernel::poisson_comb_weights`]). It is more accurate near the mass where the
+/// envelope mode shifts off the monoisotope (~1.8 kDa) — exactly where a Poisson `i*` can misplace
+/// the monoisotope by one ¹³C unit — because it uses the real averagine peak intensities rather than
+/// a single-parameter approximation. The vector is truncated once a post-mode weight falls below
+/// `min_weight` (relative to the max), or at `max_isotopes` entries.
+pub fn averagine_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*AVERAGINE;
+    let idx = model.get_most_intense_mass_index(most_intense_mass);
+    let mono = model.most_intense_masses[idx] - model.get_diff_to_monoisotopic(idx);
+    averagine_envelope_by_index(idx, mono, min_weight, max_isotopes)
+}
+
+/// Averagine isotope envelope for a peptide of monoisotopic mass `mono_mass`, returned as per-isotope
+/// intensities indexed from the monoisotope (`k = 0`), normalized so the maximum weight is `1.0`.
+///
+/// The mono-keyed counterpart of [`averagine_comb_weights`] (which is keyed by the *most-intense*
+/// mass). Used by the off-by-one corrector to compare the observed envelope against the expected
+/// averagine envelope anchored at several candidate monoisotopes.
+pub fn averagine_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*AVERAGINE;
+    let idx = get_closest_index(&model.monoisotopic_masses, mono_mass, ArraySearchOption::Closest);
+    let mono = model.monoisotopic_masses[idx];
+    averagine_envelope_by_index(idx, mono, min_weight, max_isotopes)
+}
+
+/// Shared core of the two averagine-envelope accessors: bins averagine entry `idx`'s
+/// intensity-sorted peaks back into isotope indices relative to `mono`, normalizes to max 1.0, and
+/// trims the descending high-mass tail below `min_weight` (keeping every tooth up to and including
+/// the mode — the low-mass teeth are what place the monoisotope).
+fn averagine_envelope_by_index(idx: usize, mono: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*AVERAGINE;
+    let masses = model.get_all_theoretical_masses(idx);
+    let intensities = model.get_all_theoretical_intensities(idx);
+
+    let mut weights: Vec<f64> = Vec::new();
+    for (&m, &inten) in masses.iter().zip(intensities.iter()) {
+        let k = ((m - mono) / C13_MINUS_C12).round();
+        if k < 0.0 {
+            continue;
+        }
+        let k = k as usize;
+        if k >= weights.len() {
+            weights.resize(k + 1, 0.0);
+        }
+        weights[k] += inten;
+    }
+    if weights.is_empty() {
+        return weights;
+    }
+
+    let max_w = weights.iter().copied().fold(0.0_f64, f64::max);
+    if max_w > 0.0 {
+        for w in weights.iter_mut() {
+            *w /= max_w;
+        }
+    }
+
+    weights.truncate(max_isotopes);
+    let mode = weights
+        .iter()
+        .enumerate()
+        .fold(0usize, |best, (i, &w)| if w > weights[best] { i } else { best });
+    let mut end = weights.len();
+    while end > mode + 1 && weights[end - 1] < min_weight {
+        end -= 1;
+    }
+    weights.truncate(end);
+    weights
+}
 
 // ---------------------------------------------------------------------------
 // The algorithm
@@ -980,6 +1067,30 @@ mod tests {
             median(&found.monoisotopic_mass_predictions),
             found.monoisotopic_mass
         );
+    }
+
+    #[test]
+    fn averagine_comb_weights_normalize_and_shift_mode() {
+        // Light peptide: the monoisotope is the tallest tooth (mode at k=0); max normalized to 1.
+        let light = averagine_comb_weights(1000.0, 1e-3, 20);
+        assert!(!light.is_empty());
+        let max_l = light.iter().copied().fold(0.0_f64, f64::max);
+        assert!((max_l - 1.0).abs() < 1e-12, "weights normalized to max 1");
+        let mode_l = light
+            .iter()
+            .enumerate()
+            .fold(0usize, |b, (i, &w)| if w > light[b] { i } else { b });
+        assert_eq!(mode_l, 0, "light mass: monoisotope is the tallest tooth");
+
+        // Heavy peptide: the envelope mode shifts *off* the monoisotope (k > 0) — precisely the
+        // off-by-one regime averagine models better than a single-parameter Poisson.
+        let heavy = averagine_comb_weights(3500.0, 1e-3, 30);
+        let mode_h = heavy
+            .iter()
+            .enumerate()
+            .fold(0usize, |b, (i, &w)| if w > heavy[b] { i } else { b });
+        assert!(mode_h >= 1, "heavy mass: mode above the monoisotope, got {mode_h}");
+        assert!(heavy[0] > 0.0, "monoisotope tooth retained (needed to place the mono)");
     }
 
     #[test]
