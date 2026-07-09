@@ -473,6 +473,17 @@ pub fn averagine_comb_weights(most_intense_mass: f64, min_weight: f64, max_isoto
     averagine_envelope_by_index(idx, mono, min_weight, max_isotopes)
 }
 
+/// Monoisotopic neutral mass for an observed **most-abundant** isotope peak of neutral mass
+/// `most_intense_mass`, using the averagine most-intense→mono offset (`diff_to_monoisotopic`) at the
+/// nearest averagine entry. This is the inverse of the trace kernel's seed anchoring: given an envelope
+/// apex (the tallest, cleanly-observed isotope), place the monoisotope below it. Used by the multi-
+/// envelope refine to seed one component per grid-local-maximum apex.
+pub fn averagine_mono_from_most_intense(most_intense_mass: f64) -> f64 {
+    let model = &*AVERAGINE;
+    let idx = model.get_most_intense_mass_index(most_intense_mass);
+    most_intense_mass - model.get_diff_to_monoisotopic(idx)
+}
+
 /// Averagine isotope envelope for a peptide of monoisotopic mass `mono_mass`, returned as per-isotope
 /// intensities indexed from the monoisotope (`k = 0`), normalized so the maximum weight is `1.0`.
 ///

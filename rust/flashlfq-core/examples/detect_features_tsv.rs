@@ -17,14 +17,16 @@ use std::time::Instant;
 use flashlfq_core::deconvolution::{ClassicDeconvolutionParameters, Polarity};
 use flashlfq_core::feature_refinement::{
     four_way_decon, four_way_decon_detector_anchor, four_way_decon_gated, refine_feature,
-    refine_feature_censored, refine_feature_shift, refine_feature_shift_neighbor,
-    resolve_charge_state_consensus, DeconView, FourWayDecon, NeighborIndex, RefinedFeature,
-    ResolvedFeature,
+    refine_feature_censored, refine_feature_multi, refine_feature_shift, refine_feature_shift_neighbor,
+    resolve_charge_state_consensus, resolve_consensus_by_apex, DeconView, FourWayDecon, NeighborIndex,
+    RefinedFeature, ResolvedFeature,
 };
 use flashlfq_core::isotope_shift_decon::envelope_fit_cosine;
 use flashlfq_core::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12};
 use flashlfq_core::joint_fit::{joint_fit_target_shift, Component};
-use flashlfq_core::peak_indexing::{read_ms1_scans, PeakIndexingEngine, PeakKey, Scan};
+use flashlfq_core::peak_indexing::{
+    read_ms1_scans, IndexedMassSpectralPeak, PeakIndexingEngine, PeakKey, Scan,
+};
 use flashlfq_core::trace_kernel::{
     detect_features, estimate_noise_floor, median_ms1_scan_spacing_minutes, CombWeightModel,
     DetectedFeature, ScoreModel, TraceKernelParameters, FWHM_TO_SIGMA,
@@ -398,8 +400,73 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(20_000);
+    // --- top-down preset -----------------------------------------------------------------------
+    // TOPDOWN=1 flips the bottom-up defaults to a top-down-proteomics configuration: high charge
+    // range (proteoforms ionize to z≈60), a long isotope comb (a ~20 kDa envelope spans ~40-50
+    // significant peaks, so the 12-tooth bottom-up comb truncates below the envelope apex), a
+    // slightly higher observed-isotope floor (rich envelopes make ≥3 teeth a cheap false-harmonic
+    // filter), and a wider trace half-width (larger species elute broader). Every value below is a
+    // *default* — the individual env vars (MIN_CHARGE/MAX_CHARGE/MAX_ISOTOPES/MIN_ISOTOPES_OBS/
+    // TRACE_MAX_HALF_WIDTH_SEC) still override it, so the preset is a starting point for the sweep.
+    let topdown = matches!(std::env::var("TOPDOWN").as_deref(), Ok("1") | Ok("true"));
+    let min_charge = std::env::var("MIN_CHARGE")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(1);
+    let max_charge = std::env::var("MAX_CHARGE")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(if topdown { 60 } else { 6 });
+    let max_isotopes = std::env::var("MAX_ISOTOPES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(if topdown { 60 } else { 12 });
+    let min_isotopes_observed = std::env::var("MIN_ISOTOPES_OBS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(if topdown { 3 } else { 2 });
+    // Top-down species elute broader; widen the trace half-width guard unless the caller set it.
+    let trace_half_width_min = if std::env::var("TRACE_MAX_HALF_WIDTH_SEC").is_err() && topdown {
+        1.0
+    } else {
+        trace_half_width_min
+    };
+    if topdown {
+        eprintln!(
+            "TOPDOWN preset: charge {min_charge}..={max_charge}, max_isotopes {max_isotopes}, \
+             min_isotopes_observed {min_isotopes_observed}, trace half-width {:.0} s",
+            trace_half_width_min * 60.0
+        );
+    }
+    // Recharge (envelope-fit charge re-selection in refinement) must consider the full top-down
+    // charge range, else a detected high-z feature yields an empty candidate set and is dropped.
+    flashlfq_core::feature_refinement::set_recharge_max_charge(max_charge);
+    // Top-down monoisotope-offset fit (averagine envelope fit over ±k ¹³C). Defaults ON for the
+    // TOPDOWN preset (k=3), off otherwise; TD_MONO_FIT=<k> overrides (TD_MONO_FIT=0 disables).
+    let td_mono_fit_kmax = std::env::var("TD_MONO_FIT")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(if topdown { 3 } else { 0 });
+    flashlfq_core::feature_refinement::set_td_mono_fit_kmax(td_mono_fit_kmax);
+    if td_mono_fit_kmax > 0 {
+        eprintln!("TD mono-offset fit: ENABLED (±{td_mono_fit_kmax} ¹³C averagine fit, mass ≥ 3 kDa)");
+    }
+    // Cross-charge off-by-one bridge width in the consensus. Bottom-up default 2. TOPDOWN default 0
+    // (DISABLED): the bridge merges features ~1 Da apart as one proteoform's off-by-one and votes one
+    // mass, but top-down is dense with genuinely-close species — notably deamidation (+0.984 Da) sits
+    // only 0.019 Da from a +1.003 Da isotope step (~1 ppm at 15 kDa) — so bridging conflates distinct
+    // proteoforms onto a wrong mass. A/B on Jurkat: bridge 4→58%, 2→61%, 1→65%, 0→75% strict recall.
+    let offbyone_units = std::env::var("OFFBYONE_UNITS")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(if topdown { 0 } else { 2 });
+    flashlfq_core::feature_refinement::set_offbyone_units(offbyone_units);
     let base = TraceKernelParameters {
         ppm_tolerance: 10.0,
+        min_charge,
+        max_charge,
+        max_isotopes,
+        min_isotopes_observed,
         min_seed_intensity,
         coverage_target,
         weight_model,
@@ -472,8 +539,19 @@ fn main() {
         params.min_seed_intensity,
         params.coverage_target * 100.0
     );
+    // LOAD_DETECTED=<path> skips the (expensive) detect stage and loads a compact detected-feature
+    // cache written by a prior run's SAVE_DETECTED — for fast iteration on the refine/resolve stages
+    // (which are ~10% of runtime) without paying the ~5-min detect each time. The cache keeps only the
+    // scalar fields plus the single most-intense claimed peak (the anchor), which is all the default
+    // shift-apex refine path reads from `peaks`; see build_feature_slices.
     let t1 = Instant::now();
-    let detected = detect_features(&engine, &params);
+    let detected = if let Ok(cache) = std::env::var("LOAD_DETECTED") {
+        let d = load_detected_cache(&cache);
+        eprintln!("  loaded {} detected features from cache (detect SKIPPED) <- {cache}", d.len());
+        d
+    } else {
+        detect_features(&engine, &params)
+    };
     let detect_dur = t1.elapsed();
     timings.push(("detect".into(), detect_dur.as_secs_f64()));
     let detected_intensity: f64 = detected.iter().map(|f| f.summed_intensity).sum();
@@ -483,6 +561,10 @@ fn main() {
         100.0 * detected_intensity / total_intensity,
         detect_dur
     );
+    if let Ok(cache) = std::env::var("SAVE_DETECTED") {
+        save_detected_cache(&cache, &detected);
+        eprintln!("  saved detected-feature cache ({} features) -> {cache}", detected.len());
+    }
     write_detected_tsv(&detected_path, &detected);
     eprintln!("  wrote {} detected features -> {detected_path}", detected.len());
 
@@ -601,9 +683,22 @@ fn main() {
     //   classic (default) | shift_composite | shift_apex  (detector-anchored FlashLFQ-style shift).
     // Default: the detector-anchored shift decon on the apex scan (REFINE_METHOD=classic to opt out
     // back to the parity-locked classic deconvolution; shift_composite selects the averaged composite).
-    let refine_method = std::env::var("REFINE_METHOD").unwrap_or_else(|_| "shift_apex".to_string());
+    // TOPDOWN defaults to the multi-envelope refine (best top-down config); bottom-up stays shift_apex.
+    let refine_method = std::env::var("REFINE_METHOD")
+        .unwrap_or_else(|_| if topdown { "multi".into() } else { "shift_apex".into() });
     let use_shift_apex = refine_method == "shift_apex";
     let use_shift = use_shift_apex || refine_method == "shift_composite";
+    // Multi-envelope refine: model the composite window as a combination of co-eluting averagine
+    // envelopes (one per grid-local-maximum apex) fit jointly by NNLS. TD_MULTI_COMPONENTS caps the
+    // number of envelopes (default 4).
+    let use_multi = refine_method == "multi";
+    let multi_components = std::env::var("TD_MULTI_COMPONENTS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
+    if use_multi {
+        eprintln!("  refine method: multi-envelope joint fit (≤{multi_components} co-eluting averagines per window)");
+    }
     // Apex-only refinement is the default, so the averaged composite is built ONLY when a method
     // actually reads it (shift_composite). On CA/Lumos 10-min the apex scan beats the averaged
     // composite: 97.4% vs 96.0% recall, 94.4% vs 92.3% charge accuracy — so we skip the composite
@@ -706,7 +801,9 @@ fn main() {
         refined = out.into_iter().flatten().collect();
     } else {
         for (i, f) in detected.iter().enumerate() {
-            let r = if let Some(idx) = &neighbor_idx {
+            let r = if use_multi {
+                refine_feature_multi(f, &scans, &avg, 20.0, multi_components)
+            } else if let Some(idx) = &neighbor_idx {
                 let mask = neighbor_mask_for(idx, f, neighbor_min_ratio);
                 refine_feature_shift_neighbor(f, &scans, &avg, 20.0, use_shift_apex, recharge, &mask, average_spectra)
             } else if use_shift {
@@ -781,8 +878,30 @@ fn main() {
     }
 
     // --- resolve charge-state consensus --------------------------------------------------------
+    // TD_CONSENSUS=apex groups cross-charge by the robust apex (most-abundant) neutral mass and resolves
+    // each proteoform's monoisotope once from the consensus apex (top-down); default is the mono-keyed
+    // consensus. RT window for apex grouping is wider (co-eluting charge states share an apex RT).
+    // TOPDOWN defaults to apex-mass cross-charge consensus; TD_CONSENSUS=mono forces the mono-keyed path.
+    let consensus_by_apex = match std::env::var("TD_CONSENSUS").as_deref() {
+        Ok("apex") => true,
+        Ok("mono") => false,
+        _ => topdown,
+    };
+    // Apex grouping can tolerate an integer-¹³C apex-isotope drift between charge states (TD_APEX_SHIFT).
+    // Default 0 (tight): A/B showed shift=1 REGRESSES badly (intersection strict 84.2%→48.0%) — allowing
+    // the drift over-merges genuinely-close distinct species (deamidation +0.984, off-by-N proteoforms),
+    // and that cost dominates the occasional benefit of grouping a drifting charge state.
+    let apex_shift = std::env::var("TD_APEX_SHIFT")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0);
     let t3 = Instant::now();
-    let resolved = resolve_charge_state_consensus(&refined, 10.0, 0.1);
+    let resolved = if consensus_by_apex {
+        eprintln!("  consensus: apex-mass cross-charge grouping (TD_CONSENSUS=apex, ±{apex_shift} ¹³C apex shift)");
+        resolve_consensus_by_apex(&refined, 15.0, 0.3, apex_shift)
+    } else {
+        resolve_charge_state_consensus(&refined, 10.0, 0.1)
+    };
     let consensus_dur = t3.elapsed();
     timings.push(("charge-state consensus".into(), consensus_dur.as_secs_f64()));
     eprintln!(
@@ -1123,6 +1242,90 @@ fn write_detected_tsv(path: &str, detected: &[DetectedFeature]) {
         .unwrap();
     }
     w.flush().unwrap();
+}
+
+/// Writes a **compact detected-feature cache** for fast refine/resolve iteration (see `LOAD_DETECTED`).
+/// Keeps every scalar field plus only the single most-intense claimed peak (the anchor) — all the
+/// default shift-apex refine path reads from `peaks`. Tab-separated, one feature per line.
+fn save_detected_cache(path: &str, detected: &[DetectedFeature]) {
+    let mut w = match open_out(path) {
+        Some(w) => w,
+        None => return,
+    };
+    writeln!(
+        w,
+        "mono_mass\tcharge\tmono_mz\tapex_scan\tapex_rt\tstart_rt\tend_rt\tsummed_int\tscore\t\
+         num_iso\tanchor_mz\tanchor_int\tanchor_scan\tanchor_rt"
+    )
+    .unwrap();
+    for d in detected {
+        // Anchor = most-intense claimed peak (what refine uses); fall back to the mono m/z if empty.
+        let anchor = d
+            .peaks
+            .iter()
+            .max_by(|a, b| a.intensity.total_cmp(&b.intensity));
+        let (amz, aint, ascan, art) = match anchor {
+            Some(p) => (p.mz, p.intensity, p.zero_based_scan_index, p.retention_time),
+            None => (d.mono_mz as f32, 0.0, d.apex_scan_index, d.apex_rt as f32),
+        };
+        writeln!(
+            w,
+            "{:.6}\t{}\t{:.6}\t{}\t{:.5}\t{:.5}\t{:.5}\t{:.6e}\t{:.6e}\t{}\t{:.6}\t{:.6e}\t{}\t{:.5}",
+            d.monoisotopic_mass,
+            d.charge,
+            d.mono_mz,
+            d.apex_scan_index,
+            d.apex_rt,
+            d.start_rt,
+            d.end_rt,
+            d.summed_intensity,
+            d.score,
+            d.num_isotopes_observed,
+            amz,
+            aint,
+            ascan,
+            art
+        )
+        .unwrap();
+    }
+    w.flush().unwrap();
+}
+
+/// Loads a compact detected-feature cache written by [`save_detected_cache`]. Reconstructs each
+/// `DetectedFeature` with `peaks` = the single anchor peak (sufficient for the shift-apex refine path).
+fn load_detected_cache(path: &str) -> Vec<DetectedFeature> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read detected cache {path}: {e}"));
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 {
+            continue; // header
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 14 {
+            continue;
+        }
+        let anchor = IndexedMassSpectralPeak {
+            mz: f[10].parse().unwrap_or(0.0),
+            intensity: f[11].parse().unwrap_or(0.0),
+            zero_based_scan_index: f[12].parse().unwrap_or(0),
+            retention_time: f[13].parse().unwrap_or(0.0),
+        };
+        out.push(DetectedFeature {
+            monoisotopic_mass: f[0].parse().unwrap_or(0.0),
+            charge: f[1].parse().unwrap_or(1),
+            mono_mz: f[2].parse().unwrap_or(0.0),
+            apex_scan_index: f[3].parse().unwrap_or(0),
+            apex_rt: f[4].parse().unwrap_or(0.0),
+            start_rt: f[5].parse().unwrap_or(0.0),
+            end_rt: f[6].parse().unwrap_or(0.0),
+            summed_intensity: f[7].parse().unwrap_or(0.0),
+            score: f[8].parse().unwrap_or(0.0),
+            num_isotopes_observed: f[9].parse().unwrap_or(0),
+            peaks: vec![anchor],
+        });
+    }
+    out
 }
 
 /// Writes the refined features (post composite-deconvolution, pre charge-consensus) to a TSV,
