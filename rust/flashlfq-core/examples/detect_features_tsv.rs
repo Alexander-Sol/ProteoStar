@@ -545,7 +545,7 @@ fn main() {
     // scalar fields plus the single most-intense claimed peak (the anchor), which is all the default
     // shift-apex refine path reads from `peaks`; see build_feature_slices.
     let t1 = Instant::now();
-    let detected = if let Ok(cache) = std::env::var("LOAD_DETECTED") {
+    let mut detected = if let Ok(cache) = std::env::var("LOAD_DETECTED") {
         let d = load_detected_cache(&cache);
         eprintln!("  loaded {} detected features from cache (detect SKIPPED) <- {cache}", d.len());
         d
@@ -634,6 +634,78 @@ fn main() {
     if std::env::var("DETECT_ONLY").is_ok() {
         eprintln!("DETECT_ONLY set — skipping refine/resolve/compare after {} detected features.", detected.len());
         return;
+    }
+
+    // --- IsoDec charge re-assignment (opt-in) --------------------------------------------------
+    // ISODEC_CHARGE=1: replace each feature's detector-assigned charge with the native IsoDec neural
+    // predictor's call, run on the raw apex-scan peaks in IsoDec's local m/z window. The detector
+    // over-calls charge on weak features (spurious high z); IsoDec's charge is more reliable, and since
+    // our mono mass is derived from the apex mass *at the charge*, a corrected charge corrects the mass.
+    // Only overrides when IsoDec is confident (>= ISODEC_MINPEAKS window peaks, non-zero call). Mono m/z
+    // and mass are recomputed at the new charge from the feature's most-intense (anchor) peak.
+    // Default ON for TOPDOWN (validated: +10pp intersection strict recall, off-by-one gap 15.7→5.8pp);
+    // ISODEC_CHARGE=0 disables. Needs a full detect (uses the features' claimed peaks) and ~4× runtime.
+    let isodec_charge = match std::env::var("ISODEC_CHARGE").as_deref() {
+        Ok("1") | Ok("true") => true,
+        Ok("0") | Ok("false") => false,
+        _ => topdown && std::env::var("LOAD_DETECTED").is_err(),
+    };
+    if isodec_charge {
+        use flashlfq_core::deconvolution::averagine_mono_from_most_intense;
+        use flashlfq_core::isodec::default_model;
+        let min_peaks = std::env::var("ISODEC_MINPEAKS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(6);
+        let model = default_model();
+        let ti = Instant::now();
+        let mut changed = 0usize;
+        for f in detected.iter_mut() {
+            let anchor = match f.peaks.iter().max_by(|a, b| a.intensity.total_cmp(&b.intensity)) {
+                Some(p) => *p,
+                None => continue,
+            };
+            let anchor_mz = anchor.mz as f64;
+            // Feed IsoDec the RAW apex-scan peaks in this feature's own m/z footprint (the span of its
+            // claimed teeth, padded) — i.e. the claimed teeth PLUS the unclaimed intervening peaks.
+            // Claimed teeth alone are blind to an under-called low harmonic (a real z=10 called z=5 has
+            // its extra peaks at the half-spacing offsets, never claimed); the footprint's raw peaks
+            // include them so IsoDec can see the true higher charge. Bounded to the footprint so it does
+            // not grab co-eluting neighbours the way a fixed wide window does. Needs full detect (the
+            // LOAD_DETECTED cache keeps only the anchor peak, so the footprint would be a point).
+            let (mut mzmin, mut mzmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            for p in &f.peaks {
+                let m = p.mz as f64;
+                mzmin = mzmin.min(m);
+                mzmax = mzmax.max(m);
+            }
+            if !mzmin.is_finite() {
+                continue;
+            }
+            let apex = (f.apex_scan_index.max(0) as usize).min(scans.len().saturating_sub(1));
+            let s = &scans[apex];
+            let lo = s.mz.partition_point(|&m| m < mzmin - 0.1);
+            let hi = s.mz.partition_point(|&m| m <= mzmax + 0.1);
+            if hi.saturating_sub(lo) < min_peaks {
+                continue;
+            }
+            let wmz: Vec<f64> = s.mz[lo..hi].to_vec();
+            let wint: Vec<f32> = s.intensity[lo..hi].iter().map(|&v| v as f32).collect();
+            let z = model.predict_charge(&wmz, &wint);
+            if z >= 1 && z <= params.max_charge && z != f.charge {
+                let apex_mass = anchor_mz * z as f64 - z as f64 * flashlfq_core::isotopic_envelope::PROTON_MASS;
+                let mono = averagine_mono_from_most_intense(apex_mass);
+                f.charge = z;
+                f.monoisotopic_mass = mono;
+                f.mono_mz = mass_to_mz_f64(mono, z);
+                changed += 1;
+            }
+        }
+        eprintln!(
+            "  ISODEC_CHARGE: re-assigned {changed}/{} features' charge via IsoDec (min {min_peaks} window peaks)  ({:.1?})",
+            detected.len(),
+            ti.elapsed()
+        );
     }
 
     // --- refine --------------------------------------------------------------------------------
