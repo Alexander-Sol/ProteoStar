@@ -90,6 +90,15 @@ math.
 - The model + dll were located locally in the mzLib NuGet package; the `.bin` was fetched from the
   UniDec repo (same file mzLib uses).
 
+**Real-data check** (`examples/isodec_realtest.rs`, golden.raw): on clean strong envelopes IsoDec's
+charge matches the detector's AND the true median-spacing charge exactly (z=5..30). Overall agreement is
+low (17%) *because the detector over-calls charge on weak features* — a large tail of spurious z≈57–60
+detections whose real peak spacing implies z≈20–30; **IsoDec correctly rejects these** (predicts the
+spacing-consistent charge, or z=1 no-call on sparse 3–4-peak clusters). This is a **detector** charge
+problem, not an IsoDec one — and it directly explains the ~12% charge recall. Upshot: wiring IsoDec as a
+charge re-assigner/validator should both raise charge accuracy and prune spurious high-charge features.
+IsoDec needs ≳6–8 observed teeth to be reliable (as expected — charge is undeterminable from a few peaks).
+
 **Remaining for a full port:** (1) the isotope-**matching** post-processing (`MPStruct`: from predicted
 charge → matched isotope peaks → mono/avg/peak mass, `knockdown` rounds for chimeras) — needed for
 IsoDec's own mono mass; and (2) **integration** as a refine-stage charge re-assigner (feed each feature's
