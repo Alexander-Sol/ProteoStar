@@ -77,6 +77,26 @@ math.
 - **Effort:** moderate — the network is ~180k params of two `Linear` layers; the real work is faithful
   encoding + matching, both small deterministic C. Weeks, not months.
 
+## Port status (2026-07-09) — charge predictor DONE (native Rust)
+
+`src/isodec.rs` implements the IsoDec **charge predictor** in pure Rust, validated:
+- `encode_phase` ports `encoding.py::encode_phase` (phaseres=8) verbatim — the `(50×8)=400` phase
+  histogram, `phase = (mz/1.00335·z) mod 1`, floor into 8 bins, normalise to max.
+- `IsoDecModel` = the Fast8 MLP (`Linear 400→400 + ReLU + Linear 400→50`, argmax). Weights load from
+  the shipped `phase_model_8.bin` — confirmed a **header-less raw `[w1,b1,w2,b2]` f32 blob of exactly
+  180,450 floats** (721,800 bytes). Embedded via `include_bytes!` (`default_model()`).
+- **Validated:** realistic averagine envelopes at charges 2..30 all predict their exact charge (class→
+  charge is the identity; class 0 = no-call), with the z↔2z harmonics as runner-up logits. 3 unit tests.
+- The model + dll were located locally in the mzLib NuGet package; the `.bin` was fetched from the
+  UniDec repo (same file mzLib uses).
+
+**Remaining for a full port:** (1) the isotope-**matching** post-processing (`MPStruct`: from predicted
+charge → matched isotope peaks → mono/avg/peak mass, `knockdown` rounds for chimeras) — needed for
+IsoDec's own mono mass; and (2) **integration** as a refine-stage charge re-assigner (feed each feature's
+observed cluster to `predict_charge`, replacing/*checking* the detector's charge) → measure charge-recall
+and strict-recall lift on the top-down benchmark. Our existing averagine machinery already turns a charge
+into a mono, so (2) is testable before (1).
+
 ## Recommendation
 
 1. **Prototype Path A first** to measure the recall/mono-accuracy IsoDec delivers on our Jurkat +
