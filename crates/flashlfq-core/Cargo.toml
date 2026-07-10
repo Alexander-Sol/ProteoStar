@@ -1,0 +1,23 @@
+# Vendored from flashlfq-rust/rust/flashlfq-core for the MsViewer backend.
+# De-workspaced: the original inherited version/edition/arrow from its parent Cargo
+# workspace; here those are pinned to concrete values (arrow 54.x as the original comment
+# required). Parity tests/goldens were not copied — only the library + its data/ file.
+[package]
+name = "flashlfq-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust port of FlashLFQ quantification core (vendored for MsViewer)."
+
+[lib]
+name = "flashlfq_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Spectra reader. Defaults pull in zlib-ng-compat (needs a C/CMake toolchain); disable
+# defaults and select a pure-Rust zlib backend. `thermo` adds Thermo `.raw` reading via the
+# `thermorawfilereader` crate (self-contained .NET 8 runtime); mzML stays pure-Rust.
+mzdata = { version = "0.65", default-features = false, features = ["mzml", "miniz_oxide", "thermo"] }
+arrow = "54"
+parquet = "54"
+csv = "1.3"
+serde = { version = "1", features = ["derive"] }

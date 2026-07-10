@@ -28,13 +28,16 @@ export function ViewerShell({
 
 export function Panel({
   header,
-  children
+  children,
+  active = false
 }: {
   header: ReactNode;
   children: ReactNode;
+  /** When true, the panel is visually emphasised (e.g. pinned for exploration). */
+  active?: boolean;
 }) {
   return (
-    <section style={panelStyle}>
+    <section style={active ? panelActiveStyle : panelStyle}>
       {header}
       <div style={panelBodyStyle}>{children}</div>
     </section>
@@ -145,6 +148,13 @@ const panelStyle: CSSProperties = {
   border: "1.5px solid #000",
   overflow: "hidden",
   minHeight: 0
+};
+
+const panelActiveStyle: CSSProperties = {
+  ...panelStyle,
+  backgroundColor: "#eaf1ff",
+  border: "1.5px solid #4c51bf",
+  boxShadow: "inset 0 0 0 1px #4c51bf"
 };
 
 const panelBodyStyle: CSSProperties = {

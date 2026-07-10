@@ -1,0 +1,19 @@
+[package]
+name = "msviewer-tauri"
+version = "0.0.0"
+edition = "2021"
+description = "MsViewer Tauri shell (M0 stub)"
+
+[[bin]]
+name = "msviewer-tauri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pinned to the 54.x line to match the future flashlfq-core dependency.
+arrow = "54"
