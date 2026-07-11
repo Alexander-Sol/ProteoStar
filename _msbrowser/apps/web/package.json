@@ -1,0 +1,19 @@
+{
+  "name": "@msbrowser/web",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@msbrowser/imsp-core": "workspace:*",
+    "@msbrowser/plot-adapter": "workspace:*",
+    "@msbrowser/ui": "workspace:*",
+    "@msbrowser/viewer-state": "workspace:*",
+    "next": "^15.5.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}
