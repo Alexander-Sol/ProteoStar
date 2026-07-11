@@ -1,11 +1,18 @@
 # Vendored from flashlfq-rust/rust/flashlfq-core for the MsViewer backend.
-# De-workspaced: the original inherited version/edition/arrow from its parent Cargo
-# workspace; here those are pinned to concrete values (arrow 54.x as the original comment
-# required). Parity tests/goldens were not copied — only the library + its data/ file.
+# De-workspaced: the original inherits version/edition/license/authors/repository and
+# arrow/rayon from its parent Cargo workspace; here those are pinned to the concrete
+# values the workspace resolves to (see flashlfq-rust/rust/Cargo.toml). Parity
+# tests/goldens are not copied — only the library source + its data/ file.
+#
+# Re-vendored 2026-07-10 to the newest core (adds isodec + feature_export, multi-envelope
+# refine, apex consensus, in-process TOPDOWN detect). Keep arrow/parquet on 54.x.
 [package]
 name = "flashlfq-core"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["mzLib contributors"]
+repository = "https://github.com/smith-chem-wisc/mzLib"
 description = "Pure-Rust port of FlashLFQ quantification core (vendored for MsViewer)."
 
 [lib]
@@ -16,8 +23,12 @@ path = "src/lib.rs"
 # Spectra reader. Defaults pull in zlib-ng-compat (needs a C/CMake toolchain); disable
 # defaults and select a pure-Rust zlib backend. `thermo` adds Thermo `.raw` reading via the
 # `thermorawfilereader` crate (self-contained .NET 8 runtime); mzML stays pure-Rust.
+# NOTE: pin thermorawfilereader/dotnetrawfilereader-sys to =0.7.0 in the consumer's lockfile —
+# 0.7.1 breaks mzdata 0.65.2 (raw_view/bytes API drift).
 mzdata = { version = "0.65", default-features = false, features = ["mzml", "miniz_oxide", "thermo"] }
 arrow = "54"
 parquet = "54"
 csv = "1.3"
 serde = { version = "1", features = ["derive"] }
+# Intra-file detector parallelism (opt-in; see detect_features_parallel).
+rayon = "1.10"

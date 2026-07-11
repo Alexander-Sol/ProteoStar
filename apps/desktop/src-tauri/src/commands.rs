@@ -1,6 +1,11 @@
-//! Tauri command surface (IPC contract §1/§6). M0 returns REAL Arrow with a
-//! FAKE (synthetic) source — every shape matches the contract; the data is
-//! stubbed. M1 replaces the command bodies with flashlfq-core calls (see §7).
+//! Tauri command surface (IPC contract §1/§6).
+//!
+//! M1+: real data. `open_dataset` reads the MS1 scans via flashlfq-core
+//! (`read_ms1_scans` → `PeakIndexingEngine`) and every query is served from the
+//! in-memory `Vec<Scan>`: the TIC is per-scan summed centroided intensity,
+//! spectra are the stored MS1 peak lists, and the range-XIC sums peaks in an m/z
+//! window per scan. MS2 is not yet retained (the vendored reader is MS1-only), so
+//! `get_ms2_for_precursor` returns empty and every scan reports `msLevel = 1`.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -9,12 +14,20 @@ use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 use tauri::State;
 
-use crate::arrow_out;
-use crate::state::{AppState, StubDataset};
+use flashlfq_core::feature_refinement::{
+    self, refine_feature_multi, resolve_consensus_by_apex, RefinedFeature, ResolvedFeature,
+};
+use flashlfq_core::peak_indexing::{read_ms1_scans, PeakIndexingEngine, Scan};
+use flashlfq_core::spectral_averaging::SpectralAveragingParameters;
+use flashlfq_core::trace_kernel::{
+    detect_features, median_ms1_scan_spacing_minutes, TraceKernelParameters, FWHM_TO_SIGMA,
+};
 
-// Stub dataset dimensions (contract §-M0 task spec).
-const SCAN_COUNT: usize = 500;
-const RT_STEP: f32 = 0.1;
+use crate::arrow_out;
+use crate::state::{AppState, OpenDataset};
+
+/// Proton mass (Da) for neutral-mass ↔ m/z conversions.
+const PROTON_MASS: f64 = 1.007_276_466_8;
 
 // ------------------------------------------------------------------ DTOs (JSON)
 
@@ -71,44 +84,31 @@ pub struct ProgressEvent {
 }
 
 /// Rejected-command payload (contract §2 ViewerError).
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ViewerError {
     pub code: String,
     pub message: String,
 }
 
 impl ViewerError {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        ViewerError { code: code.into(), message: message.into() }
+    }
     fn handle_not_found(handle: u64) -> Self {
-        ViewerError {
-            code: "HANDLE_NOT_FOUND".into(),
-            message: format!("no open dataset for handle {handle}"),
-        }
+        ViewerError::new("HANDLE_NOT_FOUND", format!("no open dataset for handle {handle}"))
     }
     fn internal(message: impl Into<String>) -> Self {
-        ViewerError {
-            code: "INTERNAL".into(),
-            message: message.into(),
-        }
+        ViewerError::new("INTERNAL", message)
     }
-    fn scan_out_of_range(scan_index: u32) -> Self {
-        ViewerError {
-            code: "SCAN_OUT_OF_RANGE".into(),
-            message: format!("scan index {scan_index} exceeds {SCAN_COUNT}"),
-        }
+    fn scan_out_of_range(scan_index: u32, count: usize) -> Self {
+        ViewerError::new(
+            "SCAN_OUT_OF_RANGE",
+            format!("scan index {scan_index} exceeds {count}"),
+        )
     }
 }
 
-// ------------------------------------------------------------- synthetic source
-
-/// A visibly peak-shaped chromatogram: low baseline + a few Gaussian bumps.
-fn synthetic_intensity(scan_index: usize) -> f32 {
-    let rt = scan_index as f32 * RT_STEP;
-    let bump = |center: f32, height: f32, width: f32| {
-        let d = rt - center;
-        height * (-(d * d) / (2.0 * width * width)).exp()
-    };
-    500.0 + bump(15.0, 8000.0, 1.5) + bump(30.0, 12000.0, 2.0) + bump(40.0, 5000.0, 1.0)
-}
+// ---------------------------------------------------------------- dataset build
 
 fn basename(path: &str) -> String {
     path.rsplit(['/', '\\'])
@@ -118,19 +118,111 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-fn stub_metadata(path: &str) -> DatasetMetadata {
-    DatasetMetadata {
-        file_name: basename(path),
-        format: "mzml".into(),
-        scan_count: SCAN_COUNT as u32,
-        ms1_scan_count: SCAN_COUNT as u32,
-        ms_levels_present: vec![1],
-        retention_time_range: Some(NumericRange { min: 0.0, max: 50.0 }),
-        mz_range: Some(NumericRange {
-            min: 200.0,
-            max: 2000.0,
-        }),
+/// Read + index a raw/mzML file into the parts of an `OpenDataset`. Runs on a
+/// blocking thread (`.raw` pulls a .NET runtime; both paths are CPU-bound).
+fn build_dataset(path: &str) -> Result<OpenDataset, ViewerError> {
+    let scans = read_ms1_scans(path).map_err(|e| ViewerError::new("READ_ERROR", e.to_string()))?;
+    if scans.is_empty() {
+        return Err(ViewerError::new(
+            "EMPTY_INDEX",
+            "no MS1 scans found in file",
+        ));
     }
+    let engine = PeakIndexingEngine::index_peaks(&scans)
+        .ok_or_else(|| ViewerError::new("EMPTY_INDEX", "no indexable MS1 peaks"))?;
+
+    // Per-scan TIC = summed centroided MS1 intensity (a served chromatogram; not
+    // the vendor instrument TIC, which the MS1-only reader does not surface).
+    let tic: Vec<f32> = scans
+        .iter()
+        .map(|s| s.intensity.iter().sum::<f64>() as f32)
+        .collect();
+
+    let (mut rt_min, mut rt_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut mz_min, mut mz_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for s in &scans {
+        rt_min = rt_min.min(s.retention_time);
+        rt_max = rt_max.max(s.retention_time);
+        if let Some(&m) = s.mz.first() {
+            mz_min = mz_min.min(m); // mz is ascending
+        }
+        if let Some(&m) = s.mz.last() {
+            mz_max = mz_max.max(m);
+        }
+    }
+    let format = if path.to_lowercase().ends_with(".raw") {
+        "thermo_raw"
+    } else {
+        "mzml"
+    };
+    let metadata = DatasetMetadata {
+        file_name: basename(path),
+        format: format.into(),
+        scan_count: scans.len() as u32,
+        ms1_scan_count: scans.len() as u32,
+        ms_levels_present: vec![1],
+        retention_time_range: rt_min
+            .is_finite()
+            .then_some(NumericRange { min: rt_min, max: rt_max }),
+        mz_range: mz_min
+            .is_finite()
+            .then_some(NumericRange { min: mz_min, max: mz_max }),
+    };
+
+    Ok(OpenDataset {
+        metadata,
+        scans: std::sync::Arc::new(scans),
+        tic,
+        engine: std::sync::Arc::new(engine),
+    })
+}
+
+// --------------------------------------------------------------------- helpers
+
+fn ensure_handle(state: &State<'_, AppState>, handle: u64) -> Result<(), ViewerError> {
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    if datasets.contains_key(&handle) {
+        Ok(())
+    } else {
+        Err(ViewerError::handle_not_found(handle))
+    }
+}
+
+/// Stride-decimate parallel arrays to at most `max_points`, always keeping the
+/// last point so the chromatogram spans its full RT range.
+fn decimate(
+    rt: Vec<f32>,
+    intensity: Vec<f32>,
+    scan_index: Vec<u32>,
+    max_points: Option<u32>,
+) -> (Vec<f32>, Vec<f32>, Vec<u32>) {
+    let n = rt.len();
+    let cap = max_points.map(|m| m as usize).unwrap_or(usize::MAX);
+    if cap == 0 || n <= cap {
+        return (rt, intensity, scan_index);
+    }
+    let stride = n.div_ceil(cap);
+    let mut or = Vec::with_capacity(cap + 1);
+    let mut oi = Vec::with_capacity(cap + 1);
+    let mut os = Vec::with_capacity(cap + 1);
+    let mut i = 0;
+    while i < n {
+        or.push(rt[i]);
+        oi.push(intensity[i]);
+        os.push(scan_index[i]);
+        i += stride;
+    }
+    if *os.last().unwrap() as usize != n - 1 {
+        or.push(rt[n - 1]);
+        oi.push(intensity[n - 1]);
+        os.push(scan_index[n - 1]);
+    }
+    (or, oi, os)
+}
+
+/// True when a scan's RT is inside the optional `[rt_min, rt_max]` window.
+fn in_rt_window(rt: f64, rt_min: Option<f64>, rt_max: Option<f64>) -> bool {
+    rt_min.map_or(true, |lo| rt >= lo) && rt_max.map_or(true, |hi| rt <= hi)
 }
 
 // ------------------------------------------------------------------- commands
@@ -141,37 +233,38 @@ pub async fn open_dataset(
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<OpenResult, ViewerError> {
-    // Emit a couple of progress events so the UI wiring is exercised end-to-end.
+    if !std::path::Path::new(&path).exists() {
+        return Err(ViewerError::new("FILE_NOT_FOUND", format!("no such file: {path}")));
+    }
     let _ = on_progress.send(ProgressEvent {
         phase: "reading".into(),
         scans_done: 0,
-        scans_total: SCAN_COUNT as u32,
-    });
-    let _ = on_progress.send(ProgressEvent {
-        phase: "indexing".into(),
-        scans_done: SCAN_COUNT as u32,
-        scans_total: SCAN_COUNT as u32,
+        scans_total: 0,
     });
 
-    let metadata = stub_metadata(&path);
+    let path_for_read = path.clone();
+    let dataset = tauri::async_runtime::spawn_blocking(move || build_dataset(&path_for_read))
+        .await
+        .map_err(|e| ViewerError::internal(format!("read task failed: {e}")))??;
+
+    let total = dataset.scans.len() as u32;
+    let _ = on_progress.send(ProgressEvent {
+        phase: "indexing".into(),
+        scans_done: total,
+        scans_total: total,
+    });
+
+    let metadata = dataset.metadata.clone();
     let handle = state.next.fetch_add(1, Ordering::SeqCst) + 1;
     {
-        let mut datasets = state
-            .datasets
-            .lock()
-            .map_err(|e| ViewerError::internal(e.to_string()))?;
-        datasets.insert(
-            handle,
-            StubDataset {
-                metadata: metadata.clone(),
-            },
-        );
+        let mut datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        datasets.insert(handle, dataset);
     }
 
     let _ = on_progress.send(ProgressEvent {
         phase: "done".into(),
-        scans_done: SCAN_COUNT as u32,
-        scans_total: SCAN_COUNT as u32,
+        scans_done: total,
+        scans_total: total,
     });
 
     Ok(OpenResult { handle, metadata })
@@ -179,10 +272,7 @@ pub async fn open_dataset(
 
 #[tauri::command]
 pub async fn close_dataset(handle: u64, state: State<'_, AppState>) -> Result<(), ViewerError> {
-    let mut datasets = state
-        .datasets
-        .lock()
-        .map_err(|e| ViewerError::internal(e.to_string()))?;
+    let mut datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
     datasets.remove(&handle);
     Ok(())
 }
@@ -192,10 +282,7 @@ pub async fn get_metadata(
     handle: u64,
     state: State<'_, AppState>,
 ) -> Result<DatasetMetadata, ViewerError> {
-    let datasets = state
-        .datasets
-        .lock()
-        .map_err(|e| ViewerError::internal(e.to_string()))?;
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
     datasets
         .get(&handle)
         .map(|d| d.metadata.clone())
@@ -207,12 +294,13 @@ pub async fn get_scan_summaries(
     handle: u64,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    ensure_handle(&state, handle)?;
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
-    let n = SCAN_COUNT;
-    let one_based: Vec<u32> = (1..=n as u32).collect();
-    let rt: Vec<f32> = (0..n).map(|i| i as f32 * RT_STEP).collect();
-    let tic: Vec<f32> = (0..n).map(synthetic_intensity).collect();
+    let n = d.scans.len();
+    let one_based: Vec<u32> = d.scans.iter().map(|s| s.one_based_scan_number.max(0) as u32).collect();
+    let rt: Vec<f32> = d.scans.iter().map(|s| s.retention_time as f32).collect();
+    let tic = d.tic.clone();
     let ms_level: Vec<u8> = vec![1u8; n];
     let null_f64: Vec<Option<f64>> = vec![None; n];
     let null_i32: Vec<Option<i32>> = vec![None; n];
@@ -238,18 +326,27 @@ pub async fn get_nearest_scan(
     ms_level: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Option<ScanSummary>, ViewerError> {
-    ensure_handle(&state, handle)?;
-    let _ = ms_level; // stub is MS1-only
+    let _ = ms_level; // MS1-only
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
-    let idx = ((retention_time / RT_STEP as f64).round() as i64)
-        .clamp(0, (SCAN_COUNT - 1) as i64) as u32;
-    Ok(Some(ScanSummary {
-        scan_index: idx,
-        one_based_scan_number: idx + 1,
-        retention_time: idx as f64 * RT_STEP as f64,
-        tic: synthetic_intensity(idx as usize) as f64,
-        ms_level: 1,
-        precursor: None,
+    let mut best: Option<(usize, f64)> = None;
+    for (i, s) in d.scans.iter().enumerate() {
+        let dist = (s.retention_time - retention_time).abs();
+        if best.map_or(true, |(_, b)| dist < b) {
+            best = Some((i, dist));
+        }
+    }
+    Ok(best.map(|(i, _)| {
+        let s = &d.scans[i];
+        ScanSummary {
+            scan_index: i as u32,
+            one_based_scan_number: s.one_based_scan_number.max(0) as u32,
+            retention_time: s.retention_time,
+            tic: d.tic[i] as f64,
+            ms_level: 1,
+            precursor: None,
+        }
     }))
 }
 
@@ -262,14 +359,19 @@ pub async fn get_tic_trace(
     max_points: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    ensure_handle(&state, handle)?;
-    let _ = (rt_min, rt_max, ms_level, max_points); // stub ignores reduction knobs
+    let _ = ms_level;
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
-    let n = SCAN_COUNT;
-    let rt: Vec<f32> = (0..n).map(|i| i as f32 * RT_STEP).collect();
-    let intensity: Vec<f32> = (0..n).map(synthetic_intensity).collect();
-    let scan_index: Vec<u32> = (0..n as u32).collect();
-
+    let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, s) in d.scans.iter().enumerate() {
+        if in_rt_window(s.retention_time, rt_min, rt_max) {
+            rt.push(s.retention_time as f32);
+            intensity.push(d.tic[i]);
+            scan_index.push(i as u32);
+        }
+    }
+    let (rt, intensity, scan_index) = decimate(rt, intensity, scan_index, max_points);
     let bytes = arrow_out::build_trace(rt, intensity, scan_index)
         .map_err(|e| ViewerError::internal(e.to_string()))?;
     Ok(Response::new(bytes))
@@ -285,18 +387,24 @@ pub async fn get_range_xic(
     max_points: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    ensure_handle(&state, handle)?;
-    let _ = (rt_min, rt_max, max_points);
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
-    // Synthetic window-XIC: scale the baseline chromatogram by the window width
-    // so the stub reacts to its m/z arguments without a real index.
-    let width = (mz_high - mz_low).max(0.0) as f32;
-    let scale = (width / 100.0).clamp(0.05, 1.0);
-    let n = SCAN_COUNT;
-    let rt: Vec<f32> = (0..n).map(|i| i as f32 * RT_STEP).collect();
-    let intensity: Vec<f32> = (0..n).map(|i| synthetic_intensity(i) * scale).collect();
-    let scan_index: Vec<u32> = (0..n as u32).collect();
-
+    let (lo, hi) = if mz_low <= mz_high { (mz_low, mz_high) } else { (mz_high, mz_low) };
+    let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, s) in d.scans.iter().enumerate() {
+        if !in_rt_window(s.retention_time, rt_min, rt_max) {
+            continue;
+        }
+        // mz ascending: sum intensities of peaks within [lo, hi].
+        let a = s.mz.partition_point(|&m| m < lo);
+        let b = s.mz.partition_point(|&m| m <= hi);
+        let sum: f64 = s.intensity[a..b].iter().sum();
+        rt.push(s.retention_time as f32);
+        intensity.push(sum as f32);
+        scan_index.push(i as u32);
+    }
+    let (rt, intensity, scan_index) = decimate(rt, intensity, scan_index, max_points);
     let bytes = arrow_out::build_trace(rt, intensity, scan_index)
         .map_err(|e| ViewerError::internal(e.to_string()))?;
     Ok(Response::new(bytes))
@@ -311,28 +419,38 @@ pub async fn get_spectrum(
     max_peaks: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    ensure_handle(&state, handle)?;
-    let _ = (mz_min, mz_max, max_peaks);
-    if scan_index as usize >= SCAN_COUNT {
-        return Err(ViewerError::scan_out_of_range(scan_index));
-    }
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
-    // ~20 canned peaks across the m/z range, envelope keyed to the scan's RT.
-    let rt = scan_index as f32 * RT_STEP;
-    let env = synthetic_intensity(scan_index as usize);
-    let mut mz = Vec::with_capacity(20);
-    let mut intensity = Vec::with_capacity(20);
-    for k in 0..20u32 {
-        let m = 250.0 + k as f64 * 85.0; // 250 .. 1865
-        let phase = (k as f32 * 0.7).sin() * 0.5 + 0.5;
-        mz.push(m);
-        intensity.push(env * (0.15 + 0.85 * phase));
+    let si = scan_index as usize;
+    if si >= d.scans.len() {
+        return Err(ViewerError::scan_out_of_range(scan_index, d.scans.len()));
+    }
+    let s = &d.scans[si];
+
+    // m/z window (mz ascending).
+    let a = mz_min.map_or(0, |lo| s.mz.partition_point(|&m| m < lo));
+    let b = mz_max.map_or(s.mz.len(), |hi| s.mz.partition_point(|&m| m <= hi));
+    let mut mz: Vec<f64> = s.mz[a..b].to_vec();
+    let mut intensity: Vec<f32> = s.intensity[a..b].iter().map(|&v| v as f32).collect();
+
+    // Level-of-detail: keep the `max_peaks` most intense, then restore m/z order.
+    if let Some(cap) = max_peaks {
+        let cap = cap as usize;
+        if cap > 0 && mz.len() > cap {
+            let mut idx: Vec<usize> = (0..mz.len()).collect();
+            idx.sort_unstable_by(|&x, &y| intensity[y].total_cmp(&intensity[x]));
+            idx.truncate(cap);
+            idx.sort_unstable();
+            mz = idx.iter().map(|&i| mz[i]).collect();
+            intensity = idx.iter().map(|&i| intensity[i]).collect();
+        }
     }
 
     let mut metadata = HashMap::new();
     metadata.insert("scanIndex".into(), scan_index.to_string());
-    metadata.insert("oneBasedScanNumber".into(), (scan_index + 1).to_string());
-    metadata.insert("retentionTime".into(), rt.to_string());
+    metadata.insert("oneBasedScanNumber".into(), s.one_based_scan_number.max(0).to_string());
+    metadata.insert("retentionTime".into(), s.retention_time.to_string());
     metadata.insert("msLevel".into(), "1".to_string());
 
     let bytes = arrow_out::build_spectrum(mz, intensity, metadata)
@@ -348,20 +466,372 @@ pub async fn get_ms2_for_precursor(
     state: State<'_, AppState>,
 ) -> Result<Vec<ScanSummary>, ViewerError> {
     ensure_handle(&state, handle)?;
-    let _ = (mz, ms1_scan_index); // MS1-only stub: no MS2 scans
+    let _ = (mz, ms1_scan_index); // MS1-only reader: no MS2 scans retained
     Ok(Vec::new())
 }
 
-// --------------------------------------------------------------------- helpers
+// ------------------------------------------------------------- feature overlay
 
-fn ensure_handle(state: &State<'_, AppState>, handle: u64) -> Result<(), ViewerError> {
-    let datasets = state
-        .datasets
-        .lock()
-        .map_err(|e| ViewerError::internal(e.to_string()))?;
-    if datasets.contains_key(&handle) {
-        Ok(())
+/// One observed isotope-peak m/z for a specific charge state of a resolved feature.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerChargeMz {
+    pub charge: i32,
+    pub mz: f64,
+}
+
+/// A resolved (peptide/proteoform-level) feature parsed from the runner's output
+/// TSV — the unit the overlay draws and the feature list browses.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Feature {
+    pub detected_mz: f64,
+    pub rt_start: f64,
+    pub rt_apex: f64,
+    pub rt_end: f64,
+    pub charge_states: Vec<i32>,
+    pub per_charge_mz: Vec<PerChargeMz>,
+    pub primary_charge: i32,
+    pub monoisotopic_mass: f64,
+    pub mono_mz: f64,
+    pub summed_intensity: f64,
+    pub cross_charge_support: u32,
+    pub num_members: u32,
+}
+
+/// Parse the resolved-feature TSV written by `detect_features_tsv` (columns keyed
+/// by header name, tolerant of reordering). Returns a `FEATURE_PARSE`-coded error
+/// if the file is unreadable or lacks the expected header.
+#[tauri::command]
+pub async fn load_features(path: String) -> Result<Vec<Feature>, ViewerError> {
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| ViewerError::new("FEATURE_READ", format!("{path}: {e}")))?;
+    parse_resolved_features(&text)
+}
+
+/// Parse the resolved-feature TSV body (header + rows). Pure so it can be unit-tested.
+fn parse_resolved_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
+    let mut lines = text.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| ViewerError::new("FEATURE_PARSE", "empty feature file"))?;
+    let cols: HashMap<&str, usize> =
+        header.split('\t').enumerate().map(|(i, c)| (c.trim(), i)).collect();
+
+    // Required columns (resolved format).
+    let need = |name: &str| -> Result<usize, ViewerError> {
+        cols.get(name)
+            .copied()
+            .ok_or_else(|| ViewerError::new("FEATURE_PARSE", format!("missing column '{name}'")))
+    };
+    let c_detected_mz = need("Detected m/z (primary)")?;
+    let c_rt_start = need("RT Start")?;
+    let c_rt_apex = need("RT Apex")?;
+    let c_rt_end = need("RT End")?;
+    let c_charges = need("Charge States")?;
+    let c_per_charge = need("Per-Charge Detected m/z")?;
+    let c_primary = need("Primary Charge")?;
+    let c_mass = need("Monoisotopic Mass")?;
+    let c_mono_mz = need("Mono m/z (primary)")?;
+    let c_intensity = need("Summed Intensity")?;
+    let c_support = need("Cross-Charge Support")?;
+    let c_members = need("Num Members")?;
+
+    let fnum = |f: &[&str], i: usize| -> f64 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0) };
+    let inum = |f: &[&str], i: usize| -> i32 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0) };
+    let unum = |f: &[&str], i: usize| -> u32 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0) };
+
+    let mut out = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let charge_states: Vec<i32> = f
+            .get(c_charges)
+            .map(|s| s.split(';').filter_map(|p| p.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        // "z2:497.2584;z3:331.8416"
+        let per_charge_mz: Vec<PerChargeMz> = f
+            .get(c_per_charge)
+            .map(|s| {
+                s.split(';')
+                    .filter_map(|p| {
+                        let p = p.trim().trim_start_matches('z');
+                        let (z, mz) = p.split_once(':')?;
+                        Some(PerChargeMz {
+                            charge: z.trim().parse().ok()?,
+                            mz: mz.trim().parse().ok()?,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(Feature {
+            detected_mz: fnum(&f, c_detected_mz),
+            rt_start: fnum(&f, c_rt_start),
+            rt_apex: fnum(&f, c_rt_apex),
+            rt_end: fnum(&f, c_rt_end),
+            charge_states,
+            per_charge_mz,
+            primary_charge: inum(&f, c_primary),
+            monoisotopic_mass: fnum(&f, c_mass),
+            mono_mz: fnum(&f, c_mono_mz),
+            summed_intensity: fnum(&f, c_intensity),
+            cross_charge_support: unum(&f, c_support),
+            num_members: unum(&f, c_members),
+        });
+    }
+    Ok(out)
+}
+
+/// Neutral monoisotopic mass → m/z at a given charge.
+pub fn mass_to_mz(mass: f64, charge: i32) -> f64 {
+    (mass + charge as f64 * PROTON_MASS) / charge.max(1) as f64
+}
+
+// ---------------------------------------------------------- in-app detection
+
+/// Options for `run_feature_detection`. `max_charge` is capped at 25 by default —
+/// the guardrail that avoids the full-range top-down detect crash; `min_seed_intensity`
+/// trades feature count/recall against runtime.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectOptions {
+    pub max_charge: Option<i32>,
+    pub min_seed_intensity: Option<f64>,
+}
+
+/// Map a resolved core feature to the wire `Feature` (same fields the runner's
+/// resolved TSV carries; see `detect_features_tsv::write_tsv`).
+fn resolved_to_feature(r: &ResolvedFeature) -> Feature {
+    let member_detected_mz = |m: &RefinedFeature| -> Option<f64> {
+        m.detected
+            .peaks
+            .iter()
+            .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+            .map(|p| p.m() as f64)
+    };
+    let primary_member = r
+        .members
+        .iter()
+        .max_by(|a, b| a.detected.summed_intensity.total_cmp(&b.detected.summed_intensity));
+    let primary_charge = primary_member.map(|m| m.refined_charge).unwrap_or(0);
+    let mono_mz = if primary_charge != 0 {
+        mass_to_mz(r.monoisotopic_mass, primary_charge)
     } else {
-        Err(ViewerError::handle_not_found(handle))
+        0.0
+    };
+    let detected_mz = primary_member.and_then(member_detected_mz).unwrap_or(0.0);
+    let per_charge_mz: Vec<PerChargeMz> = r
+        .charge_states
+        .iter()
+        .map(|&z| {
+            let mz = r
+                .members
+                .iter()
+                .filter(|m| m.refined_charge == z)
+                .max_by(|a, b| a.detected.summed_intensity.total_cmp(&b.detected.summed_intensity))
+                .and_then(member_detected_mz)
+                .unwrap_or(0.0);
+            PerChargeMz { charge: z, mz }
+        })
+        .collect();
+    Feature {
+        detected_mz,
+        rt_start: r.start_rt,
+        rt_apex: r.apex_rt,
+        rt_end: r.end_rt,
+        charge_states: r.charge_states.clone(),
+        per_charge_mz,
+        primary_charge,
+        monoisotopic_mass: r.monoisotopic_mass,
+        mono_mz,
+        summed_intensity: r.summed_intensity,
+        cross_charge_support: r.cross_charge_support as u32,
+        num_members: r.members.len() as u32,
+    }
+}
+
+/// The top-down detect → multi-envelope refine → apex-consensus pipeline, run
+/// in-process (mirrors the `TOPDOWN` preset of `detect_features_tsv`, minus IsoDec).
+/// Emits coarse phase progress on `on_progress`. CPU-bound — call from a blocking task.
+fn run_topdown_pipeline(
+    scans: &[Scan],
+    engine: &PeakIndexingEngine,
+    max_charge: i32,
+    min_seed_intensity: f64,
+    progress: impl Fn(&str, u32, u32),
+) -> Vec<Feature> {
+    // TOPDOWN globals: recharge over the full charge range, mono-offset fit on, no
+    // cross-charge off-by-one bridge (conflates near-1-Da species).
+    feature_refinement::set_recharge_max_charge(max_charge);
+    feature_refinement::set_td_mono_fit_kmax(3);
+    feature_refinement::set_offbyone_units(0);
+
+    let base = TraceKernelParameters {
+        min_charge: 1,
+        max_charge,
+        max_isotopes: 60,
+        min_isotopes_observed: 3,
+        min_seed_intensity,
+        coverage_target: 1.0,
+        trace_max_half_width_minutes: 1.0,
+        min_feature_scans: 2,
+        ..TraceKernelParameters::default()
+    };
+    let params = base.with_rt_from_index(engine, 36.0);
+
+    progress("detecting", 0, 0);
+    let detected = detect_features(engine, &params);
+
+    // Composite averaging window from the measured FWHM (as the runner derives it).
+    let mut avg = SpectralAveragingParameters::default();
+    let fwhm_seconds = params.rt_sigma_minutes * FWHM_TO_SIGMA * 60.0;
+    let spacing_seconds = median_ms1_scan_spacing_minutes(engine.scan_info()) * 60.0;
+    avg.avg_scans = feature_refinement::derived_avg_scans(fwhm_seconds, spacing_seconds);
+
+    let total = detected.len() as u32;
+    let mut refined: Vec<RefinedFeature> = Vec::with_capacity(detected.len());
+    for (i, f) in detected.iter().enumerate() {
+        if let Some(r) = refine_feature_multi(f, scans, &avg, 20.0, 4) {
+            refined.push(r);
+        }
+        if (i + 1) % 2000 == 0 || i + 1 == detected.len() {
+            progress("refining", (i + 1) as u32, total);
+        }
+    }
+
+    progress("resolving", total, total);
+    let resolved = resolve_consensus_by_apex(&refined, 15.0, 0.3, 0);
+
+    let feats: Vec<Feature> = resolved.iter().map(resolved_to_feature).collect();
+    progress("done", total, total);
+    feats
+}
+
+/// Run feature finding on an already-open dataset, in-process, returning the
+/// resolved features directly (no TSV round-trip). Progress streams on the channel.
+#[tauri::command]
+pub async fn run_feature_detection(
+    handle: u64,
+    options: Option<DetectOptions>,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<Vec<Feature>, ViewerError> {
+    // Clone cheap Arc handles and drop the lock before the multi-minute run.
+    let (scans, engine) = {
+        let ds = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        let d = ds.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+        (d.scans.clone(), d.engine.clone())
+    };
+    let opts = options.unwrap_or(DetectOptions { max_charge: None, min_seed_intensity: None });
+    let max_charge = opts.max_charge.unwrap_or(25).clamp(1, 60);
+    let min_seed = opts.min_seed_intensity.unwrap_or(10_000.0).max(0.0);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        run_topdown_pipeline(&scans, &engine, max_charge, min_seed, |phase, done, total| {
+            let _ = on_progress.send(ProgressEvent {
+                phase: phase.into(),
+                scans_done: done,
+                scans_total: total,
+            });
+        })
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("detection task failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Exactly the header + a row in the resolved TSV format written by
+    // `detect_features_tsv::write_tsv`.
+    const RESOLVED_TSV: &str = "Detected m/z (primary)\tRT Start\tRT Apex\tRT End\tCharge States\tPer-Charge Detected m/z\tNum Charge States\tPrimary Charge\tMonoisotopic Mass\tMono m/z (primary)\tSummed Intensity\tCross-Charge Support\tNum Members\n\
+497.25840\t30.1200\t30.4500\t30.9000\t2;3\tz2:497.2584;z3:331.8416\t2\t2\t992.50220\t497.25840\t1.2345e6\t1\t4\n\
+331.84160\t12.0000\t12.5000\t13.0000\t3\tz3:331.8416\t1\t3\t992.50220\t331.84836\t9.8765e5\t0\t2\n";
+
+    #[test]
+    fn parses_resolved_features() {
+        let feats = parse_resolved_features(RESOLVED_TSV).expect("parse ok");
+        assert_eq!(feats.len(), 2);
+
+        let f = &feats[0];
+        assert!((f.detected_mz - 497.2584).abs() < 1e-4);
+        assert!((f.rt_start - 30.12).abs() < 1e-4);
+        assert!((f.rt_apex - 30.45).abs() < 1e-4);
+        assert!((f.rt_end - 30.90).abs() < 1e-4);
+        assert_eq!(f.charge_states, vec![2, 3]);
+        assert_eq!(f.per_charge_mz.len(), 2);
+        assert_eq!(f.per_charge_mz[0].charge, 2);
+        assert!((f.per_charge_mz[0].mz - 497.2584).abs() < 1e-4);
+        assert_eq!(f.per_charge_mz[1].charge, 3);
+        assert_eq!(f.primary_charge, 2);
+        assert!((f.monoisotopic_mass - 992.5022).abs() < 1e-3);
+        assert_eq!(f.cross_charge_support, 1);
+        assert_eq!(f.num_members, 4);
+
+        assert_eq!(feats[1].charge_states, vec![3]);
+        assert_eq!(feats[1].per_charge_mz.len(), 1);
+    }
+
+    #[test]
+    fn missing_column_errors() {
+        let bad = "Detected m/z (primary)\tRT Start\n1.0\t2.0\n";
+        let err = parse_resolved_features(bad).unwrap_err();
+        assert_eq!(err.code, "FEATURE_PARSE");
+    }
+
+    #[test]
+    fn empty_file_errors() {
+        assert_eq!(parse_resolved_features("").unwrap_err().code, "FEATURE_PARSE");
+    }
+
+    // Real detector output on the Jurkat top-down fraction (machine-specific path).
+    // Run explicitly: `cargo test --bin msviewer-tauri -- --ignored parses_real`.
+    #[test]
+    #[ignore]
+    fn parses_real_jurkat_tsv() {
+        let text = std::fs::read_to_string(r"D:\JurkatTopdown\jurkat_features.tsv").unwrap();
+        let feats = parse_resolved_features(&text).unwrap();
+        assert_eq!(feats.len(), 466_666);
+        // First data row: a ~13.77 kDa proteoform seen at z 8,9,15,17,18,19.
+        let f = &feats[0];
+        assert_eq!(f.charge_states, vec![8, 9, 15, 17, 18, 19]);
+        assert_eq!(f.per_charge_mz.len(), f.charge_states.len());
+        assert_eq!(f.primary_charge, 18);
+        assert!((f.monoisotopic_mass - 13766.51078).abs() < 1e-2);
+    }
+
+    // Full in-app pipeline on the real Jurkat raw (machine-specific; needs .NET 8).
+    // Run: `cargo test --bin msviewer-tauri -- --ignored in_app_detection`.
+    // High seed floor keeps it quick (few strong proteoforms).
+    #[test]
+    #[ignore]
+    fn in_app_detection_on_real_raw() {
+        let ds = build_dataset(r"D:\JurkatTopdown\02-18-20_jurkat_td_rep1_fract6.raw")
+            .expect("read raw");
+        assert_eq!(ds.scans.len(), 2851);
+        let feats = run_topdown_pipeline(&ds.scans, &ds.engine, 25, 300_000.0, |_, _, _| {});
+        assert!(!feats.is_empty(), "expected some features");
+        let f = &feats[0];
+        assert!(f.monoisotopic_mass > 0.0);
+        assert!(!f.charge_states.is_empty());
+        assert_eq!(f.per_charge_mz.len(), f.charge_states.len());
+        assert!(f.primary_charge >= 1 && f.primary_charge <= 25);
+        eprintln!(
+            "in-app detection: {} features; strongest {:.2} Da z{:?}",
+            feats.len(),
+            f.monoisotopic_mass,
+            f.charge_states
+        );
+    }
+
+    #[test]
+    fn mass_to_mz_matches_manual() {
+        // Neutral 992.5022 Da at z=2 → (992.5022 + 2·1.00727664)/2.
+        let mz = mass_to_mz(992.5022, 2);
+        assert!((mz - 497.258476).abs() < 1e-4, "got {mz}");
     }
 }

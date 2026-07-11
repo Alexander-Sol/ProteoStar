@@ -62,9 +62,10 @@ export interface Spectrum {
   peaks: readonly SpectrumPeak[];
 }
 
-// Streamed on the `open_dataset` channel (contract §2 ProgressEvent).
+// Streamed on the `open_dataset` channel (contract §2 ProgressEvent) and on the
+// `run_feature_detection` channel (detect/refine/resolve phases).
 export interface ProgressEvent {
-  phase: "reading" | "indexing" | "done";
+  phase: "reading" | "indexing" | "detecting" | "refining" | "resolving" | "done";
   scansDone: number;
   scansTotal: number;
 }
@@ -88,6 +89,31 @@ export interface ViewerError {
     | "THERMO_RUNTIME_MISSING"
     | "INTERNAL";
   message: string;
+}
+
+// ---------------------------------------------------------------- features
+// Resolved feature-finding output (one row of the runner's resolved TSV),
+// returned by the `load_features` command. Independent of any open dataset —
+// features are loaded from a TSV file and overlaid on the raw data.
+
+export interface PerChargeMz {
+  charge: number;
+  mz: number;
+}
+
+export interface Feature {
+  detectedMz: number;
+  rtStart: number;
+  rtApex: number;
+  rtEnd: number;
+  chargeStates: number[];
+  perChargeMz: PerChargeMz[];
+  primaryCharge: number;
+  monoisotopicMass: number;
+  monoMz: number;
+  summedIntensity: number;
+  crossChargeSupport: number;
+  numMembers: number;
 }
 
 export interface DatasetProvider {

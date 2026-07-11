@@ -35,31 +35,153 @@
 //!   Ties break by candidate count, then by summed contributing intensity. The strict "present in all
 //!   charges" is softened to "the max-support cluster" (design's "≥2 charges, weighted by support").
 
-use crate::deconvolution::{classic_deconvolute, ClassicDeconvolutionParameters};
+use crate::deconvolution::{
+    averagine_mono_from_most_intense, classic_deconvolute, ClassicDeconvolutionParameters,
+};
+use crate::joint_fit::{joint_envelope_fit, Component};
 use crate::isotope_shift_decon::{
     best_charge_by_fit, envelope_fit_cosine_masked, shift_decon, shift_decon_gated,
     shift_decon_in_window, walkback_mono_high_charge, NEIGHBOR_MASK_PPM, RECHARGE_PREFER_MARGIN,
 
 };
-use crate::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12};
+use crate::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12, PROTON_MASS};
 use crate::peak_indexing::{PeakKey, Scan};
 use crate::spectral_averaging::{average_spectra, SpectralAveragingParameters};
 use crate::trace_kernel::DetectedFeature;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Upper charge bound for the recharge harmonic candidate set ([`charge_candidates`]). Defaults to
+/// 6 (bottom-up: tryptic peptides rarely exceed z=6). Top-down runs raise this (via the detector's
+/// `max_charge`) so recharge can consider the true high charge of a large proteoform instead of
+/// clamping it away — with the bottom-up clamp a detected z=30 feature produced an empty candidate
+/// set and was dropped by the `?` in the shift refiner.
+static RECHARGE_MAX_CHARGE: AtomicI32 = AtomicI32::new(6);
+
+/// Sets the upper charge bound used by recharge candidate generation ([`charge_candidates`]).
+/// The example/pipeline calls this once with the detector's `max_charge`. Bottom-up leaves it at 6.
+pub fn set_recharge_max_charge(max_charge: i32) {
+    RECHARGE_MAX_CHARGE.store(max_charge.max(1), Ordering::Relaxed);
+}
+
+/// Half-width (in ¹³C units) of the symmetric averagine monoisotope-offset search
+/// ([`td_mono_fit`]). `0` disables it (bottom-up default). Top-down sets it to ~3.
+///
+/// **Why top-down needs this.** The shift refiner anchors the mono on an *observed* peak, but for a
+/// large proteoform (≳15 kDa) the monoisotopic peak carries negligible intensity and is below noise —
+/// its own peak is invisible — so an observed-peak-anchored placement is systematically biased *up*
+/// toward the envelope apex, and `walkback_mono_high_charge` only corrects 2 units in the down
+/// direction. Scoring the *whole* observed envelope against averagine templates anchored at each
+/// candidate mono (including monos whose peak is absent) recovers the true mono from the visible
+/// apex-region shape — the dominant fixable failure on top-down data.
+static TD_MONO_FIT_KMAX: AtomicI32 = AtomicI32::new(0);
+
+/// Sets the averagine mono-offset search half-width (¹³C units); 0 disables. See [`TD_MONO_FIT_KMAX`].
+pub fn set_td_mono_fit_kmax(kmax: i32) {
+    TD_MONO_FIT_KMAX.store(kmax.max(0), Ordering::Relaxed);
+}
+
+/// Minimum neutral mass (Da) below which [`td_mono_fit`] is a no-op — the observed-mono bias this
+/// corrects only appears for large species; small features keep the observed-peak placement.
+const TD_MONO_FIT_MIN_MASS_DA: f64 = 3000.0;
+
+/// Re-places the monoisotope by scoring candidate offsets `mono + k·(C13−C12)`, `k ∈ [−kmax, kmax]`,
+/// against the averagine envelope over the observed spectrum, and returning the best-fitting candidate
+/// mass. Ties (within a small epsilon) prefer the *lower* mass — the canonical monoisotope. No-op when
+/// the search is disabled ([`TD_MONO_FIT_KMAX`] == 0) or the mass is below [`TD_MONO_FIT_MIN_MASS_DA`].
+#[allow(clippy::too_many_arguments)]
+fn td_mono_fit(
+    mz: &[f64],
+    intensity: &[f64],
+    mono_mass: f64,
+    charge: i32,
+    tol_ppm: f64,
+    neighbor_mz: &[f64],
+) -> f64 {
+    let kmax = TD_MONO_FIT_KMAX.load(Ordering::Relaxed);
+    if kmax <= 0 || charge == 0 || mono_mass < TD_MONO_FIT_MIN_MASS_DA || mz.is_empty() {
+        return mono_mass;
+    }
+    let mut best_mass = mono_mass;
+    let mut best_fit = f64::NEG_INFINITY;
+    // Search from the most-negative (lowest-mass) candidate upward so the canonical lower mono wins ties.
+    for k in -kmax..=kmax {
+        let cand = mono_mass + k as f64 * C13_MINUS_C12;
+        if cand <= 0.0 {
+            continue;
+        }
+        let fit = envelope_fit_cosine_masked(
+            mz,
+            intensity,
+            mass_to_mz_f64(cand, charge),
+            charge,
+            tol_ppm,
+            0.2,
+            0.0,
+            neighbor_mz,
+            NEIGHBOR_MASK_PPM,
+        );
+        if fit > best_fit + 1e-9 {
+            best_fit = fit;
+            best_mass = cand;
+        }
+    }
+    best_mass
+}
 
 /// Absolute mass-clustering floor (Da) for small masses, where a ppm window would be tighter than
 /// real mass precision. Applied as `max(mass · ppm/1e6, MASS_CLUSTER_ABS_FLOOR_DA)`.
 pub const MASS_CLUSTER_ABS_FLOOR_DA: f64 = 0.01;
 
-/// Hard cap on how many MS1 scans [`refine_feature`] averages into the composite. The composite is a
-/// high-SNR snapshot at the feature apex, so this stays small — just the apex plus one scan on either
-/// side; averaging more pulls in co-eluting interference. A `> MAX_SCANS_TO_AVERAGE` window is treated
-/// as a bug (asserted), not silently accepted.
+/// **Floor** (minimum, no longer a fixed value) for how many MS1 scans [`refine_feature`] averages
+/// into the composite. The composite is a high-SNR snapshot at the feature apex; on the short (~10-min)
+/// gradient the peak spans only ~3 scans, so this is the smallest sensible window (apex ± 1). On longer
+/// gradients the window is *widened* from the measured chromatographic FWHM via [`derived_avg_scans`]
+/// (which never returns less than this floor). The refinement window guard asserts the realised scan
+/// count never exceeds the requested (derived) count, catching a mis-computed window as a bug.
 pub const MAX_SCANS_TO_AVERAGE: usize = 3;
 
-/// Largest integer ¹³C off-by-one offset tolerated when grouping features by neutral mass. The mono
-/// off-by-one is normally ±1; ±2 is allowed for robustness against a doubly-mis-assigned monoisotope.
-const MAX_OFFBYONE_UNITS: i32 = 2;
+/// Number of MS1 scans to average into the refinement composite, derived from the run's measured
+/// chromatographic FWHM and MS1 scan spacing (both seconds). The window is symmetric (apex ±
+/// `n`/2), so the count is snapped to the **nearest odd** integer, and floored at
+/// [`MAX_SCANS_TO_AVERAGE`] (3).
+///
+/// Formula: `round_to_odd(0.8 · FWHM / spacing)`, floor 3. The `0.8·FWHM` span keeps the composite
+/// tight around the apex (roughly the peak's FWHM worth of scans) rather than the detector's wider
+/// ±2σ scoring window, so co-eluting interference is not pulled in. Non-finite or non-positive inputs
+/// (e.g. a run where spacing could not be measured) fall back to the floor.
+///
+/// Verified on the three reference gradients: short 10-min (FWHM≈1.89 s, spacing≈0.384 s) → 3,
+/// medium 65-min (≈9.36 s / 0.93 s) → 9, long 120-min (≈17.66 s / 0.744 s) → 19.
+pub fn derived_avg_scans(fwhm_seconds: f64, scan_spacing_seconds: f64) -> usize {
+    if !fwhm_seconds.is_finite() || !scan_spacing_seconds.is_finite() || scan_spacing_seconds <= 0.0
+    {
+        return MAX_SCANS_TO_AVERAGE;
+    }
+    let raw = 0.8 * fwhm_seconds / scan_spacing_seconds;
+    // Nearest ODD integer: map onto the odd lattice (2k+1), round k, map back.
+    let odd = 2.0 * ((raw - 1.0) / 2.0).round() + 1.0;
+    (odd.max(MAX_SCANS_TO_AVERAGE as f64)) as usize
+}
+
+/// Default largest integer ¹³C off-by-one offset tolerated when grouping features by neutral mass.
+/// The mono off-by-one is normally ±1; ±2 is allowed for robustness against a doubly-mis-assigned
+/// monoisotope. Top-down raises the live value (see [`OFFBYONE_UNITS`]) — large proteoforms whose
+/// mono peak is invisible disagree across charges by more than 2 units.
+const MAX_OFFBYONE_UNITS_DEFAULT: i32 = 2;
+
+/// Live cross-charge off-by-one bridge width; overridable for top-down via [`set_offbyone_units`].
+static OFFBYONE_UNITS: AtomicI32 = AtomicI32::new(MAX_OFFBYONE_UNITS_DEFAULT);
+
+/// Sets the cross-charge off-by-one bridge width (¹³C units). Bottom-up leaves it at 2.
+pub fn set_offbyone_units(units: i32) {
+    OFFBYONE_UNITS.store(units.max(0), Ordering::Relaxed);
+}
+
+#[inline]
+fn offbyone_units() -> i32 {
+    OFFBYONE_UNITS.load(Ordering::Relaxed)
+}
 
 /// RT padding (minutes) added to each side of a feature's elution window when testing tight co-elution
 /// for an off-by-one link ([`features_coelute_tightly`]). ~0.6 s — about half an MS1 cycle on this
@@ -133,6 +255,10 @@ pub struct ResolvedFeature {
 /// envelope best fits *and* explains the window wins. This recovers charge-halved features (a real
 /// z=2 the detector labelled z=1) and rejects the doubled-mass harmonic, by maximising the unified
 /// fit/explained/completeness metric rather than trusting the detector's charge.
+///
+/// `average_spectra` gates whether the averaged composite is built at all. With `use_apex` set the
+/// composite is never read, so pass `average_spectra = false` to skip building it entirely; pass
+/// `true` to preserve the classic composite path.
 pub fn refine_feature_shift(
     feature: &DetectedFeature,
     scans: &[Scan],
@@ -140,6 +266,7 @@ pub fn refine_feature_shift(
     shift_tol_ppm: f64,
     use_apex: bool,
     recharge: bool,
+    average_spectra: bool,
 ) -> Option<RefinedFeature> {
     refine_feature_shift_inner(
         feature,
@@ -149,6 +276,7 @@ pub fn refine_feature_shift(
         use_apex,
         recharge,
         &[],
+        average_spectra,
     )
 }
 
@@ -158,7 +286,8 @@ pub fn refine_feature_shift(
 /// low-scoring feature in a crowded window is judged on the signal plausibly its own — a competing
 /// charge cannot borrow a neighbour's peaks (the z↔2z harmonic), and the walk-back cannot anchor on a
 /// neighbour's peak. Experiment path (pipeline `NEIGHBOR_REFINE`). With `neighbor_mz` empty this is
-/// exactly [`refine_feature_shift`].
+/// exactly [`refine_feature_shift`]. `average_spectra` gates building the averaged composite (see
+/// [`refine_feature_shift`]).
 pub fn refine_feature_shift_neighbor(
     feature: &DetectedFeature,
     scans: &[Scan],
@@ -167,6 +296,7 @@ pub fn refine_feature_shift_neighbor(
     use_apex: bool,
     recharge: bool,
     neighbor_mz: &[f64],
+    average_spectra: bool,
 ) -> Option<RefinedFeature> {
     refine_feature_shift_inner(
         feature,
@@ -176,6 +306,7 @@ pub fn refine_feature_shift_neighbor(
         use_apex,
         recharge,
         neighbor_mz,
+        average_spectra,
     )
 }
 
@@ -188,8 +319,9 @@ fn refine_feature_shift_inner(
     use_apex: bool,
     recharge: bool,
     neighbor_mz: &[f64],
+    average_spectra: bool,
 ) -> Option<RefinedFeature> {
-    let s = build_feature_slices(feature, scans, averaging_params)?;
+    let s = build_feature_slices(feature, scans, averaging_params, average_spectra)?;
     // Detector's own most-abundant claimed peak — the anchor that cannot grab a foreign peak.
     let anchor_mz = feature
         .peaks
@@ -236,6 +368,10 @@ fn refine_feature_shift_inner(
         neighbor_mz,
         NEIGHBOR_MASK_PPM,
     );
+    // Top-down: symmetric averagine mono-offset fit (no-op unless enabled via set_td_mono_fit_kmax).
+    // Runs after the walk-back so it can still move the placement the walk-back could not reach
+    // (>2 units, or the up direction), driven by the whole-envelope averagine fit.
+    let refined_mono = td_mono_fit(mz, inten, refined_mono, refined_charge, shift_tol_ppm, neighbor_mz);
     Some(RefinedFeature {
         detected: feature.clone(),
         refined_monoisotopic_mass: refined_mono,
@@ -259,14 +395,15 @@ fn refine_feature_shift_inner(
 /// bounded to `[1, 6]` and deduped. Catches both charge-halving (real z=2 labelled z=1 → include 2z)
 /// and the doubled-mass harmonic (real z=1 labelled z=2 → include z/2).
 fn charge_candidates(z: i32) -> Vec<i32> {
+    let max_charge = RECHARGE_MAX_CHARGE.load(Ordering::Relaxed).max(1);
     let mut c = vec![z];
-    if z * 2 <= 6 {
+    if z * 2 <= max_charge {
         c.push(z * 2);
     }
     if z % 2 == 0 && z / 2 >= 1 {
         c.push(z / 2);
     }
-    c.retain(|&x| (1..=6).contains(&x));
+    c.retain(|&x| (1..=max_charge).contains(&x));
     c.sort_unstable();
     c.dedup();
     c
@@ -298,6 +435,150 @@ pub fn refine_feature(
     decon_params: &ClassicDeconvolutionParameters,
 ) -> Option<RefinedFeature> {
     refine_feature_inner(feature, scans, averaging_params, decon_params, None)
+}
+
+/// Nearest observed peak intensity to `target` within `tol_ppm` (else 0.0). Two-sided binary search.
+fn nearest_peak_intensity(mz: &[f64], inten: &[f64], target: f64, tol_ppm: f64) -> f64 {
+    let ip = mz.partition_point(|&m| m < target);
+    let mut best = (f64::INFINITY, 0.0);
+    for c in [ip.checked_sub(1), Some(ip)].into_iter().flatten() {
+        if let (Some(&m), Some(&v)) = (mz.get(c), inten.get(c)) {
+            let d = (m - target).abs();
+            if d < best.0 {
+                best = (d, v);
+            }
+        }
+    }
+    if best.0 / target * 1e6 <= tol_ppm {
+        best.1
+    } else {
+        0.0
+    }
+}
+
+/// Neutral mass from m/z at charge `z` (positive mode).
+#[inline]
+fn mz_to_neutral(mz: f64, charge: i32) -> f64 {
+    charge.abs() as f64 * mz - charge.abs() as f64 * PROTON_MASS
+}
+
+/// Seeds one averagine [`Component`] per **grid-local-maximum** apex in the window at charge `z`.
+///
+/// Walks the isotope grid (spacing `= (C13−C12)/z`) anchored on `anchor_mz`, samples the nearest
+/// observed peak at each node, and selects nodes that are **local maxima of that node-intensity
+/// profile** (≥ both grid neighbours, strictly > at least one) above a relative floor. Global maxima
+/// would cluster *inside* one envelope (its tallest few isotopes); grid-local-maxima instead give one
+/// apex per **distinct co-eluting species**. Each selected apex → a Component with the monoisotope
+/// placed below it via [`averagine_mono_from_most_intense`]. Returns up to `max_components`, strongest
+/// first.
+fn seed_grid_apex_components(
+    mz: &[f64],
+    inten: &[f64],
+    anchor_mz: f64,
+    charge: i32,
+    tol_ppm: f64,
+    max_components: usize,
+) -> Vec<Component> {
+    if mz.is_empty() || charge == 0 || max_components == 0 {
+        return Vec::new();
+    }
+    let spacing = C13_MINUS_C12 / charge.abs() as f64;
+    let (lo, hi) = (mz[0], mz[mz.len() - 1]);
+    let jlo = ((lo - anchor_mz) / spacing).floor() as i64 - 1;
+    let jhi = ((hi - anchor_mz) / spacing).ceil() as i64 + 1;
+    // Node m/z + sampled intensity along the grid.
+    let nodes: Vec<(f64, f64)> = (jlo..=jhi)
+        .map(|j| {
+            let p = anchor_mz + j as f64 * spacing;
+            (p, nearest_peak_intensity(mz, inten, p, tol_ppm))
+        })
+        .collect();
+    let maxv = nodes.iter().map(|&(_, v)| v).fold(0.0, f64::max);
+    if maxv <= 0.0 {
+        return Vec::new();
+    }
+    let floor = 0.05 * maxv;
+    let mut apexes: Vec<(f64, f64)> = Vec::new();
+    for i in 1..nodes.len().saturating_sub(1) {
+        let (p, v) = nodes[i];
+        let (l, r) = (nodes[i - 1].1, nodes[i + 1].1);
+        if v > floor && v >= l && v >= r && (v > l || v > r) {
+            apexes.push((p, v));
+        }
+    }
+    apexes.sort_by(|a, b| b.1.total_cmp(&a.1));
+    apexes.truncate(max_components);
+    apexes
+        .into_iter()
+        .map(|(p, _)| {
+            let mono = averagine_mono_from_most_intense(mz_to_neutral(p, charge));
+            Component {
+                mono_mz: mass_to_mz_f64(mono, charge),
+                charge,
+            }
+        })
+        .collect()
+}
+
+/// **Multi-envelope refine** (the top-down default idea): instead of scoring one averagine at several
+/// monoisotope shifts, model the window as a **combination of co-eluting averagine envelopes** — one
+/// per grid-local-maximum apex ([`seed_grid_apex_components`]) — and fit them jointly by NNLS
+/// ([`joint_envelope_fit`]). The combined model *explains* co-eluting neighbours instead of letting
+/// them corrupt a single-species fit, so the averaged FWHM composite (higher SNR on the low isotopes
+/// that place the mono) becomes an asset rather than a liability. The refined feature takes the
+/// monoisotope of the fitted component nearest the detector's own mono; `decon_score` is the joint
+/// cosine.
+pub fn refine_feature_multi(
+    feature: &DetectedFeature,
+    scans: &[Scan],
+    averaging_params: &SpectralAveragingParameters,
+    tol_ppm: f64,
+    max_components: usize,
+) -> Option<RefinedFeature> {
+    // Averaged FWHM composite (average_spectra = true) for SNR; the multi-envelope model uses the
+    // neighbour signal the composite pulls in, rather than being corrupted by it.
+    let s = build_feature_slices(feature, scans, averaging_params, true)?;
+    let (mz, inten) = if s.comp_mz.is_empty() {
+        (&s.apex_mz, &s.apex_int)
+    } else {
+        (&s.comp_mz, &s.comp_int)
+    };
+    let anchor_mz = feature
+        .peaks
+        .iter()
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+        .map(|p| p.m() as f64)?;
+    let z = feature.charge;
+    let mut comps = seed_grid_apex_components(mz, inten, anchor_mz, z, tol_ppm, max_components);
+    if comps.is_empty() {
+        comps.push(Component {
+            mono_mz: feature.mono_mz,
+            charge: z,
+        });
+    }
+    let fit = joint_envelope_fit(mz, inten, &comps, tol_ppm, 0.05, 0.0);
+    // This feature = the fitted component whose mono is nearest the detector's placement. The mono is
+    // the averagine-from-apex offset (a clean, stable estimate). NB: an explicit ±k cosine shift search
+    // in the multi-species context was tried and *regressed* (75.6% vs 76.6%) — the cosine metric drifts
+    // the mono to a preferred-but-wrong placement — so the direct apex offset is kept.
+    let best_i = comps
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (a.mono_mz - feature.mono_mz)
+                .abs()
+                .total_cmp(&(b.mono_mz - feature.mono_mz).abs())
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let refined_mono = mz_to_neutral(comps[best_i].mono_mz, z);
+    Some(RefinedFeature {
+        detected: feature.clone(),
+        refined_monoisotopic_mass: refined_mono,
+        refined_charge: z,
+        candidate_masses: vec![refined_mono],
+        decon_score: fit.fit,
+    })
 }
 
 /// [`refine_feature`] with **subtractive peak censoring**: peaks claimed by *other* features are
@@ -340,18 +621,22 @@ fn refine_feature_inner(
     // default is 5 scans). We deliberately do NOT use the feature's full claimed-peak scan extent:
     // the detector's RT window is ~±2σ, which in dense MS1 regions is ~100 scans.
     let apex = feature.apex_scan_index;
-    let half = (MAX_SCANS_TO_AVERAGE / 2) as i32; // 1 → up to 3 scans (apex ± 1)
+    // Requested averaging count: FWHM-derived (carried on the averaging params), never below the
+    // floor. Symmetric window apex ± want/2 (want is odd, so ±(want-1)/2). Defaults to the floor 3.
+    let want = averaging_params.avg_scans.max(MAX_SCANS_TO_AVERAGE);
+    let half = (want / 2) as i32; // e.g. want=3 → ±1 (3 scans); want=9 → ±4 (9 scans)
     let lo = (apex - half).max(0) as usize;
     let hi = ((apex + half).max(0) as usize).min(scans.len() - 1);
     if lo > hi {
         return None;
     }
-    // Safety invariant: averaging more than a handful of scans means the window logic is wrong.
+    // Safety invariant: the realised window must not exceed the requested (derived) count — a larger
+    // span means the window logic is wrong. (It can be *smaller* at the chromatogram edges.)
     let n_avg = hi - lo + 1;
     assert!(
-        n_avg <= MAX_SCANS_TO_AVERAGE,
-        "refine_feature would average {n_avg} scans (> {MAX_SCANS_TO_AVERAGE}); the averaging \
-         window must stay small — something is wrong with the window computation"
+        n_avg <= want,
+        "refine_feature would average {n_avg} scans (> requested {want}); the averaging \
+         window computation is wrong"
     );
 
     // m/z window around the feature. This is both the deconvolution range AND the slice we average
@@ -700,16 +985,25 @@ struct FeatureSlices {
 /// Builds the averaged apex±1 composite and the apex-scan slice for a feature, over the same m/z
 /// window [`refine_feature`] uses. Returns `None` on the same degenerate conditions
 /// (`refine_feature` would also return `None`): empty scans/peaks, empty window, or empty composite.
+///
+/// When `average_spectra` is `false` the composite is **not** computed at all — no window slicing,
+/// no [`crate::spectral_averaging::average_spectra`] call — and `comp_mz`/`comp_int` come back empty.
+/// This is the apex-only fast path: callers that read only the apex slice (e.g. `shift_apex`) pay
+/// nothing for a composite they would ignore. Consumers of the composite must treat empty
+/// `comp_mz`/`comp_int` as "no composite present" and fall back to the apex slice.
 fn build_feature_slices(
     feature: &DetectedFeature,
     scans: &[Scan],
     averaging_params: &SpectralAveragingParameters,
+    average_spectra: bool,
 ) -> Option<FeatureSlices> {
     if scans.is_empty() || feature.peaks.is_empty() {
         return None;
     }
     let apex = feature.apex_scan_index;
-    let half = (MAX_SCANS_TO_AVERAGE / 2) as i32;
+    // FWHM-derived averaging count (see `refine_feature_inner`); floored, symmetric apex ± want/2.
+    let want = averaging_params.avg_scans.max(MAX_SCANS_TO_AVERAGE);
+    let half = (want / 2) as i32;
     let lo = (apex - half).max(0) as usize;
     let hi = ((apex + half).max(0) as usize).min(scans.len() - 1);
     if lo > hi {
@@ -722,24 +1016,32 @@ fn build_feature_slices(
     let slice_lo = range_min0 - 0.5;
     let slice_hi = range_max + 0.5;
 
-    let window = &scans[lo..=hi];
-    let mut x_arrays: Vec<Vec<f64>> = Vec::with_capacity(window.len());
-    let mut y_arrays: Vec<Vec<f64>> = Vec::with_capacity(window.len());
-    for s in window {
-        let a = s.mz.partition_point(|&m| m < slice_lo);
-        let b = s.mz.partition_point(|&m| m <= slice_hi);
-        x_arrays.push(s.mz[a..b].to_vec());
-        y_arrays.push(s.intensity[a..b].to_vec());
-    }
-    if x_arrays.iter().all(|x| x.is_empty()) {
-        return None;
-    }
-
-    let (comp_mz, comp_int) = average_spectra(&x_arrays, &y_arrays, averaging_params);
-    if comp_mz.is_empty() {
-        return None;
-    }
-    let range_min_comp = range_min0.max(comp_mz[0]);
+    // Averaged apex±1 composite — built only when requested. In apex-only mode the composite is
+    // never read downstream, so slicing every window scan and averaging is skipped entirely.
+    let (comp_mz, comp_int, range_min_comp) = if average_spectra {
+        let window = &scans[lo..=hi];
+        let mut x_arrays: Vec<Vec<f64>> = Vec::with_capacity(window.len());
+        let mut y_arrays: Vec<Vec<f64>> = Vec::with_capacity(window.len());
+        for s in window {
+            let a = s.mz.partition_point(|&m| m < slice_lo);
+            let b = s.mz.partition_point(|&m| m <= slice_hi);
+            x_arrays.push(s.mz[a..b].to_vec());
+            y_arrays.push(s.intensity[a..b].to_vec());
+        }
+        if x_arrays.iter().all(|x| x.is_empty()) {
+            return None;
+        }
+        let (comp_mz, comp_int) =
+            crate::spectral_averaging::average_spectra(&x_arrays, &y_arrays, averaging_params);
+        if comp_mz.is_empty() {
+            return None;
+        }
+        let range_min_comp = range_min0.max(comp_mz[0]);
+        (comp_mz, comp_int, range_min_comp)
+    } else {
+        // No composite: placeholder floor (unused by the apex-only path).
+        (Vec::new(), Vec::new(), range_min0)
+    };
 
     // Apex-scan slice over the same m/z window.
     let apex_usize = (feature.apex_scan_index.max(0) as usize).min(scans.len() - 1);
@@ -903,7 +1205,8 @@ fn four_way_decon_inner(
         .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
         .map(|p| p.m() as f64);
 
-    if let Some(s) = build_feature_slices(feature, scans, averaging_params) {
+    // The four-way agreement compares composite and apex views, so the composite is always built here.
+    if let Some(s) = build_feature_slices(feature, scans, averaging_params, true) {
         // Classic composite.
         if let Some((mono, score)) = pick_classic_mono(
             &s.comp_mz,
@@ -1081,6 +1384,145 @@ pub fn resolve_charge_state_consensus(
         .collect()
 }
 
+/// Most-abundant (apex) claimed peak's neutral mass at the feature's charge. Charge-independent (the
+/// same physical isotope at every charge) and cleanly observed (the tallest peak), so it is the robust
+/// key for cross-charge grouping — unlike the mono, which is invisible and off-by-one-prone.
+fn feature_apex_mass(r: &RefinedFeature) -> f64 {
+    let z = r.refined_charge.max(1);
+    r.detected
+        .peaks
+        .iter()
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+        .map(|p| mz_to_neutral(p.m() as f64, z))
+        .unwrap_or(r.refined_monoisotopic_mass)
+}
+
+/// **Apex-mass cross-charge consensus** (top-down). Groups refined features by their APEX neutral mass
+/// plus co-elution, then resolves each group's monoisotope **once** from the intensity-weighted
+/// consensus apex mass via the averagine offset. This inverts the mono-keyed
+/// [`resolve_charge_state_consensus`]: it groups on the robust quantity (apex) and resolves the fragile
+/// one (mono) collectively, so a proteoform's charge ladder groups even when per-charge mono placements
+/// disagree (the multi-envelope regime), and a real +0.984 species — with its own consistent apex
+/// ladder — stays separate from a −1 monoisotope miscount.
+pub fn resolve_consensus_by_apex(
+    refined: &[RefinedFeature],
+    mass_tolerance_ppm: f64,
+    rt_tolerance_minutes: f64,
+    apex_isotope_shift: i32,
+) -> Vec<ResolvedFeature> {
+    let n = refined.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let apex: Vec<f64> = refined.iter().map(feature_apex_mass).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| apex[a].total_cmp(&apex[b]));
+
+    // Single-linkage union-find. The most-abundant isotope is not guaranteed to be the same at every
+    // charge — it drifts among the few tallest isotopes — so two charge states of one proteoform can
+    // have apex masses that differ by a small integer number of ¹³C. Link when the apex masses match
+    // within ppm **allowing an integer shift of up to `apex_isotope_shift`** ¹³C, and co-eluting.
+    let shift = apex_isotope_shift.max(0);
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for ii in 0..n {
+        let i = order[ii];
+        let tol = apex[i] * mass_tolerance_ppm / 1e6;
+        let window = shift as f64 * C13_MINUS_C12 + tol;
+        for &j in order[(ii + 1)..].iter() {
+            let dm = apex[j] - apex[i];
+            if dm > window {
+                break; // sorted by apex mass → beyond the widest integer-shift window
+            }
+            // apex masses agree up to an integer ¹³C shift within tolerance?
+            let k = (dm / C13_MINUS_C12).round();
+            let mass_ok = k.abs() <= shift as f64 && (dm - k * C13_MINUS_C12).abs() <= tol;
+            if mass_ok
+                && (refined[i].detected.apex_rt - refined[j].detected.apex_rt).abs()
+                    <= rt_tolerance_minutes
+            {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+    }
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    groups
+        .into_values()
+        .map(|idxs| resolve_group_by_apex(refined, &idxs, &apex))
+        .collect()
+}
+
+/// Resolves one apex-grouped component: consensus apex mass = intensity-weighted mean of members'
+/// apex masses; monoisotope = averagine offset below it; charge states = the members' distinct charges.
+fn resolve_group_by_apex(
+    refined: &[RefinedFeature],
+    idxs: &[usize],
+    apex: &[f64],
+) -> ResolvedFeature {
+    let members: Vec<RefinedFeature> = idxs.iter().map(|&i| refined[i].clone()).collect();
+    let mut charge_states: Vec<i32> = members.iter().map(|m| m.refined_charge).collect();
+    charge_states.sort_unstable();
+    charge_states.dedup();
+    let start_rt = members
+        .iter()
+        .map(|m| m.detected.start_rt)
+        .fold(f64::INFINITY, f64::min);
+    let end_rt = members
+        .iter()
+        .map(|m| m.detected.end_rt)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let summed_intensity: f64 = members.iter().map(|m| m.detected.summed_intensity).sum();
+    let tallest = members
+        .iter()
+        .max_by(|a, b| {
+            a.detected
+                .summed_intensity
+                .total_cmp(&b.detected.summed_intensity)
+        })
+        .expect("group is non-empty");
+    let apex_rt = tallest.detected.apex_rt;
+    // Resolve the monoisotope by cross-charge agreement. Each member's apex → an averagine mono
+    // estimate; because the apex isotope can differ by an integer ¹³C between charges, the estimates
+    // are aligned onto the **strongest charge's** ¹³C frame (snap each to the nearest ¹³C multiple of
+    // the anchor) before the intensity-weighted mean — so a ±1-isotope apex drift does not smear the
+    // consensus mono across a whole dalton.
+    let anchor_mono = averagine_mono_from_most_intense(feature_apex_mass(tallest));
+    let (mut wsum, mut msum) = (0.0f64, 0.0f64);
+    for (&i, m) in idxs.iter().zip(members.iter()) {
+        let mono_est = averagine_mono_from_most_intense(apex[i]);
+        let aligned =
+            mono_est - ((mono_est - anchor_mono) / C13_MINUS_C12).round() * C13_MINUS_C12;
+        let w = m.detected.summed_intensity.max(1.0);
+        wsum += w;
+        msum += w * aligned;
+    }
+    let monoisotopic_mass = if wsum > 0.0 { msum / wsum } else { anchor_mono };
+    let cross_charge_support = charge_states.len();
+    ResolvedFeature {
+        monoisotopic_mass,
+        charge_states,
+        apex_rt,
+        start_rt,
+        end_rt,
+        summed_intensity,
+        cross_charge_support,
+        members,
+    }
+}
+
 /// Groups refined features into single-linkage connected components under [`features_link`], returning
 /// each component as its member indices. Component order and within-component order are ascending by
 /// first-seen index, so the result depends **only** on the linkage partition — not on the order edges
@@ -1155,11 +1597,11 @@ fn group_features(
 
         for i in 0..n {
             let mi = refined[i].refined_monoisotopic_mass;
-            // Widest mass reach: the ±MAX_OFFBYONE_UNITS ¹³C band plus the ppm window (the ppm term
+            // Widest mass reach: the ±offbyone_units ¹³C band plus the ppm window (the ppm term
             // is relative to the partner mass, which at the band edge equals `mi`), plus a small
             // absolute epsilon to defend the binary-search boundary against float round-off. This is
             // a superset window — false candidates are removed by the exact predicate below.
-            let w = MAX_OFFBYONE_UNITS as f64 * C13_MINUS_C12
+            let w = offbyone_units() as f64 * C13_MINUS_C12
                 + mass_tolerance_ppm * 1e-6 * mi.abs()
                 + 1e-6;
             let lo_mass = mi - w;
@@ -1232,7 +1674,8 @@ fn features_link(
     }
     let ma = a.refined_monoisotopic_mass;
     let mb = b.refined_monoisotopic_mass;
-    for k in -MAX_OFFBYONE_UNITS..=MAX_OFFBYONE_UNITS {
+    let units = offbyone_units();
+    for k in -units..=units {
         let shifted = mb + k as f64 * C13_MINUS_C12;
         if ppm_diff(ma, shifted) <= mass_tolerance_ppm {
             // k == 0 is a plain same-mass cross-charge match (the same peptide seen at another charge);
@@ -1446,6 +1889,31 @@ mod tests {
     use super::*;
     use crate::deconvolution::Polarity;
     use crate::isotopic_envelope::mass_to_mz_f64;
+
+    #[test]
+    fn derived_avg_scans_matches_reference_gradients() {
+        // Measured (FWHM, spacing) seconds per gradient → nearest-odd(0.8·FWHM/spacing), floor 3.
+        // short 10-min: 0.8·1.89/0.384 = 3.94 → 3
+        assert_eq!(derived_avg_scans(1.89, 0.384), 3);
+        // medium 65-min: 0.8·9.36/0.93 = 8.05 → 9
+        assert_eq!(derived_avg_scans(9.36, 0.93), 9);
+        // long 120-min: 0.8·17.66/0.744 = 18.99 → 19
+        assert_eq!(derived_avg_scans(17.66, 0.744), 19);
+    }
+
+    #[test]
+    fn derived_avg_scans_floors_and_guards() {
+        // Tiny / zero / non-finite inputs fall back to the floor of 3.
+        assert_eq!(derived_avg_scans(0.1, 0.384), MAX_SCANS_TO_AVERAGE);
+        assert_eq!(derived_avg_scans(0.0, 0.384), MAX_SCANS_TO_AVERAGE);
+        assert_eq!(derived_avg_scans(1.89, 0.0), MAX_SCANS_TO_AVERAGE);
+        assert_eq!(derived_avg_scans(f64::NAN, 0.384), MAX_SCANS_TO_AVERAGE);
+        assert_eq!(derived_avg_scans(1.89, f64::INFINITY), MAX_SCANS_TO_AVERAGE);
+        // Result is always odd (symmetric apex ± n/2 window).
+        for &(fwhm, sp) in &[(1.89, 0.384), (9.36, 0.93), (17.66, 0.744), (30.0, 0.5)] {
+            assert_eq!(derived_avg_scans(fwhm, sp) % 2, 1);
+        }
+    }
     use crate::peak_indexing::{IndexedMassSpectralPeak, PeakIndexingEngine};
     use crate::trace_kernel::{detect_features, poisson_comb_weights, TraceKernelParameters};
 

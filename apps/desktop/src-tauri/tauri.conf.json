@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "identifier": "com.msbrowser.msviewer",
   "build": {
-    "beforeDevCommand": "bunx vite",
+    "beforeDevCommand": "bun x vite",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bunx vite build",
+    "beforeBuildCommand": "bun x vite build",
     "frontendDist": "../dist"
   },
   "app": {
