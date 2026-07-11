@@ -1,16 +1,16 @@
 {
-  "name": "msbrowser",
+  "name": "proteostar",
   "private": true,
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "cd apps/web && bun run dev",
+    "dev": "cd apps/desktop && bun run dev",
     "tauri": "cd apps/desktop && bun run tauri",
-    "build": "cd apps/web && bun run build",
+    "build": "cd apps/desktop && bun run build",
     "test": "vitest run",
-    "typecheck": "./node_modules/.bin/tsc -p packages/imsp-core/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/viewer-state/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/plot-adapter/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p apps/web/tsconfig.json --noEmit"
+    "typecheck": "./node_modules/.bin/tsc -p packages/imsp-core/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/viewer-state/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/plot-adapter/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p apps/desktop/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",

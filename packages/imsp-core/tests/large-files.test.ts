@@ -17,6 +17,13 @@ describe("large IMSP file smoke coverage", () => {
     ? readdirSync(largeFilesDirectory).filter((fileName) => fileName.endsWith(".imsp"))
     : [];
 
+  // The LargeFiles/ sample datasets are optional and not committed to ProteoStar (they live in
+  // the archived MsBrowser checkout). When they're absent, keep the suite non-empty with a
+  // skipped placeholder so vitest doesn't treat "no tests in suite" as a failure.
+  if (largeFiles.length === 0) {
+    it.skip("no LargeFiles/*.imsp datasets present — smoke coverage skipped", () => {});
+  }
+
   for (const fileName of largeFiles) {
     it(`loads ${fileName} metadata and TIC trace`, async () => {
       const dataset = createImspDatasetProvider(loadLargeFile(fileName));

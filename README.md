@@ -1,132 +1,106 @@
-# FlashLFQ → Rust
+# ProteoStar
 
-A pure-Rust port of the [mzLib](https://github.com/smith-chem-wisc/mzLib) **FlashLFQ**
-label-free quantification core, with PyO3/maturin Python bindings.
+A single Cargo + Bun workspace that holds a pure-Rust mass-spec quantification engine and both
+of its frontends:
 
-This is a **separate project** from mzLib. It does not vendor or build mzLib; instead it
-**references an external mzLib checkout** for two purposes only:
+- **`crates/flashlfq-core`** — a pure-Rust port of the [mzLib](https://github.com/smith-chem-wisc/mzLib)
+  **FlashLFQ** label-free quantification core, plus the untargeted feature detector and the MS
+  reader/peak-index/XIC pipeline.
+- **`crates/flashlfq-py`** — PyO3/maturin Python bindings over the core.
+- **`apps/desktop`** — the **MsViewer** Tauri desktop app (TypeScript/Vite UI + a Rust backend
+  crate at `apps/desktop/src-tauri`) that reads raw data directly through the core and overlays
+  detected features.
+- **`packages/*`** — the shared TypeScript packages (`imsp-core`, `viewer-state`, `plot-adapter`,
+  `ui`) the desktop UI is built from.
 
-1. **Parity-gate test data** — the FlashLFQ golden fixtures under
-   `mzLib/Test/FlashLFQ/TestData/` (psmtsv + mzML/raw files).
-2. **Golden regeneration** — the C# golden generator (`parity/csharp_golden/`) references
-   `mzLib/FlashLFQ/FlashLFQ.csproj` to run the real `FlashLfqEngine` and emit the `.tsv`
-   goldens the Rust parity tests diff against.
-
-The generated goldens (`rust/flashlfq-core/parity/golden/*.tsv`) are committed, so **core
-development and the parity gates run offline** against them. You only need mzLib present to
-*regenerate* goldens or to run the live parity tests that read raw fixtures.
-
-## Locating mzLib: `MZLIB_DIR`
-
-Everything that needs mzLib resolves its location through the **`MZLIB_DIR`** environment
-variable, which points at the mzLib repository root (the folder containing the inner
-`mzLib/` source tree, i.e. `<MZLIB_DIR>/mzLib/FlashLFQ`, `<MZLIB_DIR>/mzLib/Test`, …).
-
-- **Default when unset:** `F:\mzLib` (the standard checkout on the dev machine).
-- **Override:** set `MZLIB_DIR` before running cargo tests, the Python smoke tests, or the
-  C# golden generator. Example (PowerShell):
-
-  ```powershell
-  $env:MZLIB_DIR = "D:\src\mzLib"
-  ```
-
-This single knob is honored by:
-
-| Consumer            | Mechanism                                                            |
-|---------------------|---------------------------------------------------------------------|
-| Rust tests/examples | `flashlfq_core::mzlib_dir()` / `flashlfq_core::mzlib_test_data(rel)` |
-| Python dumpers      | `os.environ.get("MZLIB_DIR", r"F:\mzLib")`                           |
-| Python smoke tests  | same                                                                |
-| C# golden generator | `$(MZLIB_DIR)` MSBuild property + `Environment.GetEnvironmentVariable` |
+This repo is the merge of the former `flashlfq-rust` (engine + Python bindings) and `MsBrowser`
+(the desktop viewer). Both frontends build against the **one** `flashlfq-core` — the desktop
+backend depends on it by path, so there is no longer a vendored copy to keep in sync.
 
 ## Layout
 
 ```
-flashlfq-rust/
-├── rust/
-│   ├── flashlfq-core/         pure-Rust core (algorithms, unit + parity tests)
-│   │   ├── src/               the port
-│   │   ├── tests/             L1–L6 / P2 / MBR parity gates (read MZLIB_DIR test data)
-│   │   ├── examples/
-│   │   └── parity/
-│   │       ├── golden/        committed golden .tsv files (diffed by the gates)
-│   │       ├── dump_*.py      Python golden dumpers (L0–L4)
-│   │       └── csharp_golden/ C# real-engine golden generator (L5/L6/MBR)
+ProteoStar/
+├── Cargo.toml                 [workspace] root: crates/* + apps/desktop/src-tauri
+├── Cargo.lock                 committed (ships binaries; carries the thermo 0.7.0 pin)
+├── crates/
+│   ├── flashlfq-core/         pure-Rust core (algorithms, detector, unit + parity tests)
+│   │   ├── src/  examples/  tests/
+│   │   └── parity/            committed golden .tsv gates + C# golden generator
 │   └── flashlfq-py/           PyO3 bindings + Python smoke tests
-├── agent_info/                design docs (feasibility study, IMSP design/plan)
-├── PLAN.md                    durable task list / progress log for the port
-├── ralph-loop.ps1            automation loop that drives PLAN.md task-by-task
-└── README.md
+├── apps/
+│   └── desktop/               MsViewer: Vite/React UI …
+│       └── src-tauri/         … and its Tauri (Rust) backend — a workspace member
+├── packages/                  imsp-core · viewer-state · plot-adapter · ui
+├── fixtures/                  small .imsp fixtures for the TS unit tests
+├── agent_info/                design docs, architecture notes, task logs
+├── package.json               Bun workspaces root (name: proteostar)
+└── tsconfig.*.json  vitest.config.ts
 ```
 
 ## Prerequisites
 
-- **Rust** — toolchain 1.94+ (uses `f64::round_ties_even`, stable since 1.77).
-- **.NET SDK** — only for regenerating the C# goldens (net8.0). Not needed for normal dev.
-- **Python 3.13 venv** — only for the Python bindings and golden dumpers (see below).
+- **Rust** — toolchain 1.94+.
+- **.NET 8 runtime** — required to read Thermo `.raw` (the `thermorawfilereader` crate hosts a
+  self-contained .NET 8 runtime); mzML stays pure-Rust. Only the .NET **SDK** is needed to
+  regenerate the C# goldens.
+- **Bun** — for the desktop UI and the TS packages.
+- **maturin** + a Python 3.9+ interpreter — only for the Python bindings.
 
-## Build & test (Rust)
+## Build & test
+
+**Engine (Rust):**
 
 ```powershell
-Set-Location F:\flashlfq-rust\rust
-# Optional: $env:MZLIB_DIR = "D:\src\mzLib"   # if mzLib is not at F:\mzLib
-cargo build
 cargo test -p flashlfq-core        # unit tests + L1–L6 / P2 / MBR parity gates
 ```
 
-The parity gates read fixtures from `<MZLIB_DIR>/mzLib/Test/FlashLFQ/TestData/`; if that
-folder is missing they fail with a path error pointing you at `MZLIB_DIR`.
-
-## Python bindings (maturin)
-
-The smoke-test virtualenv (`rust/.venv/`) is **not committed** — recreate it once:
+The live parity gates read fixtures from `<MZLIB_DIR>/mzLib/Test/FlashLFQ/TestData/`; the
+committed goldens under `crates/flashlfq-core/parity/golden/` let core development and the
+golden-diff gates run offline. `MZLIB_DIR` defaults to `F:\mzLib`; override it before running the
+live gates or the C# golden generator:
 
 ```powershell
-py -V:3.13 -m venv F:\flashlfq-rust\rust\.venv
-F:\flashlfq-rust\rust\.venv\Scripts\python -m pip install maturin numpy pyarrow scikit-learn matplotlib
+$env:MZLIB_DIR = "D:\src\mzLib"
 ```
 
-Then build and exercise the bindings:
+**Desktop app (Tauri):**
 
 ```powershell
-Set-Location F:\flashlfq-rust\rust\flashlfq-py
-F:\flashlfq-rust\rust\.venv\Scripts\Activate.ps1
+bun install
+cd apps/desktop
+bun run tauri dev          # or: bun run tauri build
+```
+
+A bare `cargo build` / `cargo test` at the root builds the engine + the Tauri backend
+(`default-members`); the Python wheel is built separately via maturin.
+
+**Python bindings (maturin):**
+
+```powershell
+cd crates/flashlfq-py
 maturin develop
-python quant_smoke_test.py        # (and mbr_/pep_/xic_ smoke tests)
+python quant_smoke_test.py        # and mbr_/pep_/xic_ smoke tests
 ```
 
-Pinned stack: pyo3 0.23.5 · numpy 0.23 · arrow 54.x · mzdata 0.65 (pure-Rust zlib).
+Pinned stack: pyo3 0.23.5 · numpy 0.23 · arrow 54.x · mzdata 0.65 · thermorawfilereader 0.7.0.
 
-## Regenerating goldens
-
-L0–L4 (Python replicas of mzLib chemistry):
+**TypeScript unit tests:**
 
 ```powershell
-F:\flashlfq-rust\rust\.venv\Scripts\python F:\flashlfq-rust\rust\flashlfq-core\parity\dump_periodic_table.py
-# ...and dump_l1/l2/l3/l4_*.py
+bun run test        # vitest over packages/*/tests and apps/desktop
 ```
-
-L5/L6/MBR (real C# `FlashLfqEngine`, needs the .NET SDK + `MZLIB_DIR`):
-
-```powershell
-# Optional: $env:MZLIB_DIR = "D:\src\mzLib"
-Set-Location F:\flashlfq-rust\rust\flashlfq-core\parity\csharp_golden
-dotnet run -c Release
-```
-
-The generator writes into this project's `parity/golden/`, reading test data from `MZLIB_DIR`.
 
 ## Where the design lives
 
-- **`PLAN.md`** — the phase-by-phase task list and a detailed running log of every ported
-  piece (the durable state the `ralph-loop.ps1` automation reads and updates).
-- **`agent_info/FlashLFQ-Rust-Rewrite-Feasibility.md`** — the feasibility study and porting
-  strategy (isotope-distribution port plan, layered parity harness, Python binding layer).
-- **`agent_info/Simulated-IMSP-*.md`** — the simulated-IMSP API/metadata design and plan.
+- **`agent_info/MsViewer_Architecture.md`** — the desktop viewer architecture (raw data read in
+  Rust; the `DatasetProvider` contract).
+- **`agent_info/FeatureFinder-Integration.md`** — how the detector is wired into the app.
+- **`agent_info/FlashLFQ-Rust-Rewrite-Feasibility.md`** — the original engine porting strategy.
+- **`agent_info/ProteoStar-Merge-Plan.md`** — the plan that produced this repo.
 
-## Relationship to mzLib going forward
+## Relationship to mzLib
 
-The two projects stay separate. This port continues to **reference** mzLib (via `MZLIB_DIR`)
-for fixtures and golden regeneration, and each ported module documents the exact mzLib source
-(`FlashLfqEngine.cs`, `Chemistry/*.cs`, …) it mirrors, but mzLib is developed independently in
-its own repository.
+The engine remains a separate project from mzLib. It **references** an external mzLib checkout
+(via `MZLIB_DIR`) only for parity fixtures and golden regeneration; each ported module documents
+the exact mzLib source it mirrors, but mzLib is developed independently.
