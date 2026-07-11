@@ -44,7 +44,7 @@ export function TicPlot(props: TicPlotProps): ReactElement {
   const layout: Partial<Layout> = {
     autosize: true,
     margin: TIC_MARGIN,
-    dragmode: rangeSelectionEnabled ? "select" : "pan",
+    dragmode: rangeSelectionEnabled ? "select" : "zoom",
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "#ffffff",
     font: { color: "#24364d", family: "Inter, Arial, sans-serif" },

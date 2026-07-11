@@ -134,5 +134,10 @@ export interface DatasetProvider {
     scanIndex: number,
     opts?: { mzRange?: NumericRange; maxPeaks?: number }
   ): Promise<Spectrum>;
+  /** On-demand MS1 spectrum nearest a retention time; works before the peak index is built. */
+  getSpectrumAtRt(
+    retentionTime: number,
+    opts?: { mzRange?: NumericRange; maxPeaks?: number }
+  ): Promise<Spectrum>;
   getMs2ForPrecursor(mz: number, ms1ScanIndex: number): Promise<readonly ScanSummary[]>;
 }

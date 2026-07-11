@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 import { TicPlot, SpectrumPlot, createDefaultViewport } from "@msbrowser/plot-adapter";
@@ -71,6 +71,10 @@ export function App() {
   const [ticPinned, setTicPinned] = useState(false);
   const [spectrumPinned, setSpectrumPinned] = useState(false);
 
+  // True between open (fast TIC shown) and the background peak index landing. While set,
+  // spectra / range-XIC / detection aren't available yet (backend returns INDEXING).
+  const [indexing, setIndexing] = useState(false);
+
   // ------------------------------------------------------------ open raw/mzML
   const handleOpenFile = useCallback(async () => {
     const picked = await openFileDialog({
@@ -93,11 +97,59 @@ export function App() {
       setProvider(p);
       setMetadata(meta);
       setTicPoints(tic);
+      // ms1ScanCount is 0 until the background index lands; the effect below flips this off.
+      setIndexing(meta.ms1ScanCount === 0);
       setLoad({ status: "ready" });
     } catch (err) {
       setLoad({ status: "error", message: errMessage(err) });
     }
   }, []);
+
+  // Flip `indexing` off once the background peak index is ready (spectra / XIC / detection
+  // light up). We poll `getMetadata()` rather than wait on a Tauri event: the backend sets
+  // `ms1ScanCount > 0` (under lock) the moment the index lands, so it's the authoritative
+  // "done" signal and doesn't depend on event delivery. Also surfaces a stuck index (count
+  // never leaves 0 → backend never finished).
+  useEffect(() => {
+    if (handle === null || provider === null) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const markReady = async () => {
+      if (!active) return;
+      setIndexing(false);
+      try {
+        setMetadata(await provider.getMetadata());
+        // Re-fetch the TIC: for files with no native TIC (e.g. some mzML) the fast-path
+        // trace was empty and only fills in now from the freshly-built index. For Thermo
+        // this just re-serves the same native TIC.
+        setTicPoints(await provider.getTicTrace({ maxPoints: 4000 }));
+      } catch {
+        /* keep provisional metadata / TIC if the refetch fails */
+      }
+    };
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const meta = await provider.getMetadata();
+        if (!active) return;
+        if (meta.ms1ScanCount > 0) {
+          await markReady();
+          return; // done — stop polling
+        }
+      } catch {
+        /* transient (e.g. handle races a close); retry below */
+      }
+      if (active) timer = setTimeout(() => void poll(), 400);
+    };
+    void poll();
+
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [handle, provider]);
 
   // ------------------------------------------------------------ load features
   const handleLoadFeatures = useCallback(async () => {
@@ -121,7 +173,7 @@ export function App() {
 
   // -------------------------------------------------- run detection in-app
   const handleRunDetection = useCallback(async () => {
-    if (handle === null || detecting !== null) return;
+    if (handle === null || detecting !== null || indexing) return;
     setDetecting("starting…");
     try {
       const feats = await runFeatureDetection(handle, { maxCharge: 25 }, (p) => {
@@ -138,7 +190,7 @@ export function App() {
     } finally {
       setDetecting(null);
     }
-  }, [handle, detecting]);
+  }, [handle, detecting, indexing]);
 
   // ------------------------------------------------------- select a feature
   const selectFeature = useCallback(
@@ -154,10 +206,10 @@ export function App() {
       const grid = isotopeGrid(f.monoisotopicMass, z, 12);
       setSpectrumViewport({ xMin: grid[0] - 1.5, xMax: grid[grid.length - 1] + 1.5 });
 
+      // On-demand read by RT — available immediately (no wait on the peak index).
       if (provider && !spectrumPinned) {
         try {
-          const scan = await provider.getNearestScan(f.rtApex);
-          if (scan) setSpectrum(await provider.getSpectrum(scan.scanIndex));
+          setSpectrum(await provider.getSpectrumAtRt(f.rtApex));
         } catch (err) {
           setLoad({ status: "error", message: errMessage(err) });
         }
@@ -171,9 +223,8 @@ export function App() {
     async (rt: number) => {
       if (!provider || spectrumPinned) return;
       try {
-        const scan = await provider.getNearestScan(rt);
-        if (!scan) return;
-        setSpectrum(await provider.getSpectrum(scan.scanIndex));
+        // On-demand read by RT — works during indexing (no peak index needed).
+        setSpectrum(await provider.getSpectrumAtRt(rt));
       } catch (err) {
         setLoad({ status: "error", message: errMessage(err) });
       }
@@ -241,7 +292,10 @@ export function App() {
           {metadata ? (
             <>
               <MetricReadout label="File" value={metadata.fileName} />
-              <MetricReadout label="MS1 scans" value={metadata.ms1ScanCount} />
+              <MetricReadout
+                label="MS1 scans"
+                value={indexing ? "indexing…" : metadata.ms1ScanCount}
+              />
               <MetricReadout label="Format" value={metadata.format} />
             </>
           ) : null}
@@ -251,7 +305,11 @@ export function App() {
           </PanelActionButton>
           {handle !== null ? (
             <PanelActionButton onClick={() => void handleRunDetection()}>
-              {detecting ? `Detecting: ${detecting}` : "Run feature finding"}
+              {indexing
+                ? "Indexing…"
+                : detecting
+                  ? `Detecting: ${detecting}`
+                  : "Run feature finding"}
             </PanelActionButton>
           ) : null}
           {features.length > 0 ? (
@@ -272,7 +330,7 @@ export function App() {
                 ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}`
                 : featuresFile
                   ? `${features.length} features from ${featuresFile} — click a marker or a row`
-                  : "Summed MS1 intensity · click to load a scan"
+                  : "Instrument TIC · click to load a scan"
             }
             actions={
               <>

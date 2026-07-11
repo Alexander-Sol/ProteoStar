@@ -19,6 +19,7 @@
 //!   original `f64` m/z, exactly as C# rounds `MassSpectrum.XArray[j]` (a `double`).
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::path::PathBuf;
 
 use mzdata::io::{DetailLevel, MZReader, ThermoRawReader};
@@ -1095,6 +1096,52 @@ pub fn read_ms1_scans<P: Into<PathBuf> + Clone>(path: P) -> std::io::Result<Vec<
     }
 }
 
+/// A whole-run total-ion-current chromatogram read straight from the file's **native** TIC —
+/// Thermo's `GetTIC` (via `thermorawfilereader`) or an mzML `<chromatogram id="TIC">` element —
+/// without decoding a single peak or building the peak index. `retention_times` are in minutes,
+/// parallel to `intensities`. This is the fast path that lets a viewer paint the TIC in ~1–2 s
+/// instead of waiting on the full [`read_ms1_scans`] + [`PeakIndexingEngine`] build.
+///
+/// The trace spans **all** scans the instrument recorded (MS1 *and* MS2), not just the MS1 subset
+/// that [`read_ms1_scans`] keeps — it is the instrument TIC, so its point count and RT sampling do
+/// not line up 1:1 with the MS1 `Scan` vector. It is meant for display + RT-based navigation, not
+/// as a per-MS1-scan intensity array.
+pub struct TicChromatogram {
+    /// Retention times in minutes, ascending, parallel to `intensities`.
+    pub retention_times: Vec<f64>,
+    /// Total ion current per time point.
+    pub intensities: Vec<f32>,
+}
+
+/// Reads the native instrument TIC chromatogram in one cheap call — no peak decode, no index.
+///
+/// `MZReader::open_path` sniffs the format and dispatches; both the Thermo reader and the mzML
+/// reader implement `ChromatogramSource`, so a single `get_chromatogram_by_id("TIC")` covers both.
+/// Opening only builds the scan-offset index (peaks decode lazily elsewhere); the TIC itself is a
+/// separate native lookup.
+///
+/// Returns `Ok(None)` when the file exposes no native TIC chromatogram (e.g. an mzML written
+/// without a TIC chromatogram element) — the caller should then fall back to summing per-scan
+/// intensities after a full read. `.raw` reading requires a .NET 8 runtime, as with
+/// [`read_ms1_scans`].
+pub fn read_tic_chromatogram<P: Into<PathBuf> + Clone>(
+    path: P,
+) -> std::io::Result<Option<TicChromatogram>> {
+    let mut reader = MZReader::open_path(path)?;
+    let Some(chrom) = reader.get_chromatogram_by_id("TIC") else {
+        return Ok(None);
+    };
+    // A TIC chromatogram is expected to carry both a time and an intensity array; if either is
+    // absent the trace is unusable, so fall back rather than surface a partial chromatogram.
+    match (chrom.time(), chrom.intensity()) {
+        (Ok(time), Ok(intensity)) => Ok(Some(TicChromatogram {
+            retention_times: time.into_owned(),
+            intensities: intensity.into_owned(),
+        })),
+        _ => Ok(None),
+    }
+}
+
 /// Extracts MS1 scans from any spectrum iterator (mzML or Thermo). Shared by both branches of
 /// [`read_ms1_scans`]; see its docs for the centroiding and ordering rationale.
 fn collect_ms1_scans<I: Iterator<Item = Spectrum>>(reader: I) -> Vec<Scan> {
@@ -1103,30 +1150,151 @@ fn collect_ms1_scans<I: Iterator<Item = Spectrum>>(reader: I) -> Vec<Scan> {
         if spectrum.ms_level() != 1 {
             continue;
         }
-        // `peaks()` yields the centroid list for a centroided spectrum, raw profile points otherwise.
-        let peaks = spectrum.peaks();
-        let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(peaks.len());
-        for p in peaks.iter() {
-            pairs.push((p.mz, p.intensity as f64));
-        }
-        // Not guaranteed m/z-ordered; sort to satisfy the ascending-m/z invariant of the index.
-        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut mz = Vec::with_capacity(pairs.len());
-        let mut intensity = Vec::with_capacity(pairs.len());
-        for (m, i) in pairs {
-            mz.push(m);
-            intensity.push(i);
-        }
-        let (mz, intensity) = remove_zero_intensity_peaks(mz, intensity);
-        scans.push(Scan {
-            mz,
-            intensity,
-            one_based_scan_number: spectrum.index() as i32 + 1,
-            retention_time: spectrum.start_time(),
-            msn_order: spectrum.ms_level() as i32,
-        });
+        scans.push(scan_from_spectrum(&spectrum));
     }
     scans
+}
+
+/// Converts one `mzdata` [`Spectrum`] into a [`Scan`] with the exact post-processing the index
+/// depends on: sort peaks ascending by m/z, then drop mzLib's "zero" peaks. `peaks()` yields the
+/// centroid list for a centroided spectrum and raw profile points otherwise, so the caller is
+/// responsible for opening the reader with centroiding where required (see [`read_ms1_scans`]).
+/// Used both by the full read ([`collect_ms1_scans`]) and by on-demand single-scan reads
+/// ([`RandomAccessMs1Reader`]) so the two produce identical peak lists.
+fn scan_from_spectrum(spectrum: &Spectrum) -> Scan {
+    let peaks = spectrum.peaks();
+    let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(peaks.len());
+    for p in peaks.iter() {
+        pairs.push((p.mz, p.intensity as f64));
+    }
+    // Not guaranteed m/z-ordered; sort to satisfy the ascending-m/z invariant of the index.
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut mz = Vec::with_capacity(pairs.len());
+    let mut intensity = Vec::with_capacity(pairs.len());
+    for (m, i) in pairs {
+        mz.push(m);
+        intensity.push(i);
+    }
+    let (mz, intensity) = remove_zero_intensity_peaks(mz, intensity);
+    Scan {
+        mz,
+        intensity,
+        one_based_scan_number: spectrum.index() as i32 + 1,
+        retention_time: spectrum.start_time(),
+        msn_order: spectrum.ms_level() as i32,
+    }
+}
+
+/// Largest number of scans to walk outward from an RT hit looking for an MS1 scan (DDA files
+/// interleave MS2 scans between MS1 ones; the cycle is well under this in practice).
+const MAX_MS1_WALK: usize = 50;
+
+/// A spectra file kept open for **on-demand single-scan reads**. Lets a viewer show a spectrum
+/// by retention time without first building the full [`PeakIndexingEngine`] — the random-access
+/// path the two-phase load leans on so spectra are available during (and after) indexing.
+///
+/// Thermo `.raw` is opened with centroiding on (as [`read_ms1_scans`] does), so a scan pulled
+/// here matches the indexed ones peak-for-peak. `.raw` reading needs a .NET 8 runtime.
+pub struct RandomAccessMs1Reader {
+    inner: RaReader,
+}
+
+/// Format-specific backing reader. Thermo is opened explicitly (not via `MZReader::open_path`)
+/// so centroiding can be forced on; other formats go through the dispatching reader.
+enum RaReader {
+    Thermo(ThermoRawReader),
+    Other(MZReader<File>),
+}
+
+impl RandomAccessMs1Reader {
+    /// Opens the file and builds only its scan-offset index (no peak decode). Fast enough to
+    /// sit on the open path.
+    pub fn open<P: Into<PathBuf> + Clone>(path: P) -> std::io::Result<Self> {
+        let path: PathBuf = path.into();
+        let is_thermo_raw = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("raw"))
+            .unwrap_or(false);
+        let inner = if is_thermo_raw {
+            RaReader::Thermo(ThermoRawReader::new_with_detail_level_and_centroiding(
+                path,
+                DetailLevel::Full,
+                true,
+            )?)
+        } else {
+            RaReader::Other(MZReader::open_path(path)?)
+        };
+        Ok(Self { inner })
+    }
+
+    /// The native instrument TIC chromatogram from the already-open reader (see
+    /// [`read_tic_chromatogram`]), so the fast path opens the file only once.
+    pub fn tic(&mut self) -> Option<TicChromatogram> {
+        let chrom = match &mut self.inner {
+            RaReader::Thermo(r) => r.get_chromatogram_by_id("TIC"),
+            RaReader::Other(r) => r.get_chromatogram_by_id("TIC"),
+        }?;
+        match (chrom.time(), chrom.intensity()) {
+            (Ok(time), Ok(intensity)) => Some(TicChromatogram {
+                retention_times: time.into_owned(),
+                intensities: intensity.into_owned(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn by_time(&mut self, rt: f64) -> Option<Spectrum> {
+        match &mut self.inner {
+            RaReader::Thermo(r) => r.get_spectrum_by_time(rt),
+            RaReader::Other(r) => r.get_spectrum_by_time(rt),
+        }
+    }
+
+    fn by_index(&mut self, index: usize) -> Option<Spectrum> {
+        match &mut self.inner {
+            RaReader::Thermo(r) => r.get_spectrum_by_index(index),
+            RaReader::Other(r) => r.get_spectrum_by_index(index),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.inner {
+            RaReader::Thermo(r) => r.len(),
+            RaReader::Other(r) => r.len(),
+        }
+    }
+
+    /// Reads the MS1 scan nearest `rt` (minutes), post-processed like [`read_ms1_scans`]. If the
+    /// closest scan by time is not MS1 (DDA), walks outward up to [`MAX_MS1_WALK`] scans to the
+    /// nearest MS1; if none is found in that window, returns the closest scan as-is.
+    pub fn ms1_scan_at_rt(&mut self, rt: f64) -> Option<Scan> {
+        // NB: `get_spectrum_by_time` flips the reader to `MetadataOnly` during its binary search
+        // and returns a spectrum captured *without peaks* — so use it only to locate the index,
+        // then re-read that scan by index at the reader's (restored) full detail to get peaks.
+        let center = self.by_time(rt)?.index();
+        let spec = self.by_index(center)?;
+        if spec.ms_level() == 1 {
+            return Some(scan_from_spectrum(&spec));
+        }
+        let n = self.len();
+        for k in 1..=MAX_MS1_WALK {
+            if let Some(below) = center.checked_sub(k) {
+                if let Some(s) = self.by_index(below) {
+                    if s.ms_level() == 1 {
+                        return Some(scan_from_spectrum(&s));
+                    }
+                }
+            }
+            if center + k < n {
+                if let Some(s) = self.by_index(center + k) {
+                    if s.ms_level() == 1 {
+                        return Some(scan_from_spectrum(&s));
+                    }
+                }
+            }
+        }
+        Some(scan_from_spectrum(&spec))
+    }
 }
 
 /// Intensity below which mzLib's mzML reader treats a peak as "zero" and drops it.

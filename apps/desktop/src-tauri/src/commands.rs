@@ -10,21 +10,25 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
-use tauri::State;
+use tauri::{Emitter, State};
 
 use flashlfq_core::feature_refinement::{
     self, refine_feature_multi, resolve_consensus_by_apex, RefinedFeature, ResolvedFeature,
 };
-use flashlfq_core::peak_indexing::{read_ms1_scans, PeakIndexingEngine, Scan};
+use flashlfq_core::peak_indexing::{
+    read_ms1_scans, PeakIndexingEngine, RandomAccessMs1Reader, Scan,
+};
 use flashlfq_core::spectral_averaging::SpectralAveragingParameters;
 use flashlfq_core::trace_kernel::{
     detect_features, median_ms1_scan_spacing_minutes, TraceKernelParameters, FWHM_TO_SIGMA,
 };
 
 use crate::arrow_out;
-use crate::state::{AppState, OpenDataset};
+use crate::state::{AppState, IndexedData, OpenDataset};
 
 /// Proton mass (Da) for neutral-mass ↔ m/z conversions.
 const PROTON_MASS: f64 = 1.007_276_466_8;
@@ -106,6 +110,11 @@ impl ViewerError {
             format!("scan index {scan_index} exceeds {count}"),
         )
     }
+    /// The dataset is open and its TIC is available, but the background peak index
+    /// isn't built yet. Callers that need per-scan peaks get this until it lands.
+    fn indexing() -> Self {
+        ViewerError::new("INDEXING", "dataset is still being indexed")
+    }
 }
 
 // ---------------------------------------------------------------- dataset build
@@ -118,29 +127,78 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-/// Read + index a raw/mzML file into the parts of an `OpenDataset`. Runs on a
-/// blocking thread (`.raw` pulls a .NET runtime; both paths are CPU-bound).
-fn build_dataset(path: &str) -> Result<OpenDataset, ViewerError> {
+/// Fast pass: open the file for on-demand reads and pull its native instrument TIC chromatogram
+/// from that same reader (no peak decode, no index — so the file is opened only once). An empty
+/// TIC pair means the file exposes no native TIC (e.g. an mzML without a TIC chromatogram) — the
+/// served TIC then fills in from the background index instead. Runs on a blocking thread (`.raw`
+/// pulls a .NET runtime).
+fn open_fast(path: &str) -> Result<(RandomAccessMs1Reader, Vec<f64>, Vec<f32>), ViewerError> {
+    let mut reader =
+        RandomAccessMs1Reader::open(path).map_err(|e| ViewerError::new("READ_ERROR", e.to_string()))?;
+    let (rt, intensity) = match reader.tic() {
+        Some(tic) => (tic.retention_times, tic.intensities),
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok((reader, rt, intensity))
+}
+
+/// Background pass: read every MS1 scan, build the peak index, and compute the per-scan
+/// summed-centroid TIC. This is the heavy work the fast path defers. Runs on a blocking
+/// thread (both the read and the index build are CPU-bound; `.raw` pulls a .NET runtime).
+fn build_indexed(path: &str) -> Result<IndexedData, ViewerError> {
     let scans = read_ms1_scans(path).map_err(|e| ViewerError::new("READ_ERROR", e.to_string()))?;
     if scans.is_empty() {
-        return Err(ViewerError::new(
-            "EMPTY_INDEX",
-            "no MS1 scans found in file",
-        ));
+        return Err(ViewerError::new("EMPTY_INDEX", "no MS1 scans found in file"));
     }
     let engine = PeakIndexingEngine::index_peaks(&scans)
         .ok_or_else(|| ViewerError::new("EMPTY_INDEX", "no indexable MS1 peaks"))?;
 
-    // Per-scan TIC = summed centroided MS1 intensity (a served chromatogram; not
-    // the vendor instrument TIC, which the MS1-only reader does not surface).
+    // Per-scan TIC = summed centroided MS1 intensity. Used by scan summaries + nearest-scan;
+    // the displayed TIC chromatogram is the native one read on the fast path.
     let tic: Vec<f32> = scans
         .iter()
         .map(|s| s.intensity.iter().sum::<f64>() as f32)
         .collect();
 
+    Ok(IndexedData {
+        scans: Arc::new(scans),
+        tic: Arc::new(tic),
+        engine: Arc::new(engine),
+    })
+}
+
+/// Provisional metadata available the moment the fast TIC is read: file name, format, and
+/// the RT range spanned by the native TIC. The MS1 scan count and m/z range are unknown
+/// until the index is built, so they start empty and [`refine_metadata`] fills them in.
+fn provisional_metadata(path: &str, tic_rt: &[f64]) -> DatasetMetadata {
+    let (rt_min, rt_max) = tic_rt.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), &t| (lo.min(t), hi.max(t)),
+    );
+    let format = if path.to_lowercase().ends_with(".raw") {
+        "thermo_raw"
+    } else {
+        "mzml"
+    };
+    DatasetMetadata {
+        file_name: basename(path),
+        format: format.into(),
+        scan_count: tic_rt.len() as u32, // all scans (provisional); MS1 count filled on index
+        ms1_scan_count: 0,               // 0 marks "not indexed yet" to the frontend
+        ms_levels_present: vec![1],
+        retention_time_range: rt_min
+            .is_finite()
+            .then_some(NumericRange { min: rt_min, max: rt_max }),
+        mz_range: None,
+    }
+}
+
+/// Refine provisional metadata once the MS1 scans are read: exact RT range, m/z range, and
+/// the real MS1 scan count (a non-zero `ms1_scan_count` is the frontend's "indexed" signal).
+fn refine_metadata(meta: &mut DatasetMetadata, scans: &[Scan]) {
     let (mut rt_min, mut rt_max) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut mz_min, mut mz_max) = (f64::INFINITY, f64::NEG_INFINITY);
-    for s in &scans {
+    for s in scans {
         rt_min = rt_min.min(s.retention_time);
         rt_max = rt_max.max(s.retention_time);
         if let Some(&m) = s.mz.first() {
@@ -150,31 +208,27 @@ fn build_dataset(path: &str) -> Result<OpenDataset, ViewerError> {
             mz_max = mz_max.max(m);
         }
     }
-    let format = if path.to_lowercase().ends_with(".raw") {
-        "thermo_raw"
-    } else {
-        "mzml"
-    };
-    let metadata = DatasetMetadata {
-        file_name: basename(path),
-        format: format.into(),
-        scan_count: scans.len() as u32,
-        ms1_scan_count: scans.len() as u32,
-        ms_levels_present: vec![1],
-        retention_time_range: rt_min
-            .is_finite()
-            .then_some(NumericRange { min: rt_min, max: rt_max }),
-        mz_range: mz_min
-            .is_finite()
-            .then_some(NumericRange { min: mz_min, max: mz_max }),
-    };
+    meta.ms1_scan_count = scans.len() as u32;
+    if rt_min.is_finite() {
+        meta.retention_time_range = Some(NumericRange { min: rt_min, max: rt_max });
+    }
+    if mz_min.is_finite() {
+        meta.mz_range = Some(NumericRange { min: mz_min, max: mz_max });
+    }
+}
 
-    Ok(OpenDataset {
-        metadata,
-        scans: std::sync::Arc::new(scans),
-        tic,
-        engine: std::sync::Arc::new(engine),
-    })
+/// Clone the indexed read handles for a dataset, or return an `INDEXING` error if the
+/// background index build hasn't finished. All three are `Arc`s, so this is cheap and the
+/// caller can drop the state lock (which this releases on return) before doing real work.
+fn indexed_handles(
+    state: &State<'_, AppState>,
+    handle: u64,
+) -> Result<(Arc<Vec<Scan>>, Arc<Vec<f32>>, Arc<PeakIndexingEngine>), ViewerError> {
+    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+    let guard = d.indexed.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    let idx = guard.as_ref().ok_or_else(ViewerError::indexing)?;
+    Ok((idx.scans.clone(), idx.tic.clone(), idx.engine.clone()))
 }
 
 // --------------------------------------------------------------------- helpers
@@ -231,6 +285,7 @@ fn in_rt_window(rt: f64, rt_min: Option<f64>, rt_max: Option<f64>) -> bool {
 pub async fn open_dataset(
     path: String,
     on_progress: Channel<ProgressEvent>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<OpenResult, ViewerError> {
     if !std::path::Path::new(&path).exists() {
@@ -242,29 +297,60 @@ pub async fn open_dataset(
         scans_total: 0,
     });
 
-    let path_for_read = path.clone();
-    let dataset = tauri::async_runtime::spawn_blocking(move || build_dataset(&path_for_read))
-        .await
-        .map_err(|e| ViewerError::internal(format!("read task failed: {e}")))??;
+    // Phase 1 — fast: open the reader + native TIC only, so the viewer can paint the TIC and
+    // serve spectra by RT immediately (no peak decode / index build yet).
+    let path_for_open = path.clone();
+    let (reader, tic_rt, tic_intensity) =
+        tauri::async_runtime::spawn_blocking(move || open_fast(&path_for_open))
+            .await
+            .map_err(|e| ViewerError::internal(format!("open task failed: {e}")))??;
 
-    let total = dataset.scans.len() as u32;
-    let _ = on_progress.send(ProgressEvent {
-        phase: "indexing".into(),
-        scans_done: total,
-        scans_total: total,
-    });
-
-    let metadata = dataset.metadata.clone();
+    let metadata = provisional_metadata(&path, &tic_rt);
     let handle = state.next.fetch_add(1, Ordering::SeqCst) + 1;
+    let dataset = OpenDataset {
+        metadata: Arc::new(std::sync::Mutex::new(metadata.clone())),
+        tic_rt,
+        tic_intensity,
+        reader: Arc::new(std::sync::Mutex::new(reader)),
+        indexed: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let indexed_slot = dataset.indexed.clone();
+    let metadata_slot = dataset.metadata.clone();
     {
         let mut datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
         datasets.insert(handle, dataset);
     }
 
+    // Phase 2 — background: read scans + build the peak index off the open path, then fill
+    // the indexed slot, refine the metadata, and signal readiness. Commands that need
+    // per-scan peaks return INDEXING until this completes.
+    let path_for_index = path.clone();
+    tauri::async_runtime::spawn(async move {
+        let built =
+            tauri::async_runtime::spawn_blocking(move || build_indexed(&path_for_index)).await;
+        match built {
+            Ok(Ok(indexed)) => {
+                if let Ok(mut m) = metadata_slot.lock() {
+                    refine_metadata(&mut m, &indexed.scans);
+                }
+                if let Ok(mut slot) = indexed_slot.lock() {
+                    *slot = Some(indexed);
+                }
+                let _ = app.emit("dataset-indexed", handle);
+            }
+            Ok(Err(e)) => {
+                let _ = app.emit("dataset-index-error", (handle, e.message));
+            }
+            Err(e) => {
+                let _ = app.emit("dataset-index-error", (handle, format!("index task failed: {e}")));
+            }
+        }
+    });
+
     let _ = on_progress.send(ProgressEvent {
-        phase: "done".into(),
-        scans_done: total,
-        scans_total: total,
+        phase: "ready".into(),
+        scans_done: 0,
+        scans_total: 0,
     });
 
     Ok(OpenResult { handle, metadata })
@@ -283,10 +369,9 @@ pub async fn get_metadata(
     state: State<'_, AppState>,
 ) -> Result<DatasetMetadata, ViewerError> {
     let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-    datasets
-        .get(&handle)
-        .map(|d| d.metadata.clone())
-        .ok_or_else(|| ViewerError::handle_not_found(handle))
+    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+    let meta = d.metadata.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    Ok(meta.clone())
 }
 
 #[tauri::command]
@@ -294,13 +379,12 @@ pub async fn get_scan_summaries(
     handle: u64,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+    let (scans, tic_arc, _) = indexed_handles(&state, handle)?;
 
-    let n = d.scans.len();
-    let one_based: Vec<u32> = d.scans.iter().map(|s| s.one_based_scan_number.max(0) as u32).collect();
-    let rt: Vec<f32> = d.scans.iter().map(|s| s.retention_time as f32).collect();
-    let tic = d.tic.clone();
+    let n = scans.len();
+    let one_based: Vec<u32> = scans.iter().map(|s| s.one_based_scan_number.max(0) as u32).collect();
+    let rt: Vec<f32> = scans.iter().map(|s| s.retention_time as f32).collect();
+    let tic = (*tic_arc).clone();
     let ms_level: Vec<u8> = vec![1u8; n];
     let null_f64: Vec<Option<f64>> = vec![None; n];
     let null_i32: Vec<Option<i32>> = vec![None; n];
@@ -327,23 +411,22 @@ pub async fn get_nearest_scan(
     state: State<'_, AppState>,
 ) -> Result<Option<ScanSummary>, ViewerError> {
     let _ = ms_level; // MS1-only
-    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+    let (scans, tic, _) = indexed_handles(&state, handle)?;
 
     let mut best: Option<(usize, f64)> = None;
-    for (i, s) in d.scans.iter().enumerate() {
+    for (i, s) in scans.iter().enumerate() {
         let dist = (s.retention_time - retention_time).abs();
         if best.map_or(true, |(_, b)| dist < b) {
             best = Some((i, dist));
         }
     }
     Ok(best.map(|(i, _)| {
-        let s = &d.scans[i];
+        let s = &scans[i];
         ScanSummary {
             scan_index: i as u32,
             one_based_scan_number: s.one_based_scan_number.max(0) as u32,
             retention_time: s.retention_time,
-            tic: d.tic[i] as f64,
+            tic: tic[i] as f64,
             ms_level: 1,
             precursor: None,
         }
@@ -364,11 +447,30 @@ pub async fn get_tic_trace(
     let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
     let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
-    for (i, s) in d.scans.iter().enumerate() {
-        if in_rt_window(s.retention_time, rt_min, rt_max) {
-            rt.push(s.retention_time as f32);
-            intensity.push(d.tic[i]);
-            scan_index.push(i as u32);
+    if !d.tic_rt.is_empty() {
+        // Served from the native instrument TIC read on the fast path — available immediately,
+        // before the peak index exists. The `scanIndex` here is the TIC point's ordinal, not an
+        // MS1 scan index (the native TIC spans all MS levels); TIC clicks navigate by RT, which
+        // `get_nearest_scan` resolves to a real scan once indexing is done.
+        for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
+            if in_rt_window(t, rt_min, rt_max) {
+                rt.push(t as f32);
+                intensity.push(inten);
+                scan_index.push(i as u32);
+            }
+        }
+    } else if let Some(idx) = d.indexed.lock().ok().and_then(|g| {
+        g.as_ref().map(|i| (i.scans.clone(), i.tic.clone()))
+    }) {
+        // No native TIC (e.g. an mzML without a TIC chromatogram): fall back to the per-scan
+        // summed-centroid TIC once the index is built. Here `scanIndex` *is* the MS1 scan index.
+        let (scans, tic) = idx;
+        for (i, s) in scans.iter().enumerate() {
+            if in_rt_window(s.retention_time, rt_min, rt_max) {
+                rt.push(s.retention_time as f32);
+                intensity.push(tic[i]);
+                scan_index.push(i as u32);
+            }
         }
     }
     let (rt, intensity, scan_index) = decimate(rt, intensity, scan_index, max_points);
@@ -387,12 +489,11 @@ pub async fn get_range_xic(
     max_points: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+    let (scans, _, _) = indexed_handles(&state, handle)?;
 
     let (lo, hi) = if mz_low <= mz_high { (mz_low, mz_high) } else { (mz_high, mz_low) };
     let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
-    for (i, s) in d.scans.iter().enumerate() {
+    for (i, s) in scans.iter().enumerate() {
         if !in_rt_window(s.retention_time, rt_min, rt_max) {
             continue;
         }
@@ -410,24 +511,17 @@ pub async fn get_range_xic(
     Ok(Response::new(bytes))
 }
 
-#[tauri::command]
-pub async fn get_spectrum(
-    handle: u64,
-    scan_index: u32,
+/// Build the Arrow spectrum `Response` for one scan: apply the m/z window, keep the
+/// `max_peaks` most intense (restoring m/z order), and attach the metadata columns. `scan_index`
+/// is what to report as `scanIndex` (the MS1 ordinal for indexed reads, or the file spectrum
+/// index for on-demand RT reads, which have no MS1 ordinal yet).
+fn build_spectrum_response(
+    s: &Scan,
+    scan_index: i64,
     mz_min: Option<f64>,
     mz_max: Option<f64>,
     max_peaks: Option<u32>,
-    state: State<'_, AppState>,
 ) -> Result<Response, ViewerError> {
-    let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-    let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
-
-    let si = scan_index as usize;
-    if si >= d.scans.len() {
-        return Err(ViewerError::scan_out_of_range(scan_index, d.scans.len()));
-    }
-    let s = &d.scans[si];
-
     // m/z window (mz ascending).
     let a = mz_min.map_or(0, |lo| s.mz.partition_point(|&m| m < lo));
     let b = mz_max.map_or(s.mz.len(), |hi| s.mz.partition_point(|&m| m <= hi));
@@ -456,6 +550,58 @@ pub async fn get_spectrum(
     let bytes = arrow_out::build_spectrum(mz, intensity, metadata)
         .map_err(|e| ViewerError::internal(e.to_string()))?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn get_spectrum(
+    handle: u64,
+    scan_index: u32,
+    mz_min: Option<f64>,
+    mz_max: Option<f64>,
+    max_peaks: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Response, ViewerError> {
+    let (scans, _, _) = indexed_handles(&state, handle)?;
+
+    let si = scan_index as usize;
+    if si >= scans.len() {
+        return Err(ViewerError::scan_out_of_range(scan_index, scans.len()));
+    }
+    build_spectrum_response(&scans[si], scan_index as i64, mz_min, mz_max, max_peaks)
+}
+
+/// Fetch the MS1 spectrum nearest a retention time via an on-demand single-scan read from the
+/// kept-open reader — no peak index required, so it works during (and after) indexing. This is
+/// the RT-first path the viewer uses for TIC clicks and feature selection.
+#[tauri::command]
+pub async fn get_spectrum_at_rt(
+    handle: u64,
+    retention_time: f64,
+    mz_min: Option<f64>,
+    mz_max: Option<f64>,
+    max_peaks: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Response, ViewerError> {
+    let reader = {
+        let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+        d.reader.clone()
+    };
+    // Read off the async runtime: a single-scan `.raw` read crosses into the .NET runtime.
+    let scan = tauri::async_runtime::spawn_blocking(move || {
+        let mut r = reader.lock().map_err(|e| e.to_string())?;
+        Ok::<Option<Scan>, String>(r.ms1_scan_at_rt(retention_time))
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("spectrum read task failed: {e}")))?
+    .map_err(ViewerError::internal)?;
+
+    let Some(s) = scan else {
+        return Err(ViewerError::new("NO_SCAN", "no MS1 scan near that retention time"));
+    };
+    // No MS1 ordinal exists pre-index; report the file spectrum index (one_based − 1).
+    let file_index = (s.one_based_scan_number as i64 - 1).max(-1);
+    build_spectrum_response(&s, file_index, mz_min, mz_max, max_peaks)
 }
 
 #[tauri::command]
@@ -719,12 +865,9 @@ pub async fn run_feature_detection(
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<Vec<Feature>, ViewerError> {
-    // Clone cheap Arc handles and drop the lock before the multi-minute run.
-    let (scans, engine) = {
-        let ds = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
-        let d = ds.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
-        (d.scans.clone(), d.engine.clone())
-    };
+    // Clone cheap Arc handles and drop the lock before the multi-minute run. Detection needs
+    // the peak index, so this returns INDEXING until the background build lands.
+    let (scans, _, engine) = indexed_handles(&state, handle)?;
     let opts = options.unwrap_or(DetectOptions { max_charge: None, min_seed_intensity: None });
     let max_charge = opts.max_charge.unwrap_or(25).clamp(1, 60);
     let min_seed = opts.min_seed_intensity.unwrap_or(10_000.0).max(0.0);

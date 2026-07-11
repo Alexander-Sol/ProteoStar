@@ -6,6 +6,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { tableFromIPC, type Table } from "apache-arrow";
 
 import type {
+  DatasetMetadata,
   DatasetProvider,
   OpenResult,
   Precursor,
@@ -25,7 +26,7 @@ export async function openDataset(
   const channel = new Channel<ProgressEvent>();
   if (onProgress) channel.onmessage = onProgress;
 
-  const { handle, metadata } = await invoke<OpenResult>("open_dataset", {
+  const { handle } = await invoke<OpenResult>("open_dataset", {
     path,
     onProgress: channel
   });
@@ -34,7 +35,9 @@ export async function openDataset(
     invoke<ArrayBuffer>(cmd, { handle, ...args }).then(toTable);
 
   const provider: DatasetProvider = {
-    getMetadata: async () => metadata,
+    // Re-fetch from the backend (not the cached open-time `metadata`): the open result is
+    // provisional (RT range only, ms1ScanCount 0) and gets refined when indexing finishes.
+    getMetadata: () => invoke<DatasetMetadata>("get_metadata", { handle }),
 
     getScanSummaries: async () => decodeScanSummaries(await arrow("get_scan_summaries", {})),
 
@@ -66,6 +69,16 @@ export async function openDataset(
       decodeSpectrum(
         await arrow("get_spectrum", {
           scanIndex,
+          mzMin: o.mzRange?.min,
+          mzMax: o.mzRange?.max,
+          maxPeaks: o.maxPeaks
+        })
+      ),
+
+    getSpectrumAtRt: async (retentionTime, o = {}) =>
+      decodeSpectrum(
+        await arrow("get_spectrum_at_rt", {
+          retentionTime,
           mzMin: o.mzRange?.min,
           mzMax: o.mzRange?.max,
           maxPeaks: o.maxPeaks
