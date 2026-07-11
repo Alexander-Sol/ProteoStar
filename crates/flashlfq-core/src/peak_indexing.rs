@@ -124,6 +124,14 @@ fn bin_center_mz(bin: usize) -> f32 {
 /// (±32 767) — and the grid step is `1 / 6.0e6 ≈ 1.7e-7` Da, finer than the f32 m/z it replaces.
 const MZ_OFFSET_SCALE: f32 = 6.0e6;
 
+/// Reciprocal of [`MZ_OFFSET_SCALE`], used on the read path so unpacking a peak's m/z is a
+/// multiply rather than a divide. LLVM will not strength-reduce `x / MZ_OFFSET_SCALE` to a multiply
+/// on its own (it is not bit-exact), and that divide sits in the detector's hottest loop
+/// ([`PackedPeak::mz_with_center`], evaluated per candidate peak), so we fold the reciprocal by
+/// hand. The last-ULP difference this introduces is immaterial — the reconstructed m/z is re-narrowed
+/// to f32 anyway (see the module-level packing note).
+const MZ_OFFSET_INV_SCALE: f32 = 1.0 / MZ_OFFSET_SCALE;
+
 /// Largest number of MS1 scans the `u16` [`PackedPeak::scan_index`] can address.
 const MAX_INDEXED_SCANS: usize = u16::MAX as usize + 1;
 
@@ -174,7 +182,7 @@ impl PackedPeak {
     /// hoists `bin_center_mz` out of the per-peak work.
     #[inline]
     fn mz_with_center(&self, center: f32) -> f32 {
-        center + self.mz_offset as f32 / MZ_OFFSET_SCALE
+        center + self.mz_offset as f32 * MZ_OFFSET_INV_SCALE
     }
 
     /// The peak's full m/z, as the f32 the public peak would carry.
