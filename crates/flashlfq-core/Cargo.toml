@@ -30,6 +30,6 @@ parquet = "54"
 # delimiter to mirror mzLib's plain `line.Split('\t')` (it does its own quote trimming, not
 # RFC-4180 CSV quoting). `serde` derive lets `Identification` serialize for later output.
 csv = "1.3"
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 # Intra-file detector parallelism (opt-in). See `detect_features_parallel`.
 rayon = { workspace = true }
