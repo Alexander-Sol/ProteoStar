@@ -17,14 +17,22 @@
 //! - `IndexedMassSpectralPeak` stores `mz`/`intensity`/`retention_time` as `f32`, matching
 //!   the C# class (the `(float)` casts in its constructor). The bin computation uses the
 //!   original `f64` m/z, exactly as C# rounds `MassSpectrum.XArray[j]` (a `double`).
-//! - **In-index storage is packed** ([`PackedPeak`], 12 B vs the public peak's 16 B). A bin only
+//! - **In-index storage is packed** ([`PackedPeak`], 8 B vs the public peak's 16 B). A bin only
 //!   stores each peak's m/z *offset* from the bin centre (`bin / BINS_PER_DALTON`) — the integer
 //!   and first-two-decimal digits are already implied by the bin position — plus intensity and
 //!   scan index. Retention time is not stored per peak; it is recovered from `scan_info` by scan
-//!   index. Every read reconstructs a **bit-identical** [`IndexedMassSpectralPeak`]
-//!   (`PackedPeak::reconstruct`), so all query results are unchanged: the m/z round-trips exactly
-//!   (the offset is within one bin, so `centre + (mz - centre)` is exact by Sterbenz's lemma), and
-//!   intensity/rt are exact byte copies of the values the full peak carried.
+//!   index. The offset is a **fixed-point `i16`** ([`MZ_OFFSET_SCALE`]) and the scan index a `u16`,
+//!   which is what gets the peak down to 8 bytes:
+//!     - The offset spans ≤ ±0.005 Da (half a 0.01-Da bin). At the chosen scale the `i16` grid step
+//!       is ~1.7e-7 Da — *finer* than the f32 full-m/z it replaces (whose own ULP is 6e-5 Da at m/z
+//!       500, 2.4e-4 Da at m/z 2000). So the reconstructed m/z is **not** bit-identical to the old
+//!       index's, but it is if anything closer to the true m/z, and the perturbation (≤ ~1e-7 Da ≈
+//!       3e-4 ppm) is orders of magnitude below the detector's ppm tolerances. Query results are
+//!       therefore unchanged in practice — verified by real-data recall/output parity, not by
+//!       bit-equality.
+//!     - The `u16` scan index caps the index at 65,536 MS1 scans;
+//!       [`PeakIndexingEngine::index_peaks`] asserts this. Intensity and retention time remain exact
+//!       copies of the values the full peak carried.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -109,54 +117,82 @@ fn bin_center_mz(bin: usize) -> f32 {
     bin as f32 / BINS_PER_DALTON as f32
 }
 
-/// The compact, index-internal form of a peak: 12 bytes vs [`IndexedMassSpectralPeak`]'s 16.
+/// Fixed-point scale for a [`PackedPeak`]'s m/z offset: `stored_i16 = round(offset * SCALE)`.
+///
+/// The offset spans ≤ ±0.005 Da (half a 0.01-Da bin), plus a little slack from rounding the bin
+/// centre in f32. At `6.0e6` the extreme ±~0.0051 Da maps to ±~30 600 — comfortably inside `i16`
+/// (±32 767) — and the grid step is `1 / 6.0e6 ≈ 1.7e-7` Da, finer than the f32 m/z it replaces.
+const MZ_OFFSET_SCALE: f32 = 6.0e6;
+
+/// Largest number of MS1 scans the `u16` [`PackedPeak::scan_index`] can address.
+const MAX_INDEXED_SCANS: usize = u16::MAX as usize + 1;
+
+/// The compact, index-internal form of a peak: **8 bytes** vs [`IndexedMassSpectralPeak`]'s 16.
 ///
 /// Stores only what the bin position does *not* already imply — the m/z **offset** from the bin
-/// centre (`bin / BINS_PER_DALTON`), the intensity, and the scan index. The integer + first-two-
-/// decimal digits of the m/z are recoverable from the bin, and the retention time from `scan_info`
-/// via the scan index, so neither is stored per peak. [`reconstruct`](Self::reconstruct) rebuilds a
-/// bit-identical public peak.
+/// centre (`bin / BINS_PER_DALTON`) as a fixed-point [`i16`](MZ_OFFSET_SCALE), the intensity, and
+/// the scan index as a `u16`. The integer + first-two-decimal digits of the m/z are recoverable
+/// from the bin, and the retention time from `scan_info` via the scan index, so neither is stored
+/// per peak. [`reconstruct`](Self::reconstruct) rebuilds the public peak (m/z to ~1.7e-7 Da, rt and
+/// intensity exact).
 ///
-/// Field order keeps the struct at 12 bytes (three 4-byte fields, 4-byte aligned, no padding).
+/// Field order keeps the struct at 8 bytes (`f32` at offset 0, then two 2-byte fields; 4-byte
+/// aligned, no padding).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedPeak {
-    /// m/z minus the bin centre. Small (|·| ≲ 0.005 Da) — one bin is 0.01 Da wide.
-    mz_offset: f32,
     /// Peak intensity (verbatim from the source, `(float)`-narrowed as in C#).
     intensity: f32,
-    /// Zero-based scan index this peak came from.
-    zero_based_scan_index: i32,
+    /// Fixed-point m/z offset from the bin centre: `round((mz - centre) * MZ_OFFSET_SCALE)`.
+    mz_offset: i16,
+    /// Zero-based scan index this peak came from (see [`MAX_INDEXED_SCANS`]).
+    scan_index: u16,
 }
 
 impl PackedPeak {
-    /// Packs a source peak into bin `bin`. `offset = (mz as f32) - centre` is exact (Sterbenz),
-    /// and `centre + offset` reconstructs the original `mz as f32` bit-for-bit.
+    /// Packs a source peak into bin `bin`. The offset is quantised to the `i16` fixed-point grid
+    /// (and clamped for safety, though in-range peaks never reach the clamp); the scan index is
+    /// narrowed to `u16` (callers guarantee `< MAX_INDEXED_SCANS`).
     #[inline]
     fn pack(bin: usize, mz: f64, intensity: f64, zero_based_scan_index: i32) -> Self {
+        let offset = mz as f32 - bin_center_mz(bin);
+        let scaled = (offset * MZ_OFFSET_SCALE).round_ties_even();
+        let mz_offset = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         PackedPeak {
-            mz_offset: mz as f32 - bin_center_mz(bin),
             intensity: intensity as f32,
-            zero_based_scan_index,
+            mz_offset,
+            scan_index: zero_based_scan_index as u16,
         }
     }
 
-    /// The peak's full m/z, as the f32 the public peak would carry. Cheap: one add over a
-    /// per-bin-hoisted centre at the call sites that need it in a hot loop.
+    /// The peak's zero-based scan index, widened to the `i32` the query logic uses.
     #[inline]
-    fn mz(&self, bin: usize) -> f32 {
-        bin_center_mz(bin) + self.mz_offset
+    fn scan(&self) -> i32 {
+        self.scan_index as i32
     }
 
-    /// Rebuilds the public [`IndexedMassSpectralPeak`] — bit-identical to the one the old
-    /// full-peak index stored: m/z from `bin` (exact), intensity a byte copy, retention time
-    /// from `scan_info` (the same `(float)`-narrowed scan RT the full peak held).
+    /// The peak's full m/z given the already-computed bin `centre` — the hot-loop form that
+    /// hoists `bin_center_mz` out of the per-peak work.
+    #[inline]
+    fn mz_with_center(&self, center: f32) -> f32 {
+        center + self.mz_offset as f32 / MZ_OFFSET_SCALE
+    }
+
+    /// The peak's full m/z, as the f32 the public peak would carry.
+    #[inline]
+    fn mz(&self, bin: usize) -> f32 {
+        self.mz_with_center(bin_center_mz(bin))
+    }
+
+    /// Rebuilds the public [`IndexedMassSpectralPeak`]: m/z from `bin` (to ~1.7e-7 Da), intensity a
+    /// byte copy, retention time from `scan_info` (the same `(float)`-narrowed scan RT the full peak
+    /// held — still exact).
     #[inline]
     fn reconstruct(&self, bin: usize, scan_info: &[ScanInfo]) -> IndexedMassSpectralPeak {
         IndexedMassSpectralPeak {
             mz: self.mz(bin),
             intensity: self.intensity,
-            zero_based_scan_index: self.zero_based_scan_index,
-            retention_time: scan_info[self.zero_based_scan_index as usize].retention_time as f32,
+            zero_based_scan_index: self.scan(),
+            retention_time: scan_info[self.scan_index as usize].retention_time as f32,
         }
     }
 }
@@ -217,6 +253,14 @@ impl PeakIndexingEngine {
         if scans.is_empty() {
             return None;
         }
+        // The packed peak addresses its scan with a u16 (see `PackedPeak`); more scans than that
+        // would silently wrap the scan index and corrupt every query. Fail loudly instead.
+        assert!(
+            scans.len() <= MAX_INDEXED_SCANS,
+            "PeakIndexingEngine supports at most {MAX_INDEXED_SCANS} scans, got {} — \
+             widen PackedPeak::scan_index beyond u16 to index this file",
+            scans.len()
+        );
 
         // Largest m/z across all scans (C# `Max(p => p.MassSpectrum.LastX.Value)`), where
         // LastX is the last (max) m/z of a scan. Scans with no peaks are skipped, matching
@@ -393,13 +437,13 @@ impl PeakIndexingEngine {
             }
             let center = bin_center_mz(j as usize);
             for p in &bin[start as usize..] {
-                if p.zero_based_scan_index < zero_based_scan_index {
+                if p.scan() < zero_based_scan_index {
                     continue;
                 }
-                if p.zero_based_scan_index > zero_based_scan_index {
+                if p.scan() > zero_based_scan_index {
                     break; // bin is scan-ascending; past the target scan
                 }
-                let mz = (center + p.mz_offset) as f64;
+                let mz = p.mz_with_center(center) as f64;
                 if mz < mz_lo || mz > mz_hi {
                     continue;
                 }
@@ -612,15 +656,15 @@ impl PeakIndexingEngine {
         for i in (peak_index_in_bin as usize)..bin.len() {
             let peak = &bin[i];
 
-            if peak.zero_based_scan_index > zero_based_scan_index {
+            if peak.scan() > zero_based_scan_index {
                 break;
             }
 
-            let peak_mz = (center + peak.mz_offset) as f64;
+            let peak_mz = peak.mz_with_center(center) as f64;
             if ppm.within(peak_mz, mz)
-                && peak.zero_based_scan_index == zero_based_scan_index
+                && peak.scan() == zero_based_scan_index
                 && best_peak.map_or(true, |b| {
-                    (peak_mz - mz).abs() < ((center + b.mz_offset) as f64 - mz).abs()
+                    (peak_mz - mz).abs() < (b.mz_with_center(center) as f64 - mz).abs()
                 })
             {
                 best_peak = Some(peak);
@@ -648,7 +692,7 @@ impl PeakIndexingEngine {
             if r - l < 2 {
                 break;
             }
-            if indexed_peaks[m as usize].zero_based_scan_index < zero_based_scan_index {
+            if indexed_peaks[m as usize].scan() < zero_based_scan_index {
                 l = m + 1;
             } else {
                 r = m - 1;
@@ -657,7 +701,7 @@ impl PeakIndexingEngine {
 
         let mut i = m;
         while i >= 0 {
-            if indexed_peaks[i as usize].zero_based_scan_index < zero_based_scan_index {
+            if indexed_peaks[i as usize].scan() < zero_based_scan_index {
                 break;
             }
             m -= 1;
@@ -740,7 +784,7 @@ fn xic_from_bins(
                         loop {
                             pointer_copy[i] -= 1;
                             let keep_going = pointer_copy[i] >= 0
-                                && bin[pointer_copy[i] as usize].zero_based_scan_index > current - 1;
+                                && bin[pointer_copy[i] as usize].scan() > current - 1;
                             if !keep_going {
                                 break;
                             }
@@ -749,7 +793,7 @@ fn xic_from_bins(
                     }
                     1 => {
                         while pointer_copy[i] < bin.len() as isize - 1
-                            && bin[pointer_copy[i] as usize].zero_based_scan_index < current
+                            && bin[pointer_copy[i] as usize].scan() < current
                         {
                             pointer_copy[i] += 1;
                         }
@@ -918,8 +962,8 @@ impl PeakIndexingEngine {
             match slot {
                 Some(b) => {
                     // Bins are scan-ascending, so the scan window is a contiguous sub-slice.
-                    let start = b.partition_point(|p| p.zero_based_scan_index < scan_lo);
-                    let end = b.partition_point(|p| p.zero_based_scan_index <= scan_hi);
+                    let start = b.partition_point(|p| p.scan() < scan_lo);
+                    let end = b.partition_point(|p| p.scan() <= scan_hi);
                     bins.push(&b[start..end]);
                 }
                 None => bins.push(&[]),
@@ -1051,13 +1095,13 @@ impl<'a> PeakSource for PeakIndexView<'a> {
             }
             let center = bin_center_mz(j as usize);
             for p in &bin[start as usize..] {
-                if p.zero_based_scan_index < zero_based_scan_index {
+                if p.scan() < zero_based_scan_index {
                     continue;
                 }
-                if p.zero_based_scan_index > zero_based_scan_index {
+                if p.scan() > zero_based_scan_index {
                     break;
                 }
-                let mz = (center + p.mz_offset) as f64;
+                let mz = p.mz_with_center(center) as f64;
                 if mz < mz_lo || mz > mz_hi {
                     continue;
                 }
@@ -1457,6 +1501,42 @@ mod tests {
     #[test]
     fn bins_per_dalton_is_100() {
         assert_eq!(BINS_PER_DALTON, 100.0);
+    }
+
+    #[test]
+    fn packed_peak_is_eight_bytes() {
+        // The whole point of the packed form: 8 bytes, half the 16-byte public peak. Guards against
+        // a field-type or ordering change silently reintroducing padding.
+        assert_eq!(std::mem::size_of::<PackedPeak>(), 8);
+        assert_eq!(std::mem::align_of::<PackedPeak>(), 4);
+    }
+
+    #[test]
+    fn packed_peak_reconstructs_mz_within_one_ulp() {
+        // Reconstruction is no longer bit-exact (the offset is i16 fixed point), but the i16 grid
+        // step (~1.7e-7 Da) is far finer than the f32 m/z's own ULP (6e-5 Da at 500, 2.4e-4 at
+        // 2000), so re-narrowing to f32 snaps back to within ~1 ULP of the `mz as f32` the old
+        // full-peak index stored — orders of magnitude below any ppm tolerance.
+        let scan_info = [ScanInfo {
+            one_based_scan_number: 1,
+            zero_based_scan_index: 0,
+            retention_time: 1.0,
+            msn_order: 1,
+        }];
+        for &mz in &[150.0f64, 500.0, 500.4999, 812.34567, 1999.98765] {
+            let mz32 = mz as f32;
+            let bin = (mz * BINS_PER_DALTON).round_ties_even() as usize;
+            let packed = PackedPeak::pack(bin, mz, 1234.0, 0);
+            let recon = packed.reconstruct(bin, &scan_info);
+            let ulp = mz32.abs() * f32::EPSILON;
+            assert!(
+                (recon.mz - mz32).abs() <= ulp,
+                "mz {mz}: recon {} vs {mz32} (Δ {:.3e}, ulp {:.3e})",
+                recon.mz,
+                (recon.mz - mz32).abs(),
+                ulp
+            );
+        }
     }
 
     #[test]
