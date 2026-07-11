@@ -134,6 +134,12 @@ export function App() {
       try {
         const meta = await provider.getMetadata();
         if (!active) return;
+        if (meta.indexError) {
+          // Background index build failed — surface it instead of hanging on "indexing…".
+          setIndexing(false);
+          setLoad({ status: "error", message: `Indexing failed: ${meta.indexError}` });
+          return; // done — stop polling
+        }
         if (meta.ms1ScanCount > 0) {
           await markReady();
           return; // done — stop polling

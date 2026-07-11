@@ -51,6 +51,10 @@ pub struct DatasetMetadata {
     pub ms_levels_present: Vec<u32>,
     pub retention_time_range: Option<NumericRange>,
     pub mz_range: Option<NumericRange>,
+    /// `Some(message)` if the background index build failed. The frontend polls this so a failed
+    /// index surfaces an error instead of hanging on "indexing…" forever. `None` while indexing
+    /// or once indexed successfully (a non-zero `ms1_scan_count` is the success signal).
+    pub index_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -190,6 +194,7 @@ fn provisional_metadata(path: &str, tic_rt: &[f64]) -> DatasetMetadata {
             .is_finite()
             .then_some(NumericRange { min: rt_min, max: rt_max }),
         mz_range: None,
+        index_error: None,
     }
 }
 
@@ -339,10 +344,19 @@ pub async fn open_dataset(
                 let _ = app.emit("dataset-indexed", handle);
             }
             Ok(Err(e)) => {
+                // Record the failure in metadata so the frontend's poll surfaces it (rather
+                // than hanging on "indexing…"), and also emit for any event-based listener.
+                if let Ok(mut m) = metadata_slot.lock() {
+                    m.index_error = Some(e.message.clone());
+                }
                 let _ = app.emit("dataset-index-error", (handle, e.message));
             }
             Err(e) => {
-                let _ = app.emit("dataset-index-error", (handle, format!("index task failed: {e}")));
+                let msg = format!("index task failed: {e}");
+                if let Ok(mut m) = metadata_slot.lock() {
+                    m.index_error = Some(msg.clone());
+                }
+                let _ = app.emit("dataset-index-error", (handle, msg));
             }
         }
     });

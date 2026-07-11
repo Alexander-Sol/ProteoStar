@@ -1591,6 +1591,32 @@ mod tests {
         assert!((found.m() as f64 - target.m() as f64).abs() < 1e-3);
     }
 
+    #[test]
+    fn random_access_ms1_scan_at_rt_carries_peaks() {
+        // Regression guard for the `get_spectrum_by_time` gotcha: that method flips the reader to
+        // `DetailLevel::MetadataOnly` during its binary search and returns the match it captured
+        // *without peaks* — so a naive `ms1_scan_at_rt` yields an empty spectrum (the viewer's
+        // "no peaks / x-axis -2..5" bug). `ms1_scan_at_rt` must re-read by index at full detail.
+        let mut reader = RandomAccessMs1Reader::open(test_data("sliced-mzml.mzML"))
+            .expect("sliced-mzml.mzML should be readable");
+
+        // rt = 0 resolves to the earliest scan; `ms1_scan_at_rt` walks to the nearest MS1.
+        let scan = reader
+            .ms1_scan_at_rt(0.0)
+            .expect("an MS1 scan should resolve near the start of the run");
+
+        assert_eq!(scan.msn_order, 1, "must resolve to an MS1 scan");
+        assert!(
+            !scan.mz.is_empty(),
+            "MS1 scan must carry peaks — empty means the get_spectrum_by_time MetadataOnly gotcha regressed"
+        );
+        assert_eq!(scan.mz.len(), scan.intensity.len(), "parallel peak arrays");
+        assert!(
+            scan.mz.windows(2).all(|w| w[0] <= w[1]),
+            "peaks must be m/z-ascending (the index invariant)"
+        );
+    }
+
     /// Builds a 10-scan fixture mirroring the C# `TestXicStops` shape: a peak at m/z 500 in every
     /// scan **except** scans 2 and 3, where it sits at m/z 250 (a charge-2 shift, out of the 20 ppm
     /// window around 500). Tracing 500 must therefore stop after the two-scan gap.

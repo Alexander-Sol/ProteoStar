@@ -18,6 +18,8 @@ export interface DatasetMetadata {
   msLevelsPresent: number[];
   retentionTimeRange: NumericRange | null;
   mzRange: NumericRange | null;
+  /** Set to an error message if the background peak-index build failed; null otherwise. */
+  indexError: string | null;
 }
 
 export interface Precursor {
