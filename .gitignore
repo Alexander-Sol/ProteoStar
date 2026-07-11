@@ -1,8 +1,21 @@
 # --- Rust ---
-# (rust/.gitignore also covers target/, .venv/, __pycache__, egg-info, xic plot)
+# ProteoStar ships binaries (Tauri app + py extension), so Cargo.lock IS committed
+# (it carries the load-bearing thermorawfilereader = 0.7.0 pin). Do not ignore it.
 target/
 **/*.rs.bk
-Cargo.lock
+
+# --- Node / TypeScript / Vite (desktop frontend + packages) ---
+node_modules/
+dist/
+build/
+coverage/
+.next/
+out/
+.vercel/
+.env
+.env.local
+.env.*.local
+*.log
 
 # --- Python (smoke-test venv + maturin artifacts) ---
 .venv/
