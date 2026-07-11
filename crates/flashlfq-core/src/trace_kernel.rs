@@ -648,11 +648,27 @@ fn score_hypothesis(
     // the normalised score can penalise a predicted-but-absent tooth. `RawSum` only reads `t · I`.
     let mut slots: Vec<(f64, f64)> = Vec::with_capacity(window.len() * weights.len());
 
+    // The window is a contiguous scan span (built apex-outward). Each isotope tooth is a *fixed* m/z
+    // for this hypothesis, so fetch its peak at every window scan with ONE bin-walk instead of a
+    // point query per (scan, tooth): `tooth_peaks[k][s - scan_lo] == get_indexed_peak(tooth_mz_k, s)`.
+    // The assembly loop below reads these back in the original window/tooth order and runs the exact
+    // same claimed/used dedup, so `slots`, `peaks`, and the score are byte-identical to the per-scan
+    // point-query form — only the lookup count drops (window×teeth → teeth).
+    let (scan_lo, scan_hi) = window
+        .iter()
+        .fold((i32::MAX, i32::MIN), |(lo, hi), &(s, _)| (lo.min(s), hi.max(s)));
+    let tooth_peaks: Vec<Vec<Option<IndexedMassSpectralPeak>>> = (0..weights.len())
+        .map(|k| {
+            let tooth_mz = mono_mz + (k as f64) * spacing;
+            engine.get_indexed_peaks_in_scan_range(tooth_mz, scan_lo, scan_hi, ppm)
+        })
+        .collect();
+
     for &(s, g) in window {
+        let si = (s - scan_lo) as usize;
         for (k, &wk) in weights.iter().enumerate() {
             let template = wk * g;
-            let expected_mz = mono_mz + (k as f64) * spacing;
-            let observed = if let Some(peak) = engine.get_indexed_peak(expected_mz, s, ppm) {
+            let observed = if let Some(peak) = tooth_peaks[k][si] {
                 let key = peak.key();
                 if !claimed.contains(&key) && used.insert(key) {
                     peaks.push(peak);

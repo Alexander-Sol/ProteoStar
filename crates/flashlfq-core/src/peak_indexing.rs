@@ -724,6 +724,58 @@ impl PeakIndexingEngine {
     }
 }
 
+/// Shared body of [`PeakSource::get_indexed_peaks_in_scan_range`] for both the engine and a view.
+/// `all_bins` are the candidate m/z bins for `m ± ppm` (each `(global bin index, scan-ascending
+/// slice)`, exactly what `get_bins_in_range`/`bins_in_range` produce). For each scan `s` in
+/// `[scan_lo, scan_hi]` it records the peak closest to `m` within `ppm`, walking every bin once.
+///
+/// This reproduces [`PeakIndexingEngine::get_indexed_peak`] per scan bit-for-bit: bins are visited
+/// in ascending index order and the closest-to-`m` peak wins by a strict `<` (so the first bin /
+/// first stored peak keeps a tie), matching `get_peak_from_bin` within a bin and the cross-bin
+/// reduction across them.
+fn indexed_peaks_in_scan_range_from_bins(
+    all_bins: &[(usize, &[PackedPeak])],
+    scan_info: &[ScanInfo],
+    m: f64,
+    scan_lo: i32,
+    scan_hi: i32,
+    ppm: &PpmTolerance,
+) -> Vec<Option<IndexedMassSpectralPeak>> {
+    let n = if scan_hi >= scan_lo {
+        (scan_hi - scan_lo + 1) as usize
+    } else {
+        0
+    };
+    let mut out: Vec<Option<IndexedMassSpectralPeak>> = vec![None; n];
+    if n == 0 {
+        return out;
+    }
+    for &(bin_index, bin) in all_bins {
+        let center = bin_center_mz(bin_index);
+        // First peak at scan >= scan_lo; bins are scan-ascending, so walk forward from there.
+        let start = bin.partition_point(|p| p.scan() < scan_lo);
+        for p in &bin[start..] {
+            let s = p.scan();
+            if s > scan_hi {
+                break;
+            }
+            let peak_mz = p.mz_with_center(center) as f64;
+            if !ppm.within(peak_mz, m) {
+                continue;
+            }
+            let idx = (s - scan_lo) as usize;
+            let closer = match &out[idx] {
+                None => true,
+                Some(b) => (peak_mz - m).abs() < (b.m() as f64 - m).abs(),
+            };
+            if closer {
+                out[idx] = Some(p.reconstruct(bin_index, scan_info));
+            }
+        }
+    }
+    out
+}
+
 /// The bidirectional RT walk shared by [`PeakIndexingEngine::get_xic_by_scan_index`] and
 /// [`PeakIndexView`]. `all_bins` are the candidate m/z bins already collected for `m ± ppm`
 /// (each scan-ascending); `scan_info` bounds the walk by RT. Pure extraction of the former inline
@@ -859,6 +911,21 @@ pub trait PeakSource {
         ppm: &PpmTolerance,
     ) -> Option<IndexedMassSpectralPeak>;
 
+    /// The range form of [`get_indexed_peak`](Self::get_indexed_peak): for a fixed m/z `m`, returns
+    /// the `get_indexed_peak(m, s, ppm)` result for **every** scan `s` in `[scan_lo, scan_hi]`
+    /// inclusive, as a `Vec` indexed by `s - scan_lo`. It walks each candidate m/z bin once (binary
+    /// search to `scan_lo`, then a forward scan to `scan_hi`) instead of binary-searching the bin
+    /// afresh for every scan, so a caller sweeping a fixed tooth m/z down an RT window pays one
+    /// bin-walk rather than one point query per scan. The result is element-for-element identical to
+    /// calling `get_indexed_peak` per scan (same bins, same closest-to-`m` tie-break).
+    fn get_indexed_peaks_in_scan_range(
+        &self,
+        m: f64,
+        scan_lo: i32,
+        scan_hi: i32,
+        ppm: &PpmTolerance,
+    ) -> Vec<Option<IndexedMassSpectralPeak>>;
+
     /// See [`PeakIndexingEngine::get_xic_by_scan_index`].
     #[allow(clippy::too_many_arguments)]
     fn get_xic_by_scan_index(
@@ -894,6 +961,17 @@ impl PeakSource for PeakIndexingEngine {
         ppm: &PpmTolerance,
     ) -> Option<IndexedMassSpectralPeak> {
         PeakIndexingEngine::get_indexed_peak(self, m, zero_based_scan_index, ppm)
+    }
+    #[inline]
+    fn get_indexed_peaks_in_scan_range(
+        &self,
+        m: f64,
+        scan_lo: i32,
+        scan_hi: i32,
+        ppm: &PpmTolerance,
+    ) -> Vec<Option<IndexedMassSpectralPeak>> {
+        let all_bins = self.get_bins_in_range(m, ppm);
+        indexed_peaks_in_scan_range_from_bins(&all_bins, &self.scan_info, m, scan_lo, scan_hi, ppm)
     }
     #[inline]
     fn get_xic_by_scan_index(
@@ -1058,6 +1136,17 @@ impl<'a> PeakSource for PeakIndexView<'a> {
             }
         }
         best_peak
+    }
+
+    fn get_indexed_peaks_in_scan_range(
+        &self,
+        m: f64,
+        scan_lo: i32,
+        scan_hi: i32,
+        ppm: &PpmTolerance,
+    ) -> Vec<Option<IndexedMassSpectralPeak>> {
+        let all_bins = self.bins_in_range(m, ppm);
+        indexed_peaks_in_scan_range_from_bins(&all_bins, self.scan_info, m, scan_lo, scan_hi, ppm)
     }
 
     fn get_xic_by_scan_index(
@@ -1715,6 +1804,39 @@ mod tests {
                     PeakSource::get_indexed_peak(&view, m, scan, &ppm),
                     "view_scans mismatch at m={m}, scan={scan}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn range_query_matches_per_scan_point_query() {
+        // The range form must be element-for-element identical to calling get_indexed_peak per scan,
+        // for the full engine and a view — this is what makes the score_hypothesis refactor a no-op
+        // on results. Sweep several m/z targets (present species, a between-species miss) over the
+        // whole scan range and a narrowed sub-range.
+        let engine = PeakIndexingEngine::index_peaks(&wide_scans()).expect("indexed");
+        let ppm = PpmTolerance::new(20.0);
+        let view = engine.view_box(440.0, 810.0, 5, 35);
+        let n = engine.scan_info().len() as i32;
+        for &m in &[450.0, 500.0, 500.5, 560.0, 600.0, 600.3, 700.0, 800.0] {
+            for &(lo, hi) in &[(0, n - 1), (8, 20), (30, 30)] {
+                let range = engine.get_indexed_peaks_in_scan_range(m, lo, hi, &ppm);
+                assert_eq!(range.len(), (hi - lo + 1) as usize);
+                for s in lo..=hi {
+                    assert_eq!(
+                        range[(s - lo) as usize],
+                        engine.get_indexed_peak(m, s, &ppm),
+                        "engine range vs point mismatch at m={m}, scan={s}"
+                    );
+                }
+                // The view must agree with the engine over its in-box scans (8..=20 sits inside 5..35).
+                if lo >= 5 && hi <= 35 {
+                    assert_eq!(
+                        PeakSource::get_indexed_peaks_in_scan_range(&view, m, lo, hi, &ppm),
+                        range,
+                        "view range vs engine range mismatch at m={m}, lo={lo}, hi={hi}"
+                    );
+                }
             }
         }
     }
