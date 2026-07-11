@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flashlfq-core",
+    "crates/flashlfq-py",
+    "apps/desktop/src-tauri",
+]
+# Keep flashlfq-py out of default-members: it's an extension-module cdylib that only links
+# libpython under maturin. A bare `cargo build`/`cargo test` at the root builds the engine +
+# the Tauri backend; the Python wheel is built explicitly via `maturin`.
+default-members = [
+    "crates/flashlfq-core",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["mzLib contributors"]
+repository = "https://github.com/Alexander-Sol/ProteoStar"
+
+# Shared dependency versions so the engine, the Python bindings, and the Tauri backend stay in
+# lockstep. Arrow/pyarrow ABI pairing: arrow 54.x is the last line that pins pyo3 ^0.23 behind
+# its `pyarrow` feature (arrow 55+ moves to pyo3 0.24+, which would clash with pyo3 0.23.5).
+[workspace.dependencies]
+pyo3 = { version = "0.23", default-features = false }
+numpy = "0.23"
+arrow = "54"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
