@@ -1,8 +1,10 @@
-# FlashLFQ-Rust — project guidance
+# ProteoStar — project guidance
 
-Rust port of FlashLFQ plus an untargeted MS1 feature-detection pipeline. Core crate:
-`rust/flashlfq-core`. Detector runner: `examples/detect_features_tsv.rs`. Design docs live in
-`agent_info/` (start with `Feature-Detection-Design.md` and `Detector-Perf-and-Parallelization.md`).
+Unified workspace: the FlashLFQ Rust engine + untargeted MS1 feature detector, its Python
+bindings (`crates/flashlfq-py`), and the MsViewer Tauri desktop app (`apps/desktop`). Core crate:
+`crates/flashlfq-core`. Detector runner: `crates/flashlfq-core/examples/detect_features_tsv.rs`.
+Design docs live in `agent_info/` (start with `Feature-Detection-Design.md`,
+`Detector-Perf-and-Parallelization.md`, and `MsViewer_Architecture.md`).
 
 ## Benchmarking
 
