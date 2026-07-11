@@ -655,7 +655,7 @@ fn score_hypothesis(
             let observed = if let Some(peak) = engine.get_indexed_peak(expected_mz, s, ppm) {
                 let key = peak.key();
                 if !claimed.contains(&key) && used.insert(key) {
-                    peaks.push(*peak);
+                    peaks.push(peak);
                     observed_isotopes.insert(k);
                     peak.intensity as f64
                 } else {
@@ -853,7 +853,7 @@ fn gather_extent_peaks(
                 if claimed.contains(&key) || !seen.insert(key) {
                     continue;
                 }
-                peaks.push(*p);
+                peaks.push(p);
             }
         }
     }
@@ -2607,7 +2607,7 @@ fn gather_charge_extent(
                 if claimed.contains(&key) || !seen.insert(key) {
                     continue;
                 }
-                peaks.push(*p);
+                peaks.push(p);
             }
         }
     }
@@ -3731,8 +3731,8 @@ mod tests {
         let spacing = C13_MINUS_C12 / 2.0;
         let apex_scan = 4;
 
-        let mono_peak = *engine.get_indexed_peak(mono_mz, apex_scan, &ppm).expect("mono tooth");
-        let plus1_peak = *engine
+        let mono_peak = engine.get_indexed_peak(mono_mz, apex_scan, &ppm).expect("mono tooth");
+        let plus1_peak = engine
             .get_indexed_peak(mono_mz + spacing, apex_scan, &ppm)
             .expect("+1 tooth");
         assert!(
