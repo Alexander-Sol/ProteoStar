@@ -473,7 +473,7 @@ fn find_all_acceptor_peaks(
             if let Some(peak) =
                 engine.get_indexed_peak(mass_to_mz_f64(peakfinding_mass, z), j, mbr_tol)
             {
-                charge_xic.push(peak);
+                charge_xic.push(*peak);
             }
         }
         if charge_xic.is_empty() {

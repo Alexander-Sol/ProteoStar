@@ -427,7 +427,7 @@ mod tests {
         let mut xic = Vec::new();
         for scan in 0..n {
             if let Some(p) = engine.get_indexed_peak(mono_mz, scan, &tol) {
-                xic.push(p);
+                xic.push(*p);
             }
         }
         xic

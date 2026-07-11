@@ -38,6 +38,7 @@
 //!   `DeconEnvelope` candidate-mass list). Grouping here is per-hypothesis, one charge at a time.
 //! - **Averagine comb weights** (benchmark alternative to Poisson).
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -610,6 +611,15 @@ fn seed_rt_window(
 ///
 /// `window` is the seed's precomputed [`seed_rt_window`] — `(scan_index, gaussian_weight)` pairs,
 /// shared across all charge hypotheses of the same seed.
+///
+/// `tooth_cache` memoises each distinct isotope-tooth m/z's per-scan peak vector **across all charge
+/// hypotheses of this seed** (built and cleared per seed by [`process_seed`]). Every charge's comb
+/// passes through the seed m/z, and a lower charge's teeth coincide with a higher charge's whenever the
+/// lower charge divides the higher (z=1's teeth sit under z=2/3/4/5/6; z=2's under z=4/6; …), so the
+/// same physical tooth would otherwise be gathered once per charge. Keyed by the tooth m/z rounded to
+/// 1 µDa — fine enough to separate distinct teeth (≥ `C13/z` ≈ 0.167 Da apart) yet coarse enough to
+/// merge the sub-µDa reconstruction noise between two charges' arithmetic for the *same* physical
+/// position, so the first charge to reach a tooth does the bin-walk and the rest read its result.
 fn score_hypothesis(
     engine: &impl PeakSource,
     seed: &IndexedMassSpectralPeak,
@@ -618,6 +628,7 @@ fn score_hypothesis(
     ppm: &PpmTolerance,
     claimed: &HashSet<PeakKey>,
     window: &[(i32, f64)],
+    tooth_cache: &mut HashMap<i64, Vec<Option<IndexedMassSpectralPeak>>>,
 ) -> HypothesisScore {
     let seed_mz = seed.m() as f64;
     let seed_mass = mz_to_mass(seed_mz, charge);
@@ -654,15 +665,25 @@ fn score_hypothesis(
     // The assembly loop below reads these back in the original window/tooth order and runs the exact
     // same claimed/used dedup, so `slots`, `peaks`, and the score are byte-identical to the per-scan
     // point-query form — only the lookup count drops (window×teeth → teeth).
+    //
+    // `scan_lo`/`scan_hi` are charge-independent (the window is), so a tooth m/z shared with an
+    // already-scored charge keys into the same `tooth_cache` entry and skips the bin-walk entirely.
     let (scan_lo, scan_hi) = window
         .iter()
         .fold((i32::MAX, i32::MIN), |(lo, hi), &(s, _)| (lo.min(s), hi.max(s)));
-    let tooth_peaks: Vec<Vec<Option<IndexedMassSpectralPeak>>> = (0..weights.len())
-        .map(|k| {
-            let tooth_mz = mono_mz + (k as f64) * spacing;
-            engine.get_indexed_peaks_in_scan_range(tooth_mz, scan_lo, scan_hi, ppm)
-        })
+    let tooth_keys: Vec<i64> = (0..weights.len())
+        .map(|k| ((mono_mz + (k as f64) * spacing) * 1.0e6).round() as i64)
         .collect();
+    for (k, &key) in tooth_keys.iter().enumerate() {
+        if !tooth_cache.contains_key(&key) {
+            let tooth_mz = mono_mz + (k as f64) * spacing;
+            let peaks = engine.get_indexed_peaks_in_scan_range(tooth_mz, scan_lo, scan_hi, ppm);
+            tooth_cache.insert(key, peaks);
+        }
+    }
+    // All keys are now present; borrow the shared vectors immutably for assembly.
+    let tooth_peaks: Vec<&Vec<Option<IndexedMassSpectralPeak>>> =
+        tooth_keys.iter().map(|key| &tooth_cache[key]).collect();
 
     for &(s, g) in window {
         let si = (s - scan_lo) as usize;
@@ -869,7 +890,7 @@ fn gather_extent_peaks(
                 if claimed.contains(&key) || !seen.insert(key) {
                     continue;
                 }
-                peaks.push(p);
+                peaks.push(*p);
             }
         }
     }
@@ -1337,6 +1358,7 @@ fn detect_features_serial(
 
         // Score every charge hypothesis; keep the highest response (cross-z non-max suppression).
         let ts = if profile { Some(Instant::now()) } else { None };
+        let mut tooth_cache: HashMap<i64, Vec<Option<IndexedMassSpectralPeak>>> = HashMap::new();
         let mut best: Option<HypothesisScore> = None;
         for z in params.min_charge..=params.max_charge {
             if z == 0 {
@@ -1345,7 +1367,8 @@ fn detect_features_serial(
             if profile {
                 n_score_calls += 1;
             }
-            let score = score_hypothesis(engine, seed, z, params, &ppm, &claimed, &window);
+            let score =
+                score_hypothesis(engine, seed, z, params, &ppm, &claimed, &window, &mut tooth_cache);
             let better = match &best {
                 None => true,
                 Some(b) => score.response > b.response,
@@ -2177,12 +2200,15 @@ fn process_seed(
     }
 
     let window = seed_rt_window(engine, seed, params);
+    // Shared across every charge hypothesis of this seed: a tooth m/z gathered for one charge is reused
+    // by any other charge whose comb passes through the same physical position (see `score_hypothesis`).
+    let mut tooth_cache: HashMap<i64, Vec<Option<IndexedMassSpectralPeak>>> = HashMap::new();
     let mut best: Option<HypothesisScore> = None;
     for z in params.min_charge..=params.max_charge {
         if z == 0 {
             continue;
         }
-        let score = score_hypothesis(engine, seed, z, params, ppm, claimed, &window);
+        let score = score_hypothesis(engine, seed, z, params, ppm, claimed, &window, &mut tooth_cache);
         let better = match &best {
             None => true,
             Some(b) => score.response > b.response,
@@ -2623,7 +2649,7 @@ fn gather_charge_extent(
                 if claimed.contains(&key) || !seen.insert(key) {
                     continue;
                 }
-                peaks.push(p);
+                peaks.push(*p);
             }
         }
     }
@@ -3050,9 +3076,16 @@ mod tests {
         let seed = seeds[0];
 
         let window = seed_rt_window(&engine, &seed, &params);
-        let s1 = score_hypothesis(&engine, &seed, 1, &params, &ppm, &claimed, &window).response;
-        let s2 = score_hypothesis(&engine, &seed, 2, &params, &ppm, &claimed, &window).response;
-        let s4 = score_hypothesis(&engine, &seed, 4, &params, &ppm, &claimed, &window).response;
+        let mut tooth_cache = HashMap::new();
+        let s1 =
+            score_hypothesis(&engine, &seed, 1, &params, &ppm, &claimed, &window, &mut tooth_cache)
+                .response;
+        let s2 =
+            score_hypothesis(&engine, &seed, 2, &params, &ppm, &claimed, &window, &mut tooth_cache)
+                .response;
+        let s4 =
+            score_hypothesis(&engine, &seed, 4, &params, &ppm, &claimed, &window, &mut tooth_cache)
+                .response;
         assert!(s2 > s1, "z=2 ({s2}) should beat z=1 ({s1})");
         assert!(s2 > s4, "z=2 ({s2}) should beat z=4 ({s4})");
     }
@@ -3747,8 +3780,8 @@ mod tests {
         let spacing = C13_MINUS_C12 / 2.0;
         let apex_scan = 4;
 
-        let mono_peak = engine.get_indexed_peak(mono_mz, apex_scan, &ppm).expect("mono tooth");
-        let plus1_peak = engine
+        let mono_peak = *engine.get_indexed_peak(mono_mz, apex_scan, &ppm).expect("mono tooth");
+        let plus1_peak = *engine
             .get_indexed_peak(mono_mz + spacing, apex_scan, &ppm)
             .expect("+1 tooth");
         assert!(
