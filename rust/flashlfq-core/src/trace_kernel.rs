@@ -200,6 +200,26 @@ pub struct TraceKernelParameters {
     /// Stop when the window's reject fraction reaches this value. Default `0.80` (the A/B sweet spot; see
     /// [`Self::reject_stop_enabled`]) — `0.50` was too eager and over-cut real low-abundance features.
     pub reject_stop_frac: f64,
+    /// **Opt-in, default `false` — top-down joint-charge detection.** When set, [`detect_features`] uses
+    /// the serial **multi-charge** path ([`detect_features_multicharge`]) instead of scoring one charge
+    /// at a time. There the scoring unit is a *neutral mass* whose evidence is summed across the whole
+    /// charge ladder (z = `min_charge..=max_charge`), so a proteoform that ionizes across many charges is
+    /// judged jointly — harmonics collapse, and charge + monoisotope fall out of the cross-charge
+    /// consensus rather than a fragile per-charge guess. Forces serial execution (no 2-D tiling): a
+    /// mass's teeth are spread across the whole m/z axis, so the tiling axis cannot bound one hypothesis.
+    pub multicharge_enabled: bool,
+    /// Minimum number of distinct charge states a mass hypothesis must show (each with
+    /// `≥ min_isotopes_observed` teeth) to be accepted on the multi-charge path. `2` is the floor — a
+    /// top-down proteoform is always multiply charged, so a single-charge "envelope" is a coincidence,
+    /// not a proteoform. Ignored unless [`Self::multicharge_enabled`].
+    pub min_charge_states: usize,
+    /// Half-width (in ¹³C units) of the **joint mono-offset search** on the multi-charge path. After the
+    /// ladder fixes a mass, the monoisotope is refined by testing offsets `δ ∈ [-k, k]` and keeping the
+    /// one whose averagine envelope best matches the observed peaks **across all charges jointly** (a
+    /// cross-charge cosine — the shape metric the response-sum lacks). This is where the multi-charge
+    /// evidence is pointed at the actual bottleneck (mono off-by-one). `0` disables the search (mono
+    /// stays at the averagine anchor). Ignored unless [`Self::multicharge_enabled`].
+    pub multicharge_mono_kmax: i32,
 }
 
 impl Default for TraceKernelParameters {
@@ -234,6 +254,9 @@ impl Default for TraceKernelParameters {
             reject_stop_enabled: false,
             reject_stop_window: 20_000,
             reject_stop_frac: 0.80,
+            multicharge_enabled: false,
+            min_charge_states: 2,
+            multicharge_mono_kmax: 3,
         }
     }
 }
@@ -1107,6 +1130,13 @@ pub fn detect_features(
     // evaluated inside an independent tile/bin and force serial. The reject-rate stop is deliberately NOT
     // one of these — it is self-referential and applied per tile inside [`detect_bin`] via
     // [`tile_reject_cfg`], so a reject-capped run stays parallel.
+    // The multi-charge (joint-ladder) detector is inherently serial — a mass hypothesis lays teeth
+    // across the whole m/z axis, so neither tiling nor RT-binning can bound one hypothesis. It runs
+    // before the tiling dispatch and owns the whole run when engaged.
+    if params.multicharge_enabled {
+        return detect_features_multicharge(engine, params);
+    }
+
     let force_serial = std::env::var("DETECT_SERIAL").is_ok();
     let parallel_1d_requested = std::env::var("DETECT_PARALLEL").is_ok();
     let global_stop_engaged = params.coverage_target < 1.0 || params.knee_stop_enabled;
@@ -2339,6 +2369,535 @@ fn build_feature(hyp: HypothesisScore, peaks: Vec<IndexedMassSpectralPeak>) -> D
     }
 }
 
+// ============================================================================================
+// Multi-charge (joint charge-ladder) detection — the top-down path.
+//
+// The per-charge detector above scores `(seed, z)` pairs independently and keeps the single best
+// `z`. For top-down that wastes the strongest signal a proteoform gives: it ionizes across *many*
+// charge states at once. Here the scoring unit is instead a **neutral monoisotopic mass** `M`, and
+// its evidence is the matched-filter response summed over the whole charge ladder `z ∈
+// [min_charge, max_charge]`. A hypothesis that is a harmonic (half the true mass, say) has real
+// teeth at one apparent charge but none at the others, so it cannot out-score the true mass, whose
+// ladder lights up 5–25 charges together. Charge and monoisotope thus fall out of the cross-charge
+// consensus at *detection* time rather than being patched per-charge downstream.
+// ============================================================================================
+
+/// Plausible top-down monoisotopic-mass band (daltons) a candidate must fall in to be scored. Bounds
+/// the per-seed charge enumeration: a seed m/z divided by a charge that implies a sub-kDa or
+/// >150 kDa neutral mass is not a top-down proteoform and is skipped before the (expensive) full
+/// ladder score. Deliberately generous — this is a sanity clamp, not a biological prior.
+const MULTICHARGE_MIN_MASS: f64 = 1_000.0;
+const MULTICHARGE_MAX_MASS: f64 = 150_000.0;
+
+/// One charge state's envelope within an accepted mass hypothesis: the charge, the matched-filter
+/// response it contributed, and how many distinct isotope teeth it showed. The mono m/z is not stored —
+/// it is recomputed from the hypothesis's (offset-corrected) consensus mass when the ladder is emitted.
+struct ChargeEnvelope {
+    charge: i32,
+    response: f64,
+    num_isotopes_observed: usize,
+}
+
+/// The outcome of scoring one neutral-mass hypothesis `M` against the seed's RT window: the summed
+/// cross-charge response and the per-charge envelopes that cleared the isotope-count floor. Only
+/// charges with `≥ min_isotopes_observed` teeth are retained, so `charges.len()` is the number of
+/// *observed* charge states — the multi-charge acceptance gate keys on it.
+struct MassHypothesis {
+    mono_mass: f64,
+    response: f64,
+    charges: Vec<ChargeEnvelope>,
+}
+
+/// Scores a single neutral monoisotopic mass `M` by laying its averagine isotope envelope at **every**
+/// charge in `[min_charge, max_charge]` across the seed's RT `window`, and summing `weightₖ · gₛ ·
+/// observed_intensity` over all matched `(charge, isotope, scan)` slots.
+///
+/// A charge contributes only if it shows `≥ min_isotopes_observed` distinct teeth (a lone matched peak
+/// at some charge is noise, not an envelope). Peaks already in `claimed`, or already consumed by an
+/// earlier charge of this same hypothesis, do not count — the per-hypothesis `used` set both prevents
+/// double-counting a peak shared by a charge and its harmonic and gives the true mass a small edge over
+/// its harmonics. The returned `response` is the sum over the *retained* charges only.
+///
+/// **Cheap early bail:** the seed's own charge `z_seed` (the charge that generated this candidate mass)
+/// is evaluated first; if it does not itself clear the isotope floor the whole hypothesis is abandoned
+/// before the other ~29 charges are laid. Since the seed is by construction a tooth of `M` at `z_seed`,
+/// a mass whose *anchoring* charge shows no envelope cannot be real — this screen is what keeps the
+/// per-seed cost near the single-charge detector's for the many bogus candidate masses.
+fn score_mass_hypothesis(
+    engine: &impl PeakSource,
+    mono_mass: f64,
+    z_seed: i32,
+    mz_lo: f64,
+    mz_hi: f64,
+    params: &TraceKernelParameters,
+    ppm: &PpmTolerance,
+    claimed: &HashSet<PeakKey>,
+    window: &[(i32, f64)],
+) -> MassHypothesis {
+    let weights = crate::deconvolution::averagine_intensities_from_mono(
+        mono_mass,
+        params.min_isotope_weight,
+        params.max_isotopes,
+    );
+    if weights.is_empty() {
+        return MassHypothesis { mono_mass, response: 0.0, charges: Vec::new() };
+    }
+
+    // Deduped across charges: a peak claimed by charge z cannot also be credited to a harmonic charge
+    // (e.g. 2z) — exactly the anti-harmonic property we want at detection time. `used` is threaded
+    // through each charge evaluation.
+    let mut used: HashSet<PeakKey> = HashSet::new();
+    let eval = |z: i32, used: &mut HashSet<PeakKey>| -> Option<ChargeEnvelope> {
+        if z == 0 {
+            return None;
+        }
+        let spacing = C13_MINUS_C12 / z as f64;
+        let mono_mz = (mono_mass + z as f64 * PROTON_MASS) / z as f64;
+        let mut observed: HashSet<usize> = HashSet::new();
+        let mut resp = 0.0;
+        for &(s, g) in window {
+            for (k, &wk) in weights.iter().enumerate() {
+                let expected_mz = mono_mz + (k as f64) * spacing;
+                if let Some(peak) = engine.get_indexed_peak(expected_mz, s, ppm) {
+                    let key = peak.key();
+                    if !claimed.contains(&key) && used.insert(key) {
+                        observed.insert(k);
+                        resp += wk * g * peak.intensity as f64;
+                    }
+                }
+            }
+        }
+        (observed.len() >= params.min_isotopes_observed).then_some(ChargeEnvelope {
+            charge: z,
+            response: resp,
+            num_isotopes_observed: observed.len(),
+        })
+    };
+
+    // Screen on the anchoring charge first (cheap bail for bogus masses).
+    let seed_env = match eval(z_seed, &mut used) {
+        Some(e) => e,
+        None => return MassHypothesis { mono_mass, response: 0.0, charges: Vec::new() },
+    };
+    let mut total = seed_env.response;
+    let mut charges: Vec<ChargeEnvelope> = vec![seed_env];
+    let n_teeth = weights.len();
+    for z in params.min_charge..=params.max_charge {
+        if z == z_seed {
+            continue;
+        }
+        // Skip charges whose envelope cannot fall in the scanned m/z range: the teeth run upward from
+        // `mono_mz`, so the whole envelope is out of range if its mono is above `mz_hi` or its top tooth
+        // is below `mz_lo`. Prunes the low charges of a heavy mass (mono m/z far above the range).
+        let mono_mz = (mono_mass + z as f64 * PROTON_MASS) / z as f64;
+        if mono_mz > mz_hi {
+            continue;
+        }
+        let top_mz = mono_mz + (n_teeth.saturating_sub(1) as f64) * (C13_MINUS_C12 / z as f64);
+        if top_mz < mz_lo {
+            continue;
+        }
+        if let Some(e) = eval(z, &mut used) {
+            total += e.response;
+            charges.push(e);
+        }
+    }
+
+    MassHypothesis { mono_mass, response: total, charges }
+}
+
+/// Refines a mass hypothesis's **monoisotope** by a joint cross-charge cosine search over ¹³C offsets
+/// `δ ∈ [-kmax, kmax]`, returning the corrected monoisotopic mass.
+///
+/// The ladder's response-sum cannot tell a mono off-by-one from the truth — a shifted envelope still
+/// sums high because the shift is applied consistently across every charge. A **cosine** can: for each
+/// offset it lays the averagine envelope at `M + δ·(C13−C12)` and measures its *shape* agreement with
+/// the observed peaks, pooled over every charge of the hypothesis. A wrong offset lands the envelope's
+/// tall teeth on the observed short ones (and vice versa), lowering the cosine; the true offset aligns
+/// them. One charge's envelope is often too broad/noisy to resolve this, but pooling the whole ladder —
+/// each charge an independent realization — sharpens the discrimination. This is the multi-charge
+/// evidence finally aimed at the actual bottleneck.
+///
+/// Observed intensity per tooth is summed over the RT `window` (the integrated envelope, higher SNR than
+/// any single scan); peaks claimed by *other* features are excluded (this hypothesis's own peaks are not
+/// claimed yet). Ties and empty offsets keep the incumbent `δ = 0`.
+fn refine_mono_offset(
+    engine: &impl PeakSource,
+    hyp: &MassHypothesis,
+    kmax: i32,
+    params: &TraceKernelParameters,
+    ppm: &PpmTolerance,
+    claimed: &HashSet<PeakKey>,
+    window: &[(i32, f64)],
+) -> f64 {
+    if kmax <= 0 || hyp.charges.is_empty() {
+        return hyp.mono_mass;
+    }
+    let base = hyp.mono_mass;
+    let mut best_delta = 0i32;
+    let mut best_cos = f64::NEG_INFINITY;
+    for delta in -kmax..=kmax {
+        let m = base + delta as f64 * C13_MINUS_C12;
+        if m < MULTICHARGE_MIN_MASS {
+            continue;
+        }
+        let weights = crate::deconvolution::averagine_intensities_from_mono(
+            m,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        );
+        if weights.is_empty() {
+            continue;
+        }
+        let mut num = 0.0;
+        let mut den_w = 0.0;
+        let mut den_o = 0.0;
+        for ce in &hyp.charges {
+            let z = ce.charge;
+            let mono_mz = (m + z as f64 * PROTON_MASS) / z as f64;
+            let spacing = C13_MINUS_C12 / z as f64;
+            for (k, &wk) in weights.iter().enumerate() {
+                let tooth_mz = mono_mz + (k as f64) * spacing;
+                let mut obs = 0.0;
+                for &(s, _g) in window {
+                    if let Some(p) = engine.get_indexed_peak(tooth_mz, s, ppm) {
+                        if !claimed.contains(&p.key()) {
+                            obs += p.intensity as f64;
+                        }
+                    }
+                }
+                num += wk * obs;
+                den_w += wk * wk;
+                den_o += obs * obs;
+            }
+        }
+        if den_w > 0.0 && den_o > 0.0 {
+            let cos = num / (den_w.sqrt() * den_o.sqrt());
+            if cos > best_cos {
+                best_cos = cos;
+                best_delta = delta;
+            }
+        }
+    }
+    base + best_delta as f64 * C13_MINUS_C12
+}
+
+/// Gathers a single charge state's isotope teeth over the traced scan span `[s_lo, s_hi]`, mirroring
+/// [`gather_extent_peaks`] but for one charge of an already-chosen mass hypothesis. Peaks already
+/// `claimed`, or already gathered for a lower charge of this feature (`seen`), are skipped so a peak
+/// shared by two charges is assigned once. Returns the peaks this charge claims.
+fn gather_charge_extent(
+    engine: &impl PeakSource,
+    mono_mz: f64,
+    charge: i32,
+    weights: &[f64],
+    s_lo: i32,
+    s_hi: i32,
+    ppm: &PpmTolerance,
+    claimed: &HashSet<PeakKey>,
+    seen: &mut HashSet<PeakKey>,
+) -> Vec<IndexedMassSpectralPeak> {
+    let spacing = C13_MINUS_C12 / charge as f64;
+    let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
+    for k in 0..weights.len() {
+        let tooth_mz = mono_mz + (k as f64) * spacing;
+        for s in s_lo..=s_hi {
+            if let Some(p) = engine.get_indexed_peak(tooth_mz, s, ppm) {
+                let key = p.key();
+                if claimed.contains(&key) || !seen.insert(key) {
+                    continue;
+                }
+                peaks.push(*p);
+            }
+        }
+    }
+    peaks
+}
+
+/// Builds the per-charge [`DetectedFeature`] records for an accepted mass hypothesis and claims their
+/// peaks. Every emitted feature carries the *same* joint-consensus `monoisotopic_mass` (`M`) but its
+/// own charge, mono m/z, and traced peak set — so the existing charge-consensus refine sees a
+/// pre-grouped ladder instead of a bag of independently-guessed charges. A charge whose gathered
+/// extent covers fewer than `min_feature_scans` distinct scans is dropped (persistence gate).
+fn emit_mass_hypothesis(
+    engine: &impl PeakSource,
+    hyp: &MassHypothesis,
+    s_lo: i32,
+    s_hi: i32,
+    params: &TraceKernelParameters,
+    ppm: &PpmTolerance,
+    claimed: &mut HashSet<PeakKey>,
+    features: &mut Vec<DetectedFeature>,
+) -> bool {
+    let weights =
+        crate::deconvolution::averagine_intensities_from_mono(hyp.mono_mass, params.min_isotope_weight, params.max_isotopes);
+    if weights.is_empty() {
+        return false;
+    }
+    // Assign a peak to the lowest charge that matches it (stable, harmonic-safe): a peak shared by z
+    // and 2z belongs to z's envelope, matching the scoring-time `used` dedup order.
+    let mut seen: HashSet<PeakKey> = HashSet::new();
+    let mut pending: Vec<(ChargeSpec, Vec<IndexedMassSpectralPeak>)> = Vec::new();
+    for ce in &hyp.charges {
+        // Recompute the mono m/z from the (offset-corrected) consensus mass — `ce.mono_mz` was laid at
+        // the pre-refinement mass, so it would place the gather comb one ¹³C off after a correction.
+        let mono_mz = (hyp.mono_mass + ce.charge as f64 * PROTON_MASS) / ce.charge as f64;
+        let peaks = gather_charge_extent(
+            engine, mono_mz, ce.charge, &weights, s_lo, s_hi, ppm, claimed, &mut seen,
+        );
+        if peaks.is_empty() {
+            continue;
+        }
+        if params.min_feature_scans > 1 {
+            let distinct: HashSet<i32> = peaks.iter().map(|p| p.zero_based_scan_index).collect();
+            if distinct.len() < params.min_feature_scans {
+                continue;
+            }
+        }
+        pending.push((
+            ChargeSpec { charge: ce.charge, mono_mz, response: ce.response, num_isotopes_observed: ce.num_isotopes_observed },
+            peaks,
+        ));
+    }
+    // Re-check the multi-charge floor after the persistence gate may have dropped charges.
+    if pending.len() < params.min_charge_states {
+        return false;
+    }
+    for (spec, peaks) in pending {
+        for p in &peaks {
+            claimed.insert(p.key());
+        }
+        features.push(build_mass_feature(hyp.mono_mass, spec, peaks));
+    }
+    true
+}
+
+/// A single charge's placement within an accepted mass hypothesis, carried from scoring to feature
+/// assembly.
+struct ChargeSpec {
+    charge: i32,
+    mono_mz: f64,
+    response: f64,
+    num_isotopes_observed: usize,
+}
+
+/// Assembles one [`DetectedFeature`] for a charge state of a joint mass hypothesis. Unlike
+/// [`build_feature`] the monoisotopic mass is **not** re-derived from this charge's mono m/z — it is
+/// the hypothesis's joint-consensus mass, shared across the whole ladder — and the mono m/z is the
+/// ladder-consistent value for this charge.
+fn build_mass_feature(
+    mono_mass: f64,
+    spec: ChargeSpec,
+    peaks: Vec<IndexedMassSpectralPeak>,
+) -> DetectedFeature {
+    let apex = peaks
+        .iter()
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+        .expect("emitted charge feature has at least one peak");
+    let apex_scan_index = apex.zero_based_scan_index;
+    let apex_rt = apex.retention_time as f64;
+    let start_rt = peaks.iter().map(|p| p.retention_time as f64).fold(f64::INFINITY, f64::min);
+    let end_rt = peaks.iter().map(|p| p.retention_time as f64).fold(f64::NEG_INFINITY, f64::max);
+    let summed_intensity = peaks.iter().map(|p| p.intensity as f64).sum();
+    DetectedFeature {
+        monoisotopic_mass: mono_mass,
+        charge: spec.charge,
+        mono_mz: spec.mono_mz,
+        apex_scan_index,
+        apex_rt,
+        start_rt,
+        end_rt,
+        summed_intensity,
+        score: spec.response,
+        num_isotopes_observed: spec.num_isotopes_observed,
+        peaks,
+    }
+}
+
+/// The serial multi-charge detector (top-down path; [`TraceKernelParameters::multicharge_enabled`]).
+///
+/// Same greedy, tallest-first, claim-as-you-go skeleton as [`detect_features_serial`], but the inner
+/// decision is over **neutral masses**, not charges: for each seed it enumerates candidate masses
+/// ([`seed_candidate_masses`]), scores each as a whole charge ladder ([`score_mass_hypothesis`]), and
+/// accepts the best mass that shows `≥ min_charge_states` charge states. The accepted mass's entire
+/// ladder is claimed at once and emitted as one [`DetectedFeature`] per charge (all sharing the
+/// consensus mass). Cheap gates run first (the seed's own-m/z persistence trace, then a single-charge
+/// doublet screen per candidate) so the full 30-charge ladder is scored only for masses that already
+/// look real.
+fn detect_features_multicharge(
+    engine: &PeakIndexingEngine,
+    params: &TraceKernelParameters,
+) -> Vec<DetectedFeature> {
+    let ppm = PpmTolerance::new(params.ppm_tolerance);
+
+    let progress_enabled = std::env::var("DETECT_PROGRESS").is_ok();
+    let progress_every: u64 = std::env::var("DETECT_PROGRESS_EVERY")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50_000);
+
+    let mut seeds = engine.all_peaks();
+    seeds.sort_by(|a, b| b.intensity.total_cmp(&a.intensity));
+
+    // Observed m/z range (over all peaks) — used to prune ladder charges whose envelope falls entirely
+    // outside the scanned window. Computed once; a slightly loose bound is fine (it only skips charges
+    // that could not contribute an observed tooth).
+    let (mz_lo, mz_hi) = seeds.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+        let m = p.m() as f64;
+        (lo.min(m), hi.max(m))
+    });
+    let (mz_lo, mz_hi) = if mz_lo.is_finite() { (mz_lo, mz_hi) } else { (0.0, f64::INFINITY) };
+
+    let need_total_tic = progress_enabled;
+    let total_intensity: f64 = if need_total_tic {
+        seeds.iter().map(|p| p.intensity as f64).sum()
+    } else {
+        0.0
+    };
+    let start = Instant::now();
+    let mut progress = DetectProgress {
+        enabled: progress_enabled,
+        every_seeds: progress_every,
+        every: Duration::from_millis(500),
+        start_time: start,
+        last_emit_seeds: 0,
+        last_emit_time: start,
+        total_tic: total_intensity,
+        pool_total: seeds.len(),
+    };
+
+    let mut claimed: HashSet<PeakKey> = HashSet::new();
+    let mut features: Vec<DetectedFeature> = Vec::new();
+    let mut explained_intensity = 0.0;
+    let mut tally = SeedTally::default();
+    let mut seeds_visited: u64 = 0;
+    let mut last_seed_intensity = 0.0;
+
+    for (seed_idx, seed) in seeds.iter().enumerate() {
+        seeds_visited = seed_idx as u64 + 1;
+        if (seed.intensity as f64) < params.min_seed_intensity {
+            break;
+        }
+        last_seed_intensity = seed.intensity as f64;
+        if claimed.contains(&seed.key()) {
+            continue;
+        }
+        tally.scored += 1;
+
+        // Cheap charge-independent persistence pre-gate on the seed's own m/z (same as serial).
+        let (s_lo, s_hi) = trace_seed_extent(engine, seed, params, &ppm, &claimed);
+        if params.min_feature_scans > 1 && (s_hi - s_lo + 1) < params.min_feature_scans as i32 {
+            tally.rej_pers += 1;
+            claimed.insert(seed.key());
+            continue;
+        }
+
+        let window = seed_rt_window(engine, seed, params);
+        let seed_mz = seed.m() as f64;
+        let apex_scan = seed.zero_based_scan_index;
+
+        // For each charge the seed could take, run a *cheap* spacing screen at the apex scan (~6
+        // lookups) before committing to the full ladder score: count unclaimed peaks at
+        // `seed_mz + j·(C13/z)` for a few `j` around the seed. Only a charge whose local isotope
+        // spacing actually holds (the seed sits in a real cluster) gets its averagine mono anchored
+        // and scored as a whole ladder — this is what keeps the per-seed cost near the single-charge
+        // detector's instead of laying a 60-tooth comb for every candidate.
+        let mut best: Option<MassHypothesis> = None;
+        for z_seed in params.min_charge..=params.max_charge {
+            if z_seed == 0 {
+                continue;
+            }
+            let spacing = C13_MINUS_C12 / z_seed as f64;
+            let mut screen_teeth = 0usize;
+            for j in -2..=3 {
+                let mz = seed_mz + j as f64 * spacing;
+                if mz <= 0.0 {
+                    continue;
+                }
+                if let Some(p) = engine.get_indexed_peak(mz, apex_scan, &ppm) {
+                    if !claimed.contains(&p.key()) {
+                        screen_teeth += 1;
+                    }
+                }
+            }
+            if screen_teeth < params.min_isotopes_observed {
+                continue;
+            }
+            // Anchor the mono: the seed is the most-abundant averagine tooth `i*` at this charge.
+            let seed_mass = mz_to_mass(seed_mz, z_seed);
+            let weights = comb_weights(seed_mass, params);
+            if weights.is_empty() {
+                continue;
+            }
+            let i_star = most_abundant_index(&weights);
+            let mono_mz = seed_mz - (i_star as f64) * spacing;
+            let mono_mass = mz_to_mass(mono_mz, z_seed);
+            if !(MULTICHARGE_MIN_MASS..=MULTICHARGE_MAX_MASS).contains(&mono_mass) {
+                continue;
+            }
+            let hyp = score_mass_hypothesis(
+                engine, mono_mass, z_seed, mz_lo, mz_hi, params, &ppm, &claimed, &window,
+            );
+            if hyp.charges.len() < params.min_charge_states || hyp.response <= 0.0 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some(b) => hyp.response > b.response,
+            };
+            if better {
+                best = Some(hyp);
+            }
+        }
+
+        let mut best = match best {
+            Some(b) => b,
+            None => {
+                tally.rej_env += 1;
+                claimed.insert(seed.key());
+                continue;
+            }
+        };
+
+        // Point the multi-charge evidence at the monoisotope: a joint cross-charge cosine offset search
+        // corrects the (frequently off-by-one) averagine-anchored mono before the ladder is emitted.
+        best.mono_mass = refine_mono_offset(
+            engine, &best, params.multicharge_mono_kmax, params, &ppm, &claimed, &window,
+        );
+
+        let n_before = features.len();
+        let emitted = emit_mass_hypothesis(engine, &best, s_lo, s_hi, params, &ppm, &mut claimed, &mut features);
+        if !emitted {
+            tally.rej_env += 1;
+            claimed.insert(seed.key());
+            continue;
+        }
+        // Guard against re-seeding: if the accepted ladder somehow did not gather the seed peak
+        // itself (a persistence-dropped anchoring charge), claim it so it cannot re-fire.
+        claimed.insert(seed.key());
+        for f in &features[n_before..] {
+            explained_intensity += f.summed_intensity;
+        }
+
+        progress.maybe_emit(seed_idx as u64 + 1, features.len(), explained_intensity, seed.intensity as f64, tally);
+    }
+
+    progress.final_emit(seeds_visited, features.len(), explained_intensity, last_seed_intensity, tally);
+    if progress_enabled {
+        eprintln!(
+            "[DETECT_MULTICHARGE] {} features from {} seeds ({} scored, {} rej_env, {} rej_pers) | {:.1}s",
+            features.len(),
+            seeds.len(),
+            tally.scored,
+            tally.rej_env,
+            tally.rej_pers,
+            start.elapsed().as_secs_f64(),
+        );
+    }
+    features
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2480,6 +3039,101 @@ mod tests {
         let s4 = score_hypothesis(&engine, &seed, 4, &params, &ppm, &claimed, &window).response;
         assert!(s2 > s1, "z=2 ({s2}) should beat z=1 ({s1})");
         assert!(s2 > s4, "z=2 ({s2}) should beat z=4 ({s4})");
+    }
+
+    /// Builds a synthetic top-down proteoform of monoisotopic neutral mass `mono_mass` present at
+    /// every charge in `charges`, eluting across 9 scans (Gaussian RT, apex scan 4). Each charge lays
+    /// the averagine envelope (teeth `mono_mz(z) + k·(C13/z)`) scaled by the apex intensity × RT
+    /// Gaussian. Peaks from all charges are merged per scan and m/z-sorted.
+    fn synthetic_multicharge_scans(mono_mass: f64, charges: &[i32]) -> Vec<Scan> {
+        let weights = averagine_intensities_from_mono(mono_mass, 1e-3, 40);
+        let apex_intensity = 1.0e7;
+        let rt_sigma = 0.15;
+        let n_scans = 9;
+        let apex_scan = 4;
+        let mut scans = Vec::new();
+        for s in 0..n_scans {
+            let rt = 10.0 + s as f64 * 0.1;
+            let g = gaussian(rt - (10.0 + apex_scan as f64 * 0.1), rt_sigma);
+            let mut peaks: Vec<(f64, f64)> = Vec::new();
+            for &z in charges {
+                let mono_mz = mass_to_mz_f64(mono_mass, z);
+                let spacing = C13_MINUS_C12 / z as f64;
+                for (k, &wk) in weights.iter().enumerate() {
+                    peaks.push((mono_mz + k as f64 * spacing, apex_intensity * wk * g));
+                }
+            }
+            peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            scans.push(Scan {
+                mz: peaks.iter().map(|p| p.0).collect(),
+                intensity: peaks.iter().map(|p| p.1).collect(),
+                one_based_scan_number: s + 1,
+                retention_time: rt,
+                msn_order: 1,
+            });
+        }
+        scans
+    }
+
+    fn multicharge_params() -> TraceKernelParameters {
+        TraceKernelParameters {
+            ppm_tolerance: 5.0,
+            rt_sigma_minutes: 0.15,
+            rt_half_window_minutes: 0.5,
+            min_charge: 1,
+            max_charge: 15,
+            max_isotopes: 40,
+            min_isotopes_observed: 3,
+            min_feature_scans: 2,
+            multicharge_enabled: true,
+            min_charge_states: 2,
+            weight_model: CombWeightModel::Averagine,
+            ..TraceKernelParameters::default()
+        }
+    }
+
+    #[test]
+    fn multicharge_detects_proteoform_across_charges() {
+        // An 8 kDa proteoform at z = 5..10. The joint detector should recover mass ~8000 and emit it
+        // across several charge states (one feature per charge, all sharing the consensus mass).
+        let charges = [5, 6, 7, 8, 9, 10];
+        let scans = synthetic_multicharge_scans(8000.0, &charges);
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+        let features = detect_features(&engine, &multicharge_params());
+        assert!(!features.is_empty(), "should detect the proteoform");
+
+        // Features within 20 ppm of the true mono mass, by the charge they were emitted at.
+        let hit: Vec<&DetectedFeature> = features
+            .iter()
+            .filter(|f| (f.monoisotopic_mass - 8000.0).abs() <= 8000.0 * 20e-6)
+            .collect();
+        let hit_charges: HashSet<i32> = hit.iter().map(|f| f.charge).collect();
+        assert!(
+            hit_charges.len() >= multicharge_params().min_charge_states,
+            "expected ≥{} charge states at mass 8000, got {:?}",
+            multicharge_params().min_charge_states,
+            hit_charges
+        );
+        // The recovered charges should be a subset of the ones we synthesized (no phantom charges).
+        for z in &hit_charges {
+            assert!(charges.contains(z), "phantom charge {z} not in the synthesized ladder");
+        }
+    }
+
+    #[test]
+    fn multicharge_rejects_half_mass_harmonic() {
+        // The same proteoform must never be reported at half its true mass: a 4 kDa hypothesis has
+        // real teeth only where 8 kDa's ladder already sits, so the joint score cannot prefer it.
+        let scans = synthetic_multicharge_scans(8000.0, &[5, 6, 7, 8, 9, 10]);
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+        let features = detect_features(&engine, &multicharge_params());
+        let half = 4000.0;
+        let phantom = features
+            .iter()
+            .any(|f| (f.monoisotopic_mass - half).abs() <= half * 20e-6);
+        assert!(!phantom, "detector emitted a half-mass harmonic at ~4000 Da");
+        // And the tallest-seed feature is the true mass.
+        approx(features[0].monoisotopic_mass, 8000.0, 8000.0 * 20e-6);
     }
 
     #[test]

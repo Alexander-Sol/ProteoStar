@@ -409,6 +409,14 @@ fn main() {
     // *default* — the individual env vars (MIN_CHARGE/MAX_CHARGE/MAX_ISOTOPES/MIN_ISOTOPES_OBS/
     // TRACE_MAX_HALF_WIDTH_SEC) still override it, so the preset is a starting point for the sweep.
     let topdown = matches!(std::env::var("TOPDOWN").as_deref(), Ok("1") | Ok("true"));
+    // Joint multi-charge (charge-ladder) detection — default ON for TOPDOWN, off otherwise;
+    // DETECT_MULTICHARGE=0/1 overrides. Caps the charge range at 30 by default (per the design: a
+    // proteoform's ladder is scored jointly, and z>30 is rare / mostly harmonic noise).
+    let multicharge = match std::env::var("DETECT_MULTICHARGE").as_deref() {
+        Ok("1") | Ok("true") => true,
+        Ok("0") | Ok("false") => false,
+        _ => topdown,
+    };
     let min_charge = std::env::var("MIN_CHARGE")
         .ok()
         .and_then(|s| s.parse::<i32>().ok())
@@ -416,7 +424,17 @@ fn main() {
     let max_charge = std::env::var("MAX_CHARGE")
         .ok()
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(if topdown { 60 } else { 6 });
+        .unwrap_or(if multicharge { 30 } else if topdown { 60 } else { 6 });
+    let min_charge_states = std::env::var("MIN_CHARGE_STATES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(2);
+    // Joint cross-charge mono-offset search half-width (¹³C units) on the multi-charge path. Default 3;
+    // MC_MONO_KMAX=0 disables it (mono stays at the averagine anchor) for A/B.
+    let multicharge_mono_kmax = std::env::var("MC_MONO_KMAX")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(3);
     let max_isotopes = std::env::var("MAX_ISOTOPES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -484,8 +502,17 @@ fn main() {
         reject_stop_enabled,
         reject_stop_window,
         reject_stop_frac,
+        multicharge_enabled: multicharge,
+        min_charge_states,
+        multicharge_mono_kmax,
         ..TraceKernelParameters::default()
     };
+    if multicharge {
+        eprintln!(
+            "multi-charge detection: ENABLED (joint charge-ladder over z {min_charge}..={max_charge}, \
+             ≥{min_charge_states} charge states, mono-offset search ±{multicharge_mono_kmax} ¹³C; serial — no tiling)"
+        );
+    }
     if knee_stop_enabled {
         eprintln!(
             "knee auto-stop: ENABLED (window {} seeds, slope_frac {}, abs_eps {:.0e}) — stops early at the coverage knee",
