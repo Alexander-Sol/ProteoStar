@@ -2940,6 +2940,280 @@ fn detect_features_multicharge(
     features
 }
 
+// ---------------------------------------------------------------------------
+// Interactive diagnostics for the MsViewer walkthrough.
+//
+// `seed_ladder_diagnostics` exposes, for one *manually chosen* `(seed, z_seed)`, the full top-down
+// charge-state-ladder fit: the apex spacing screen, the averagine-anchored candidate mass, and — for
+// every charge in `min_charge..=max_charge` — the comb it lays over the seed's RT window with its
+// per-tooth match and per-charge response. It mirrors the anchor + `score_mass_hypothesis` path used
+// by [`detect_features_multicharge`] (kept in sync with it), including the per-hypothesis `used`-set
+// dedup evaluated `z_seed`-first, so the per-charge responses match a real detection run. It is NOT on
+// the detect hot path — it re-walks the index for readability rather than sharing the tooth cache.
+//
+// Deviations from production, all intentional for a debugger: `claimed` is empty (a fresh index, no
+// prior features), and the whole ladder is always returned even when the anchoring charge fails its
+// isotope floor (production early-bails there). Both are surfaced via the returned flags.
+// ---------------------------------------------------------------------------
+
+/// One isotope tooth of a charge's comb in the ladder diagnostics.
+#[derive(Debug, Clone)]
+pub struct LadderTooth {
+    /// Isotope index `k` (0 = monoisotope).
+    pub isotope_index: usize,
+    /// Predicted comb m/z for this tooth: `mono_mz + k·spacing`.
+    pub expected_mz: f64,
+    /// Averagine weight for this tooth (tallest tooth = 1.0) — the comb's relative height.
+    pub weight: f64,
+    /// Observed peak m/z at the seed's apex scan within tolerance, if present. For the single-scan
+    /// overlay only; independent of the cross-window crediting that drives the response.
+    pub observed_mz: Option<f64>,
+    /// Observed peak intensity at the seed's apex scan, if present.
+    pub observed_intensity: Option<f64>,
+    /// True if this tooth was *credited* to this charge by the scorer — matched in ≥1 window scan and
+    /// not already claimed or consumed by an earlier charge of this hypothesis. Drives the per-charge
+    /// `num_isotopes_observed` / response exactly as production does.
+    pub credited: bool,
+}
+
+/// One charge state's comb laid over the seed's RT window for the candidate mass.
+#[derive(Debug, Clone)]
+pub struct LadderCharge {
+    pub charge: i32,
+    /// Monoisotopic-tooth m/z at this charge: `(mono_mass + z·proton)/z`.
+    pub mono_mz: f64,
+    /// Isotope spacing in m/z: `(C13−C12)/z`.
+    pub spacing: f64,
+    /// Cross-window matched-filter response over credited teeth (`Σ wₖ·gₛ·I`).
+    pub response: f64,
+    /// Distinct credited teeth.
+    pub num_isotopes_observed: usize,
+    /// True if this charge cleared `min_isotopes_observed`, so it contributes to the mass response.
+    pub retained: bool,
+    pub teeth: Vec<LadderTooth>,
+}
+
+/// The full top-down charge-state-ladder fit for one manually chosen `(seed, z_seed)`.
+#[derive(Debug, Clone)]
+pub struct SeedLadderDiagnostics {
+    pub seed_mz: f64,
+    pub seed_scan_index: i32,
+    pub seed_rt: f64,
+    pub z_seed: i32,
+    /// Teeth found by the cheap apex spacing screen (`seed_mz + j·spacing`, `j ∈ [-2, 3]`).
+    pub screen_teeth: usize,
+    /// Whether the screen passed (`screen_teeth ≥ min_isotopes_observed`) — production only anchors
+    /// and scores this `z_seed` when it does.
+    pub screen_passed: bool,
+    /// Most-abundant averagine tooth index the seed is assumed to occupy at this charge.
+    pub i_star: usize,
+    /// Anchored monoisotope m/z / mass at this charge (before offset refinement).
+    pub mono_mz: f64,
+    pub mono_mass: f64,
+    /// Whether the anchored mass falls inside the top-down mass acceptance band.
+    pub mass_in_range: bool,
+    /// Monoisotope after the joint cross-charge cosine offset search ([`refine_mono_offset`]).
+    pub refined_mono_mass: f64,
+    /// Cross-charge response summed over the retained charges.
+    pub total_response: f64,
+    /// Number of retained (observed) charge states.
+    pub num_charge_states: usize,
+    /// Whether this candidate would be accepted (`num_charge_states ≥ min_charge_states` and
+    /// `total_response > 0`).
+    pub accepted: bool,
+    /// Scans spanned by the seed's RT window (the response integrates over these).
+    pub window_scan_count: usize,
+    /// Per-charge ladder over `min_charge..=max_charge`, ascending.
+    pub charges: Vec<LadderCharge>,
+}
+
+/// Compute the top-down charge-state-ladder fit for a manually chosen seed and anchoring charge. See
+/// the module comment above for the mirrored algorithm and the intentional debugger deviations.
+pub fn seed_ladder_diagnostics(
+    engine: &PeakIndexingEngine,
+    seed_mz: f64,
+    seed_scan_index: i32,
+    z_seed: i32,
+    params: &TraceKernelParameters,
+) -> SeedLadderDiagnostics {
+    let ppm = PpmTolerance::new(params.ppm_tolerance);
+    let claimed: HashSet<PeakKey> = HashSet::new();
+
+    let scan_info = PeakSource::scan_info(engine);
+    let seed_rt = scan_info
+        .get(seed_scan_index.max(0) as usize)
+        .map(|si| si.retention_time)
+        .unwrap_or(0.0);
+
+    // Use the real indexed peak if the click landed on one; otherwise synthesize from (mz, scan, rt)
+    // so the window and anchor still compute.
+    let seed_peak = engine
+        .get_indexed_peak(seed_mz, seed_scan_index, &ppm)
+        .cloned()
+        .unwrap_or_else(|| IndexedMassSpectralPeak::new(seed_mz, 0.0, seed_scan_index, seed_rt));
+    let seed_mz = seed_peak.m() as f64;
+
+    let mut diag = SeedLadderDiagnostics {
+        seed_mz,
+        seed_scan_index,
+        seed_rt,
+        z_seed,
+        screen_teeth: 0,
+        screen_passed: false,
+        i_star: 0,
+        mono_mz: 0.0,
+        mono_mass: 0.0,
+        mass_in_range: false,
+        refined_mono_mass: 0.0,
+        total_response: 0.0,
+        num_charge_states: 0,
+        accepted: false,
+        window_scan_count: 0,
+        charges: Vec::new(),
+    };
+    if z_seed <= 0 {
+        return diag;
+    }
+
+    // Cheap apex spacing screen (mirrors `detect_features_multicharge`).
+    let spacing_seed = C13_MINUS_C12 / z_seed as f64;
+    let mut screen = 0usize;
+    for j in -2..=3 {
+        let mz = seed_mz + j as f64 * spacing_seed;
+        if mz <= 0.0 {
+            continue;
+        }
+        if let Some(p) = engine.get_indexed_peak(mz, seed_scan_index, &ppm) {
+            if !claimed.contains(&p.key()) {
+                screen += 1;
+            }
+        }
+    }
+    diag.screen_teeth = screen;
+    diag.screen_passed = screen >= params.min_isotopes_observed;
+
+    // Anchor the candidate mass: the seed is the most-abundant averagine tooth `i*` at this charge.
+    let seed_mass = mz_to_mass(seed_mz, z_seed);
+    let anchor_weights = comb_weights(seed_mass, params);
+    if anchor_weights.is_empty() {
+        diag.refined_mono_mass = 0.0;
+        return diag;
+    }
+    let i_star = most_abundant_index(&anchor_weights);
+    let mono_mz = seed_mz - (i_star as f64) * spacing_seed;
+    let mono_mass = mz_to_mass(mono_mz, z_seed);
+    diag.i_star = i_star;
+    diag.mono_mz = mono_mz;
+    diag.mono_mass = mono_mass;
+    diag.mass_in_range = (MULTICHARGE_MIN_MASS..=MULTICHARGE_MAX_MASS).contains(&mono_mass);
+    diag.refined_mono_mass = mono_mass;
+
+    // Charge-independent RT window (the response integrates over these scans).
+    let window = seed_rt_window(engine, &seed_peak, params);
+    diag.window_scan_count = window.len();
+
+    // Ladder weights are the MONO-keyed averagine envelope (what `score_mass_hypothesis` uses),
+    // distinct from the most-abundant-keyed anchor weights above.
+    let weights = crate::deconvolution::averagine_intensities_from_mono(
+        mono_mass,
+        params.min_isotope_weight,
+        params.max_isotopes,
+    );
+    if weights.is_empty() {
+        return diag;
+    }
+
+    // Score one charge, reproducing `score_mass_hypothesis`'s (scan-outer, isotope-inner) crediting
+    // and its per-hypothesis `used` dedup. `used` is threaded across charges by the caller.
+    let eval_charge = |z: i32, used: &mut HashSet<PeakKey>| -> LadderCharge {
+        let spacing = C13_MINUS_C12 / z as f64;
+        let mono_mz_z = (mono_mass + z as f64 * PROTON_MASS) / z as f64;
+        let mut teeth: Vec<LadderTooth> = weights
+            .iter()
+            .enumerate()
+            .map(|(k, &wk)| LadderTooth {
+                isotope_index: k,
+                expected_mz: mono_mz_z + (k as f64) * spacing,
+                weight: wk,
+                observed_mz: None,
+                observed_intensity: None,
+                credited: false,
+            })
+            .collect();
+        let mut resp = 0.0;
+        let mut observed_k: HashSet<usize> = HashSet::new();
+        for &(s, g) in &window {
+            for (k, &wk) in weights.iter().enumerate() {
+                if let Some(peak) = engine.get_indexed_peak(teeth[k].expected_mz, s, &ppm) {
+                    let key = peak.key();
+                    if !claimed.contains(&key) && used.insert(key) {
+                        observed_k.insert(k);
+                        resp += wk * g * peak.intensity as f64;
+                        teeth[k].credited = true;
+                    }
+                }
+            }
+        }
+        // Apex-scan observed peak per tooth — informational overlay, independent of `used`.
+        for tooth in teeth.iter_mut() {
+            if let Some(p) = engine.get_indexed_peak(tooth.expected_mz, seed_scan_index, &ppm) {
+                tooth.observed_mz = Some(p.m() as f64);
+                tooth.observed_intensity = Some(p.intensity as f64);
+            }
+        }
+        let num = observed_k.len();
+        LadderCharge {
+            charge: z,
+            mono_mz: mono_mz_z,
+            spacing,
+            response: resp,
+            num_isotopes_observed: num,
+            retained: num >= params.min_isotopes_observed,
+            teeth,
+        }
+    };
+
+    // Build `used` in production order (z_seed first, then ascending skipping it) so per-charge
+    // responses match, then present the ladder ascending for the UI.
+    let z_lo = params.min_charge.max(1);
+    let z_hi = params.max_charge;
+    let mut by_charge: Vec<LadderCharge> = Vec::new();
+    let mut used: HashSet<PeakKey> = HashSet::new();
+    if (z_lo..=z_hi).contains(&z_seed) {
+        by_charge.push(eval_charge(z_seed, &mut used));
+    }
+    for z in z_lo..=z_hi {
+        if z == z_seed {
+            continue;
+        }
+        by_charge.push(eval_charge(z, &mut used));
+    }
+    by_charge.sort_by_key(|c| c.charge);
+
+    let retained_envelopes: Vec<ChargeEnvelope> = by_charge
+        .iter()
+        .filter(|c| c.retained)
+        .map(|c| ChargeEnvelope {
+            charge: c.charge,
+            response: c.response,
+            num_isotopes_observed: c.num_isotopes_observed,
+        })
+        .collect();
+    let total: f64 = retained_envelopes.iter().map(|e| e.response).sum();
+    diag.total_response = total;
+    diag.num_charge_states = retained_envelopes.len();
+    diag.accepted = retained_envelopes.len() >= params.min_charge_states && total > 0.0;
+
+    // Joint cross-charge cosine offset search — the mono correction production applies pre-emit.
+    let hyp = MassHypothesis { mono_mass, response: total, charges: retained_envelopes };
+    diag.refined_mono_mass =
+        refine_mono_offset(engine, &hyp, params.multicharge_mono_kmax, params, &ppm, &claimed, &window)
+            .max(0.0);
+
+    diag.charges = by_charge;
+    diag
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3138,6 +3412,70 @@ mod tests {
             min_charge_states: 2,
             weight_model: CombWeightModel::Averagine,
             ..TraceKernelParameters::default()
+        }
+    }
+
+    #[test]
+    fn seed_ladder_diagnostics_matches_score_mass_hypothesis() {
+        // The walkthrough diagnostic must reproduce production scoring exactly: for the mass it
+        // anchors, its per-charge and total responses have to equal `score_mass_hypothesis` on the
+        // same mass — otherwise the numbers shown next to the combs would be a lie.
+        let mono_mass = 8000.0;
+        let charges = [6, 7, 8, 9];
+        let scans = synthetic_multicharge_scans(mono_mass, &charges);
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("indexed");
+        let params = multicharge_params();
+
+        // Seed = the most-abundant tooth of the z=7 envelope at the apex scan.
+        let z_seed = 7;
+        let mono_mz = mass_to_mz_f64(mono_mass, z_seed);
+        let w = averagine_intensities_from_mono(mono_mass, params.min_isotope_weight, params.max_isotopes);
+        let i_star = most_abundant_index(&w);
+        let spacing = C13_MINUS_C12 / z_seed as f64;
+        let seed_mz = mono_mz + i_star as f64 * spacing;
+        let seed_scan = 4;
+
+        let diag = seed_ladder_diagnostics(&engine, seed_mz, seed_scan, z_seed, &params);
+
+        // Sanity: a genuine multi-charge proteoform passes the screen and is accepted across charges.
+        assert!(diag.screen_passed, "apex spacing screen should pass for a real seed");
+        assert!(diag.accepted, "true proteoform should be accepted");
+        assert!(diag.num_charge_states >= 2, "should retain multiple charges");
+
+        // Faithfulness: reproduce the anchored mass's score via the production scorer and compare.
+        let ppm = PpmTolerance::new(params.ppm_tolerance);
+        let claimed: HashSet<PeakKey> = HashSet::new();
+        let seed_peak = engine
+            .get_indexed_peak(seed_mz, seed_scan, &ppm)
+            .cloned()
+            .expect("seed peak present");
+        let window = seed_rt_window(&engine, &seed_peak, &params);
+        let (mz_lo, mz_hi) = engine.all_peaks().iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(lo, hi), p| {
+                let m = p.m() as f64;
+                (lo.min(m), hi.max(m))
+            },
+        );
+        let hyp = score_mass_hypothesis(
+            &engine, diag.mono_mass, z_seed, mz_lo, mz_hi, &params, &ppm, &claimed, &window,
+        );
+
+        approx(diag.total_response, hyp.response, hyp.response.abs() * 1e-9 + 1e-3);
+        assert_eq!(
+            diag.num_charge_states,
+            hyp.charges.len(),
+            "retained-charge count must match production"
+        );
+        for env in &hyp.charges {
+            let dc = diag
+                .charges
+                .iter()
+                .find(|c| c.charge == env.charge)
+                .expect("production charge present in diagnostics");
+            assert!(dc.retained, "z{} retained in production must be retained in diag", env.charge);
+            approx(dc.response, env.response, env.response.abs() * 1e-9 + 1e-3);
+            assert_eq!(dc.num_isotopes_observed, env.num_isotopes_observed);
         }
     }
 

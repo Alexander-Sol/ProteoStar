@@ -55,6 +55,9 @@ export interface EnvelopeLine {
   mz: number;
   color: string;
   label?: string;
+  /** True when an observed peak sits at this comb position in the displayed scan — drawn as a
+   *  solid, opaque line versus a faint dotted line for a missing (predicted-only) tooth. */
+  detected?: boolean;
 }
 
 export type TicPlotEvent =
@@ -65,6 +68,7 @@ export type TicPlotEvent =
 
 export type SpectrumPlotEvent =
   | { type: "point-hover"; peak: SpectrumPlotPeak | null }
+  | { type: "peak-click"; peak: SpectrumPlotPeak }
   | { type: "range-select"; range: NumericRange };
 
 export interface TicPlotProps {

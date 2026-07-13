@@ -178,7 +178,9 @@ function buildRegionShapes(regions: readonly RtRegion[] | undefined): Partial<Sh
   }));
 }
 
-/** Vertical lines at predicted isotope-peak m/z positions over a spectrum. */
+/** Vertical lines at predicted isotope-peak m/z positions over a spectrum. A `detected` tooth (an
+ *  observed peak sits at that position in the displayed scan) is drawn solid and opaque; a
+ *  predicted-only tooth is a faint dotted line. */
 function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Partial<Shape>[] {
   if (!envelope || envelope.length === 0) return [];
   return envelope.map((e) => ({
@@ -189,7 +191,12 @@ function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Par
     x1: e.mz,
     y0: 0,
     y1: 1,
-    line: { color: e.color, width: 1, dash: "dot" as const },
+    line: {
+      color: e.color,
+      width: e.detected ? 1.8 : 1,
+      dash: e.detected ? ("solid" as const) : ("dot" as const)
+    },
+    opacity: e.detected ? 0.95 : 0.4,
     layer: "below" as const
   }));
 }
@@ -197,15 +204,30 @@ function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Par
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   const { traces, viewport, rangeSelectionEnabled, envelope, onEvent } = props;
 
-  const data: PlotData[] = traces.map((trace) => ({
-    type: "bar",
-    x: trace.peaks.map((p) => p.mz),
-    y: trace.peaks.map((p) => p.intensity),
-    customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
-    marker: { color: trace.color },
-    width: 0.001,
-    hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
-  } as unknown as PlotData));
+  const data: PlotData[] = traces.flatMap((trace) => {
+    // The 0.001-m/z-wide bars are the visual, but far too thin to hover or click. Overlay an
+    // invisible wide-marker scatter at each peak apex to give Plotly a reliable hover/click
+    // hit-target (mirrors the TIC's line+markers approach). The bar itself skips hover so the
+    // tooltip and click both resolve to the marker trace's customdata.
+    const bar = {
+      type: "bar",
+      x: trace.peaks.map((p) => p.mz),
+      y: trace.peaks.map((p) => p.intensity),
+      marker: { color: trace.color },
+      width: 0.001,
+      hoverinfo: "skip"
+    } as unknown as PlotData;
+    const hit = {
+      type: "scattergl",
+      mode: "markers",
+      x: trace.peaks.map((p) => p.mz),
+      y: trace.peaks.map((p) => p.intensity),
+      customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
+      marker: { size: 12, color: "rgba(0,0,0,0)" },
+      hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
+    } as unknown as PlotData;
+    return [bar, hit];
+  });
 
   const layout: Partial<Layout> = {
     autosize: true,
@@ -249,6 +271,14 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       }}
       style={{ width: "100%", height: "100%" }}
       useResizeHandler
+      onClick={(event: PlotPointEvent) => {
+        // A clicked bar carries its peak `{mz, intensity}` in customdata — the seed pick for the
+        // feature-finding walkthrough.
+        const peak = readCustomData<SpectrumPlotProps["traces"][number]["peaks"][number]>(
+          event?.points?.[0]?.customdata
+        );
+        if (peak) onEvent({ type: "peak-click", peak });
+      }}
       onHover={(event: PlotPointEvent) => {
         const peak = readCustomData<SpectrumPlotProps["traces"][number]["peaks"][number]>(
           event?.points?.[0]?.customdata

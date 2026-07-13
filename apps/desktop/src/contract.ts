@@ -118,6 +118,58 @@ export interface Feature {
   numMembers: number;
 }
 
+// ---------------------------------------------------------- ladder walkthrough
+// Diagnostics for the top-down charge-state-ladder fit of one manually chosen
+// seed + anchoring charge, returned by the `score_seed_ladder` command.
+
+export interface LadderTooth {
+  isotopeIndex: number;
+  /** Predicted comb m/z: monoMz + k·spacing. */
+  expectedMz: number;
+  /** Averagine weight (tallest tooth = 1.0) — the comb tooth's relative height. */
+  weight: number;
+  /** Observed peak m/z at the seed's apex scan within tolerance, else null. */
+  observedMz: number | null;
+  observedIntensity: number | null;
+  /** True if the scorer credited this tooth to this charge (matched, not deduped away). */
+  credited: boolean;
+}
+
+export interface LadderCharge {
+  charge: number;
+  monoMz: number;
+  spacing: number;
+  /** Cross-window matched-filter response over credited teeth. */
+  response: number;
+  numIsotopesObserved: number;
+  /** True if this charge cleared the isotope floor and contributes to the mass response. */
+  retained: boolean;
+  teeth: LadderTooth[];
+}
+
+export interface SeedLadder {
+  seedMz: number;
+  seedScanIndex: number;
+  seedRt: number;
+  zSeed: number;
+  /** Teeth found by the cheap apex spacing screen. */
+  screenTeeth: number;
+  screenPassed: boolean;
+  /** Most-abundant averagine tooth index the seed is assumed to occupy at zSeed. */
+  iStar: number;
+  monoMz: number;
+  monoMass: number;
+  massInRange: boolean;
+  /** Monoisotope after the joint cross-charge cosine offset search. */
+  refinedMonoMass: number;
+  totalResponse: number;
+  numChargeStates: number;
+  accepted: boolean;
+  windowScanCount: number;
+  maxCharge: number;
+  charges: LadderCharge[];
+}
+
 export interface DatasetProvider {
   getMetadata(): Promise<DatasetMetadata>;
   getScanSummaries(): Promise<readonly ScanSummary[]>;

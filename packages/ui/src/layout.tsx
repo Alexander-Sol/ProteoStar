@@ -4,15 +4,21 @@ export function ViewerShell({
   title,
   subtitle,
   toolbar,
-  children
+  children,
+  rightInset = 0
 }: {
   title: string;
   subtitle: string;
   toolbar?: ReactNode;
   children: ReactNode;
+  /**
+   * Reserve this many px on the right edge so the content reflows clear of an open overlay drawer
+   * (otherwise a fixed-position drawer covers the plots and their action buttons).
+   */
+  rightInset?: number;
 }) {
   return (
-    <main style={shellStyle}>
+    <main style={rightInset > 0 ? { ...shellStyle, paddingRight: rightInset } : shellStyle}>
       <header style={headerStyle}>
         <div>
           <p style={eyebrowStyle}>MsBrowser</p>
