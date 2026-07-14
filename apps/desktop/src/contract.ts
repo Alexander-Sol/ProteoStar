@@ -2,8 +2,8 @@
 //
 // Mirrors `MsViewer_IPC_Contract.md` §2 (JSON schemas) and §4 (DatasetProvider).
 // The whole UI depends only on `DatasetProvider`; the Tauri adapter implements it
-// and unit tests can supply a fake. Do NOT import these from imsp-core — this file
-// is the single source of truth for the new viewer.
+// and unit tests can supply a fake. This file is the single source of truth for
+// the viewer's IPC types.
 
 export interface NumericRange {
   min: number;

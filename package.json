@@ -10,7 +10,7 @@
     "tauri": "cd apps/desktop && bun run tauri",
     "build": "cd apps/desktop && bun run build",
     "test": "vitest run",
-    "typecheck": "./node_modules/.bin/tsc -p packages/imsp-core/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/viewer-state/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/plot-adapter/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p apps/desktop/tsconfig.json --noEmit"
+    "typecheck": "./node_modules/.bin/tsc -p packages/viewer-state/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/plot-adapter/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit && ./node_modules/.bin/tsc -p apps/desktop/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",
