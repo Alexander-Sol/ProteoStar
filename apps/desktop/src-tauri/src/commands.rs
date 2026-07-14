@@ -20,11 +20,12 @@ use flashlfq_core::feature_refinement::{
     self, refine_feature_multi, resolve_consensus_by_apex, RefinedFeature, ResolvedFeature,
 };
 use flashlfq_core::peak_indexing::{
-    read_ms1_scans, PeakIndexingEngine, RandomAccessMs1Reader, Scan,
+    read_ms1_scans, PeakIndexingEngine, PeakSource, RandomAccessMs1Reader, Scan,
 };
 use flashlfq_core::spectral_averaging::SpectralAveragingParameters;
 use flashlfq_core::trace_kernel::{
-    detect_features, median_ms1_scan_spacing_minutes, TraceKernelParameters, FWHM_TO_SIGMA,
+    detect_features, median_ms1_scan_spacing_minutes, seed_ladder_diagnostics,
+    SeedLadderDiagnostics, TraceKernelParameters, FWHM_TO_SIGMA,
 };
 
 use crate::arrow_out;
@@ -897,6 +898,161 @@ pub async fn run_feature_detection(
     })
     .await
     .map_err(|e| ViewerError::internal(format!("detection task failed: {e}")))
+}
+
+// ------------------------------------------------ feature-finding walkthrough
+
+/// One isotope tooth of a charge's comb in the ladder walkthrough (JSON DTO).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LadderToothDto {
+    pub isotope_index: usize,
+    pub expected_mz: f64,
+    pub weight: f64,
+    pub observed_mz: Option<f64>,
+    pub observed_intensity: Option<f64>,
+    pub credited: bool,
+}
+
+/// One charge state's comb over the seed's RT window for the candidate mass (JSON DTO).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LadderChargeDto {
+    pub charge: i32,
+    pub mono_mz: f64,
+    pub spacing: f64,
+    pub response: f64,
+    pub num_isotopes_observed: usize,
+    pub retained: bool,
+    pub teeth: Vec<LadderToothDto>,
+}
+
+/// The full top-down charge-state-ladder fit for one `(seed, z_seed)` (JSON DTO), returned by
+/// `score_seed_ladder` and rendered by the walkthrough panel.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedLadderDto {
+    pub seed_mz: f64,
+    pub seed_scan_index: i32,
+    pub seed_rt: f64,
+    pub z_seed: i32,
+    pub screen_teeth: usize,
+    pub screen_passed: bool,
+    pub i_star: usize,
+    pub mono_mz: f64,
+    pub mono_mass: f64,
+    pub mass_in_range: bool,
+    pub refined_mono_mass: f64,
+    pub total_response: f64,
+    pub num_charge_states: usize,
+    pub accepted: bool,
+    pub window_scan_count: usize,
+    /// Highest charge in the ladder (`min_charge` is fixed at 1) — the range the UI's z_seed picker spans.
+    pub max_charge: i32,
+    pub charges: Vec<LadderChargeDto>,
+}
+
+fn map_ladder(d: SeedLadderDiagnostics, max_charge: i32) -> SeedLadderDto {
+    SeedLadderDto {
+        seed_mz: d.seed_mz,
+        seed_scan_index: d.seed_scan_index,
+        seed_rt: d.seed_rt,
+        z_seed: d.z_seed,
+        screen_teeth: d.screen_teeth,
+        screen_passed: d.screen_passed,
+        i_star: d.i_star,
+        mono_mz: d.mono_mz,
+        mono_mass: d.mono_mass,
+        mass_in_range: d.mass_in_range,
+        refined_mono_mass: d.refined_mono_mass,
+        total_response: d.total_response,
+        num_charge_states: d.num_charge_states,
+        accepted: d.accepted,
+        window_scan_count: d.window_scan_count,
+        max_charge,
+        charges: d
+            .charges
+            .into_iter()
+            .map(|c| LadderChargeDto {
+                charge: c.charge,
+                mono_mz: c.mono_mz,
+                spacing: c.spacing,
+                response: c.response,
+                num_isotopes_observed: c.num_isotopes_observed,
+                retained: c.retained,
+                teeth: c
+                    .teeth
+                    .into_iter()
+                    .map(|t| LadderToothDto {
+                        isotope_index: t.isotope_index,
+                        expected_mz: t.expected_mz,
+                        weight: t.weight,
+                        observed_mz: t.observed_mz,
+                        observed_intensity: t.observed_intensity,
+                        credited: t.credited,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LadderOptions {
+    /// Top of the charge ladder (clamped to 1..=60). Defaults to the top-down 30.
+    pub max_charge: Option<i32>,
+}
+
+/// Compute the top-down charge-state-ladder fit for a manually chosen seed and anchoring charge,
+/// for the interactive walkthrough. Takes a retention time (not a scan index) and resolves the
+/// nearest MS1 scan in the engine's own index space, so the seed lookup can't drift from the
+/// displayed spectrum. Requires the peak index (returns INDEXING otherwise).
+#[tauri::command]
+pub async fn score_seed_ladder(
+    handle: u64,
+    retention_time: f64,
+    seed_mz: f64,
+    z_seed: i32,
+    options: Option<LadderOptions>,
+    state: State<'_, AppState>,
+) -> Result<SeedLadderDto, ViewerError> {
+    let (_, _, engine) = indexed_handles(&state, handle)?;
+    let max_charge = options.and_then(|o| o.max_charge).unwrap_or(30).clamp(1, 60);
+
+    let diag = tauri::async_runtime::spawn_blocking(move || {
+        // Nearest MS1 scan to the requested RT, in the engine's zero-based index space.
+        let scan_info = PeakSource::scan_info(&*engine);
+        let scan_index = scan_info
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (a.retention_time - retention_time)
+                    .abs()
+                    .total_cmp(&(b.retention_time - retention_time).abs())
+            })
+            .map(|(i, _)| i as i32)
+            .unwrap_or(0);
+
+        // Top-down detection parameters (mirrors `run_topdown_pipeline`'s base), so the ladder
+        // reflects what real detection would score.
+        let base = TraceKernelParameters {
+            min_charge: 1,
+            max_charge,
+            max_isotopes: 60,
+            min_isotopes_observed: 3,
+            coverage_target: 1.0,
+            trace_max_half_width_minutes: 1.0,
+            min_feature_scans: 2,
+            ..TraceKernelParameters::default()
+        };
+        let params = base.with_rt_from_index(&engine, 36.0);
+        seed_ladder_diagnostics(&engine, seed_mz, scan_index, z_seed, &params)
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("ladder task failed: {e}")))?;
+
+    Ok(map_ladder(diag, max_charge))
 }
 
 #[cfg(test)]

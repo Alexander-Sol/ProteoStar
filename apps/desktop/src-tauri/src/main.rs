@@ -24,6 +24,7 @@ fn main() {
             commands::get_ms2_for_precursor,
             commands::load_features,
             commands::run_feature_detection,
+            commands::score_seed_ladder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

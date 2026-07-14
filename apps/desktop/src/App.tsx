@@ -21,10 +21,14 @@ import {
 
 import { openDataset } from "./tauri-dataset-provider";
 import { loadFeatures, runFeatureDetection, isotopeGrid } from "./features";
+import { scoreSeedLadder } from "./walkthrough";
 import type {
   DatasetMetadata,
   DatasetProvider,
   Feature,
+  LadderCharge,
+  ScanSummary,
+  SeedLadder,
   Spectrum,
   TicPoint
 } from "./contract";
@@ -45,6 +49,10 @@ const chargeColor = (z: number): string =>
 const RUG_CAP = 8000;
 const DRAWER_CAP = 800;
 
+// m/z tolerance for marking a comb tooth "detected" against the displayed scan's peaks. Matches the
+// detector's default ppm tolerance so the overlay's notion of a hit agrees with detection.
+const DETECT_PPM = 10;
+
 type LoadState =
   | { status: "idle" }
   | { status: "loading"; message: string }
@@ -59,6 +67,9 @@ export function App() {
   const [metadata, setMetadata] = useState<DatasetMetadata | null>(null);
   const [ticPoints, setTicPoints] = useState<readonly TicPoint[]>([]);
   const [spectrum, setSpectrum] = useState<Spectrum | null>(null);
+  // Per-MS1-scan summaries (RT-ordered; `scanIndex` is the MS1-array index) — the basis for
+  // arrow-key scan stepping, which navigates by RT to avoid the file-vs-MS1 index mismatch.
+  const [scanSummaries, setScanSummaries] = useState<readonly ScanSummary[]>([]);
 
   const [features, setFeatures] = useState<readonly Feature[]>([]);
   const [featuresFile, setFeaturesFile] = useState<string | null>(null);
@@ -75,6 +86,17 @@ export function App() {
   // spectra / range-XIC / detection aren't available yet (backend returns INDEXING).
   const [indexing, setIndexing] = useState(false);
 
+  // ------------------------------------------------ feature-finding walkthrough
+  // When active, clicking a spectrum peak picks a seed and scores its full top-down
+  // charge-state ladder at the chosen anchoring charge `zSeed`; the ladder's combs
+  // are overlaid on the spectrum and its per-charge scores shown in a right drawer.
+  const [walkthrough, setWalkthrough] = useState(false);
+  const [ladder, setLadder] = useState<SeedLadder | null>(null);
+  const [zSeed, setZSeed] = useState(1);
+  // Which charge's comb to isolate in the overlay; null = all retained charges.
+  const [focusCharge, setFocusCharge] = useState<number | null>(null);
+  const [ladderBusy, setLadderBusy] = useState(false);
+
   // ------------------------------------------------------------ open raw/mzML
   const handleOpenFile = useCallback(async () => {
     const picked = await openFileDialog({
@@ -85,6 +107,7 @@ export function App() {
 
     setLoad({ status: "loading", message: "Opening…" });
     setSpectrum(null);
+    setScanSummaries([]);
     setSelected(null);
     setTicViewport(createDefaultViewport());
     try {
@@ -124,6 +147,8 @@ export function App() {
         // trace was empty and only fills in now from the freshly-built index. For Thermo
         // this just re-serves the same native TIC.
         setTicPoints(await provider.getTicTrace({ maxPoints: 4000 }));
+        // MS1 scan summaries power arrow-key scan stepping (available post-index).
+        setScanSummaries(await provider.getScanSummaries());
       } catch {
         /* keep provisional metadata / TIC if the refetch fails */
       }
@@ -156,6 +181,15 @@ export function App() {
       if (timer) clearTimeout(timer);
     };
   }, [handle, provider]);
+
+  // A side drawer (features or walkthrough) narrows the plot area. react-plotly's
+  // `useResizeHandler` only listens to *window* resize, so the plots don't reflow on their own
+  // when the drawer opens/closes — nudge them with a synthetic resize once the layout has painted.
+  const drawerVisible = walkthrough || (drawerOpen && features.length > 0);
+  useEffect(() => {
+    const id = window.setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+    return () => window.clearTimeout(id);
+  }, [drawerVisible]);
 
   // ------------------------------------------------------------ load features
   const handleLoadFeatures = useCallback(async () => {
@@ -238,6 +272,116 @@ export function App() {
     [provider, spectrumPinned]
   );
 
+  // Step `delta` MS1 scans from the currently displayed one, holding the zoom constant. Navigates
+  // by retention time via the MS1 scan summaries (RT-ordered) rather than by scanIndex: the
+  // displayed spectrum's `scanIndex` is a *file* index (counts MS2 scans) when loaded by RT, so it
+  // can't be used directly against the MS1-only scan array. Loads the neighbour by its exact RT.
+  const stepScan = useCallback(
+    async (delta: number) => {
+      if (!provider || indexing || !spectrum || scanSummaries.length === 0) return;
+      const rt = spectrum.retentionTime;
+      let pos = 0;
+      let best = Infinity;
+      for (let i = 0; i < scanSummaries.length; i++) {
+        const d = Math.abs(scanSummaries[i].retentionTime - rt);
+        if (d < best) {
+          best = d;
+          pos = i;
+        }
+      }
+      const next = Math.max(0, Math.min(pos + delta, scanSummaries.length - 1));
+      if (next === pos) return;
+      try {
+        setSpectrum(await provider.getSpectrumAtRt(scanSummaries[next].retentionTime));
+      } catch (err) {
+        setLoad({ status: "error", message: errMessage(err) });
+      }
+    },
+    [provider, indexing, spectrum, scanSummaries]
+  );
+
+  // ← / → step to the previous / next MS1 scan, holding the zoom constant.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (!spectrum || indexing) return;
+      e.preventDefault();
+      void stepScan(e.key === "ArrowRight" ? 1 : -1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [spectrum, indexing, stepScan]);
+
+  // -------------------------------------------------- walkthrough: score a seed
+  const LADDER_MAX_CHARGE = 30;
+
+  // Score the ladder for a seed m/z (at the currently displayed scan's RT) and charge `z`. `frame`
+  // controls whether the spectrum re-zooms to the anchored comb — true on a fresh seed pick, false
+  // when merely re-scoring the same seed at a new anchoring charge (keep the user's zoom).
+  const computeLadder = useCallback(
+    async (seedMz: number, z: number, frame: boolean) => {
+      if (handle === null || !spectrum) return;
+      setLadderBusy(true);
+      try {
+        const l = await scoreSeedLadder(handle, spectrum.retentionTime, seedMz, z, LADDER_MAX_CHARGE);
+        setLadder(l);
+        setFocusCharge(z);
+        if (frame && !spectrumPinned) {
+          const focus = l.charges.find((c) => c.charge === z);
+          if (focus && focus.teeth.length > 0) {
+            const mzs = [l.seedMz, ...focus.teeth.map((t) => t.expectedMz)];
+            const lo = Math.min(...mzs);
+            const hi = Math.max(...mzs);
+            const pad = Math.max(0.5, (hi - lo) * 0.12);
+            setSpectrumViewport({ xMin: lo - pad, xMax: hi + pad });
+          }
+        }
+      } catch (err) {
+        setLoad({ status: "error", message: errMessage(err) });
+      } finally {
+        setLadderBusy(false);
+      }
+    },
+    [handle, spectrum, spectrumPinned]
+  );
+
+  // Click a spectrum peak (walkthrough only) → make it the seed at the current zSeed (frame it).
+  const handlePeakClick = useCallback(
+    (mz: number) => {
+      if (!walkthrough || indexing) return;
+      void computeLadder(mz, zSeed, true);
+    },
+    [walkthrough, indexing, zSeed, computeLadder]
+  );
+
+  // Change the anchoring charge; re-score the current seed and zoom in on the new charge's comb.
+  const handleZSeed = useCallback(
+    (z: number) => {
+      setZSeed(z);
+      if (walkthrough && ladder) void computeLadder(ladder.seedMz, z, true);
+    },
+    [walkthrough, ladder, computeLadder]
+  );
+
+  // Click a charge row → isolate its comb overlay and recentre the spectrum on that charge's
+  // teeth so you actually see the region it occupies (a higher charge sits at lower m/z).
+  const focusChargeView = useCallback(
+    (z: number | null) => {
+      setFocusCharge(z);
+      if (z === null || !ladder || spectrumPinned) return;
+      const charge = ladder.charges.find((c) => c.charge === z);
+      if (!charge || charge.teeth.length === 0) return;
+      const mzs = charge.teeth.map((t) => t.expectedMz);
+      const lo = Math.min(...mzs);
+      const hi = Math.max(...mzs);
+      const pad = Math.max(0.5, (hi - lo) * 0.12);
+      setSpectrumViewport({ xMin: lo - pad, xMax: hi + pad });
+    },
+    [ladder, spectrumPinned]
+  );
+
   // ----------------------------------------------------------------- overlays
   const ticTraces = useMemo<TicPlotTrace[]>(
     () => [
@@ -282,6 +426,34 @@ export function App() {
     );
   }, [features, selected]);
 
+  // Sorted m/z of the currently displayed scan's peaks — the lookup for the "detected" comb marker.
+  const spectrumMz = useMemo(
+    () => (spectrum ? spectrum.peaks.map((p) => p.mz) : []),
+    [spectrum]
+  );
+
+  // Walkthrough comb overlay: the focused charge's teeth (or all retained charges if none
+  // focused), coloured by charge. Each tooth is marked `detected` when a peak sits at its m/z in
+  // the *displayed* scan, so the indicator updates as you arrow through scans. Overrides the
+  // feature envelope while walkthrough is active.
+  const ladderEnvelope = useMemo<EnvelopeLine[]>(() => {
+    if (!walkthrough || !ladder) return [];
+    const charges =
+      focusCharge !== null
+        ? ladder.charges.filter((c) => c.charge === focusCharge)
+        : ladder.charges.filter((c) => c.retained);
+    return charges.flatMap((c) =>
+      c.teeth.map((t) => ({
+        mz: t.expectedMz,
+        color: chargeColor(c.charge),
+        label: t.isotopeIndex === 0 ? `z${c.charge}` : undefined,
+        detected: hasPeakNear(spectrumMz, t.expectedMz, DETECT_PPM)
+      }))
+    );
+  }, [walkthrough, ladder, focusCharge, spectrumMz]);
+
+  const spectrumEnvelope = walkthrough ? ladderEnvelope : envelope;
+
   const spectrumTraces = useMemo<SpectrumPlotTrace[]>(
     () => (spectrum ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }] : []),
     [spectrum]
@@ -293,6 +465,7 @@ export function App() {
     <ViewerShell
       title="MsViewer — feature finder"
       subtitle="Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
+      rightInset={drawerVisible ? 372 : 0}
       toolbar={
         <>
           {metadata ? (
@@ -316,6 +489,21 @@ export function App() {
                 : detecting
                   ? `Detecting: ${detecting}`
                   : "Run feature finding"}
+            </PanelActionButton>
+          ) : null}
+          {handle !== null ? (
+            <PanelActionButton
+              pressed={walkthrough}
+              onClick={() => {
+                const next = !walkthrough;
+                setWalkthrough(next);
+                if (!next) {
+                  setLadder(null);
+                  setFocusCharge(null);
+                }
+              }}
+            >
+              {walkthrough ? "Walkthrough: on" : "Walkthrough"}
             </PanelActionButton>
           ) : null}
           {features.length > 0 ? (
@@ -388,8 +576,16 @@ export function App() {
             title={spectrum ? `Spectrum · MS${spectrum.msLevel}` : "Spectrum"}
             subtitle={
               spectrum
-                ? `Scan ${spectrum.oneBasedScanNumber} · RT ${spectrum.retentionTime.toFixed(2)} min${selectedFeature ? " · dotted lines = predicted isotope m/z" : ""}`
-                : "Click the chromatogram or a feature to load a scan"
+                ? `Scan ${spectrum.oneBasedScanNumber} · RT ${spectrum.retentionTime.toFixed(2)} min${
+                    walkthrough
+                      ? " · click a peak to seed the charge-ladder"
+                      : selectedFeature
+                        ? " · dotted lines = predicted isotope m/z"
+                        : ""
+                  }`
+                : walkthrough
+                  ? "Click the chromatogram to load a scan, then click a peak to seed"
+                  : "Click the chromatogram or a feature to load a scan"
             }
             actions={
               <>
@@ -419,14 +615,31 @@ export function App() {
           <SpectrumPlot
             traces={spectrumTraces}
             viewport={spectrumViewport}
-            envelope={envelope}
+            envelope={spectrumEnvelope}
             rangeSelectionEnabled={false}
-            onEvent={() => {}}
+            onEvent={(e) => {
+              if (e.type === "peak-click") handlePeakClick(e.peak.mz);
+            }}
           />
         )}
       </Panel>
 
-      {drawerOpen && features.length > 0 ? (
+      {walkthrough ? (
+        <LadderDrawer
+          ladder={ladder}
+          zSeed={zSeed}
+          maxCharge={LADDER_MAX_CHARGE}
+          focusCharge={focusCharge}
+          busy={ladderBusy}
+          onZSeed={handleZSeed}
+          onFocusCharge={focusChargeView}
+          onClose={() => {
+            setWalkthrough(false);
+            setLadder(null);
+            setFocusCharge(null);
+          }}
+        />
+      ) : drawerOpen && features.length > 0 ? (
         <FeatureDrawer
           features={features}
           selected={selected}
@@ -438,11 +651,207 @@ export function App() {
   );
 }
 
+// The walkthrough drawer: pick the anchoring charge zSeed (1…maxCharge), see the
+// candidate mass it anchors, and step the resulting charge-state ladder — each
+// charge's comb response, teeth count, and whether it's retained. Click a charge
+// row to isolate its comb in the spectrum overlay.
+function LadderDrawer({
+  ladder,
+  zSeed,
+  maxCharge,
+  focusCharge,
+  busy,
+  onZSeed,
+  onFocusCharge,
+  onClose
+}: {
+  ladder: SeedLadder | null;
+  zSeed: number;
+  maxCharge: number;
+  focusCharge: number | null;
+  busy: boolean;
+  onZSeed: (z: number) => void;
+  onFocusCharge: (z: number | null) => void;
+  onClose: () => void;
+}) {
+  const chargeButtons = Array.from({ length: maxCharge }, (_, i) => i + 1);
+  return (
+    <div style={drawerStyle}>
+      <div style={drawerHeaderStyle}>
+        <strong>Charge-ladder walkthrough</strong>
+        <button onClick={onClose} style={drawerCloseStyle} type="button">
+          ✕
+        </button>
+      </div>
+      <div style={{ ...drawerBodyStyle, padding: "10px 12px" }}>
+        <div style={ladderHintStyle}>
+          Anchoring charge z<sub>seed</sub> — the charge the seed is assumed to be. It sets the
+          candidate mass; the ladder below then scores that mass at every charge.
+        </div>
+        <div style={chargeGridStyle}>
+          {chargeButtons.map((z) => (
+            <button
+              key={z}
+              type="button"
+              onClick={() => onZSeed(z)}
+              style={z === zSeed ? zSeedButtonSelStyle : zSeedButtonStyle}
+            >
+              {z}
+            </button>
+          ))}
+        </div>
+
+        {busy ? (
+          <div style={ladderNoteStyle}>Scoring…</div>
+        ) : !ladder ? (
+          <div style={ladderNoteStyle}>
+            Load a scan, then click a spectrum peak to seed the ladder.
+          </div>
+        ) : (
+          <>
+            <table style={summaryTableStyle}>
+              <tbody>
+                <tr>
+                  <td style={sumKeyStyle}>Seed</td>
+                  <td style={sumValStyle}>
+                    m/z {ladder.seedMz.toFixed(4)} · scan {ladder.seedScanIndex} · RT{" "}
+                    {ladder.seedRt.toFixed(2)}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={sumKeyStyle}>Apex screen</td>
+                  <td style={sumValStyle}>
+                    {ladder.screenTeeth}/6 teeth ·{" "}
+                    <span style={{ color: ladder.screenPassed ? "#1e7e34" : "#b02a37" }}>
+                      {ladder.screenPassed ? "passes" : "fails"}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style={sumKeyStyle}>Anchored mass</td>
+                  <td style={sumValStyle}>
+                    {ladder.monoMass.toFixed(3)} Da · mono m/z {ladder.monoMz.toFixed(4)} (i*=
+                    {ladder.iStar}){ladder.massInRange ? "" : " · out of range"}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={sumKeyStyle}>Refined mass</td>
+                  <td style={sumValStyle}>
+                    {ladder.refinedMonoMass.toFixed(3)} Da
+                    {Math.abs(ladder.refinedMonoMass - ladder.monoMass) > 0.5
+                      ? ` (Δ ${(ladder.refinedMonoMass - ladder.monoMass).toFixed(2)})`
+                      : ""}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={sumKeyStyle}>Ladder</td>
+                  <td style={sumValStyle}>
+                    {ladder.numChargeStates} charge{ladder.numChargeStates === 1 ? "" : "s"} · Σ
+                    resp {ladder.totalResponse.toExponential(2)} ·{" "}
+                    <span style={{ color: ladder.accepted ? "#1e7e34" : "#b02a37" }}>
+                      {ladder.accepted ? "ACCEPT" : "reject"}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style={sumKeyStyle}>RT window</td>
+                  <td style={sumValStyle}>{ladder.windowScanCount} scans</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div style={ladderTableWrapStyle}>
+              <table style={tableStyle}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>z</th>
+                    <th style={thStyle}>mono m/z</th>
+                    <th style={thStyleRight}>teeth</th>
+                    <th style={thStyleRight}>response</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    onClick={() => onFocusCharge(null)}
+                    style={focusCharge === null ? rowSelectedStyle : rowStyle}
+                  >
+                    <td style={tdStyle} colSpan={4}>
+                      Show all retained charges
+                    </td>
+                  </tr>
+                  {ladder.charges.map((c) => (
+                    <LadderRow
+                      key={c.charge}
+                      charge={c}
+                      isSeed={c.charge === ladder.zSeed}
+                      focused={focusCharge === c.charge}
+                      onClick={() => onFocusCharge(c.charge)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LadderRow({
+  charge,
+  isSeed,
+  focused,
+  onClick
+}: {
+  charge: LadderCharge;
+  isSeed: boolean;
+  focused: boolean;
+  onClick: () => void;
+}) {
+  const dim = !charge.retained;
+  const style: React.CSSProperties = {
+    ...(focused ? rowSelectedStyle : rowStyle),
+    color: dim ? "#9aa7b6" : "#24364d",
+    fontWeight: charge.retained ? 500 : 400
+  };
+  return (
+    <tr onClick={onClick} style={style}>
+      <td style={tdStyle}>
+        <span style={{ color: chargeColor(charge.charge) }}>■</span> z{charge.charge}
+        {isSeed ? " ◄" : ""}
+      </td>
+      <td style={tdStyle}>{charge.monoMz.toFixed(3)}</td>
+      <td style={tdStyleRight}>{charge.numIsotopesObserved}</td>
+      <td style={tdStyleRight}>
+        {charge.response > 0 ? charge.response.toExponential(1) : "—"}
+      </td>
+    </tr>
+  );
+}
+
 function errMessage(err: unknown): string {
   if (err && typeof err === "object" && "message" in err) {
     return String((err as { message: unknown }).message);
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+// True if any m/z in the ascending-sorted `sortedMz` lies within `ppm` of `mz`. Binary search for
+// the first candidate ≥ (mz − tol), then check it's ≤ (mz + tol).
+function hasPeakNear(sortedMz: readonly number[], mz: number, ppm: number): boolean {
+  const n = sortedMz.length;
+  if (n === 0) return false;
+  const tol = (mz * ppm) / 1e6;
+  const loTarget = mz - tol;
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedMz[mid] < loTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < n && sortedMz[lo] <= mz + tol;
 }
 
 // A right-side drawer listing resolved features; click a row to select.
@@ -549,3 +958,57 @@ const rowStyle: React.CSSProperties = { cursor: "pointer", borderBottom: "1px so
 const rowSelectedStyle: React.CSSProperties = { ...rowStyle, background: "#fdecd6" };
 const tdStyle: React.CSSProperties = { padding: "4px 8px", whiteSpace: "nowrap" };
 const tdStyleRight: React.CSSProperties = { ...tdStyle, textAlign: "right" };
+
+// ---- walkthrough drawer styles
+const ladderHintStyle: React.CSSProperties = {
+  fontSize: "0.72rem",
+  color: "#5b6b7d",
+  lineHeight: 1.4,
+  marginBottom: 8
+};
+const chargeGridStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  marginBottom: 12
+};
+const zSeedButtonStyle: React.CSSProperties = {
+  minWidth: 26,
+  padding: "3px 6px",
+  fontSize: "0.72rem",
+  border: "1px solid #cdd8e8",
+  background: "#fff",
+  borderRadius: 4,
+  cursor: "pointer"
+};
+const zSeedButtonSelStyle: React.CSSProperties = {
+  ...zSeedButtonStyle,
+  background: "#2f6fb0",
+  color: "#fff",
+  borderColor: "#2f6fb0",
+  fontWeight: 600
+};
+const ladderNoteStyle: React.CSSProperties = {
+  fontSize: "0.78rem",
+  color: "#5b6b7d",
+  padding: "12px 0"
+};
+const summaryTableStyle: React.CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: "0.73rem",
+  marginBottom: 10
+};
+const sumKeyStyle: React.CSSProperties = {
+  padding: "3px 6px 3px 0",
+  color: "#5b6b7d",
+  verticalAlign: "top",
+  whiteSpace: "nowrap",
+  width: 92
+};
+const sumValStyle: React.CSSProperties = { padding: "3px 0", verticalAlign: "top" };
+const ladderTableWrapStyle: React.CSSProperties = {
+  border: "1px solid #e3e9f2",
+  borderRadius: 4,
+  overflow: "hidden"
+};
