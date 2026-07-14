@@ -76,6 +76,43 @@ python analysis/decoy_features/plot_decoys.py
 Full orchestration: `analysis/decoy_features/plot_decoys.py` + the run script used to produce the
 figures under `analysis/decoy_features/plots/`.
 
+## Top-down extension (2026-07-14) — decoys threaded into the multi-charge detector
+
+The three decoys were extended to the **top-down** joint charge-ladder detector, which the original port
+had left on the physical averagine lattice. `score_mass_hypothesis`, `refine_mono_offset`,
+`gather_charge_extent`, `emit_mass_hypothesis`, and the seed spacing screen in `detect_features_multicharge`
+now use model-aware weights (`multicharge_weights`, a mono-keyed dispatch analogous to `comb_weights`) and
+`tooth_offsets` / `tooth_step` under `params.lattice_mode`. Averagine/`Uniform` (the target path) is bitwise
+unchanged. `decoy_score_export` gained `SCORE_MAX_ISOTOPES` / `SCORE_RT_SIGMA` (heavy proteoforms span
+>24 teeth and elute broader than 0.15 min). Full write-up + tables + plots:
+`analysis/decoy_features_topdown/` (`report.md`, `analyze_topdown_decoys.py`, `run_topdown_decoys.ps1`).
+
+Datasets: **Golden** (`golden.raw`, GT `gt_golden_all.tsv`, 930) and **Jurkat**
+(`02-18-20_jurkat_td_rep1_fract6.raw`, GT `gt_jurkat_intersect.tsv`, 1541 hi-conf). Config isolates the
+envelope model: `TOPDOWN=1 APEX_PREGATE=0 REFINE_METHOD=shift_apex TD_MONO_FIT=0 ISODEC_CHARGE=0` — the
+multi-envelope refine, averagine mono-fit, and IsoDec are OFF because they re-anchor a decoy onto the real
+averagine (laundering); `shift_apex` refine and the multi-charge `MC_MONO_KMAX` refine are decoy-aware.
+
+Results (ROC-AUC, ID-matched target vs decoy):
+
+| dataset | shifted 2-D/3-D | weird 2-D/3-D | shuffled 2-D/3-D |
+|---------|:---------------:|:-------------:|:----------------:|
+| Golden | 0.715 / 0.726 | **0.938** / 0.885 | 0.896 / 0.865 |
+| Jurkat | 0.694 / 0.669 | **0.922** / 0.785 | 0.899 / 0.795 |
+
+Findings: (1) same decoy-strength ranking as bottom-up (**weird > shuffled > shifted**); at a 5%-decoy-pass
+threshold, weird retains ~76–79% of real IDs on both files. (2) **Shifted spacing is a weak top-down decoy**
+(AUC 0.69–0.72, worse than bottom-up) — a 0.94-Da comb at high charge barely leaves the ¹³C lattice and the
+dense high-charge spectra still hit real peaks by coincidence. (3) **2-D > 3-D on both files** (wide-window
+3-D folds in off-apex noise). (4) Real-feature cosines are lower on Jurkat (heavy 13–21 kDa envelopes), so
+thresholds are lower and file-specific — calibrate per file.
+
+**Threshold terminology (correction):** the two reported operating points are **95% recall** (5th pct of
+ID-matched target scores) and **95% decoy-rejection** (95th pct of decoy scores → only 5% of decoys pass).
+The latter is a 5% false-positive / 95%-specificity cut (a decoy-based critical value at α=0.05), **not**
+classifier precision `TP/(TP+FP)`; the two diverge sharply here because decoy features outnumber ID-matched
+targets ~10:1.
+
 ## Results (2026-07-14, `decoy-features` branch)
 
 Full 3-file × 4-model sweep, `APEX_PREGATE=0`, `MIN_SEED_INTENSITY=1000`, `COVERAGE_TARGET=1.0`. Target

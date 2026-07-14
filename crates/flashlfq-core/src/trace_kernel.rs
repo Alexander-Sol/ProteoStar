@@ -610,6 +610,38 @@ fn comb_weights(neutral_mass: f64, params: &TraceKernelParameters) -> Vec<f64> {
     }
 }
 
+/// Mono-anchored isotope weights for the configured `weight_model` — the multi-charge (top-down)
+/// analogue of [`comb_weights`], keyed by the **monoisotope** (so the joint-ladder scorer places teeth
+/// upward from the mono). Averagine (and Poisson, which has no mono-keyed exotic form) return the real
+/// averagine envelope — bitwise identical to the previous hardcoded call, so the target path is
+/// unchanged — while every decoy returns its own envelope, so a decoy ladder is scored, refined, and
+/// emitted against the decoy shape and never re-anchored onto the real averagine (the "laundering" fix,
+/// now carried into the top-down path).
+fn multicharge_weights(mono_mass: f64, params: &TraceKernelParameters) -> Vec<f64> {
+    use crate::deconvolution::EnvelopeModel;
+    let model = match params.weight_model {
+        CombWeightModel::Decoy => EnvelopeModel::ChlorinatedDecoy,
+        CombWeightModel::RotatedAveragine => EnvelopeModel::RotatedDecoy,
+        CombWeightModel::ChloroBoroPhosphate => EnvelopeModel::ChloroBoroPhosphateDecoy,
+        CombWeightModel::Custom => EnvelopeModel::CustomDecoy,
+        CombWeightModel::ShuffledAveragine => EnvelopeModel::ShuffledDecoy,
+        CombWeightModel::Hybrid => EnvelopeModel::HybridDecoy,
+        CombWeightModel::Averagine | CombWeightModel::Poisson => EnvelopeModel::Averagine,
+    };
+    model.intensities_from_mono(mono_mass, params.min_isotope_weight, params.max_isotopes)
+}
+
+/// Nominal per-tooth m/z step for charge `z` under `mode` — the ¹³C spacing `(C13−C12)/z`, scaled for
+/// [`LatticeMode::Scaled`]. Used by the cheap fixed-step seed screens on the multi-charge path; the exact
+/// per-index positions come from [`tooth_offsets`] (which also handles `MixedCharge`).
+fn tooth_step(charge: i32, mode: LatticeMode) -> f64 {
+    let base = C13_MINUS_C12 / charge as f64;
+    match mode {
+        LatticeMode::Scaled(s) => base * s,
+        _ => base,
+    }
+}
+
 /// Per-tooth m/z offset from the monoisotope for isotope indices `0..n`, under the configured
 /// [`LatticeMode`]. [`LatticeMode::Uniform`] is the physical comb `k · (C13−C12)/z`; the decoy
 /// lattices deviate. Shared by the scorer and the claim tracer so both lay the identical comb. The
@@ -2614,11 +2646,7 @@ fn score_mass_hypothesis(
     claimed: &HashSet<PeakKey>,
     window: &[(i32, f64)],
 ) -> MassHypothesis {
-    let weights = crate::deconvolution::averagine_intensities_from_mono(
-        mono_mass,
-        params.min_isotope_weight,
-        params.max_isotopes,
-    );
+    let weights = multicharge_weights(mono_mass, params);
     if weights.is_empty() {
         return MassHypothesis { mono_mass, response: 0.0, charges: Vec::new() };
     }
@@ -2631,13 +2659,13 @@ fn score_mass_hypothesis(
         if z == 0 {
             return None;
         }
-        let spacing = C13_MINUS_C12 / z as f64;
+        let offsets = tooth_offsets(z, weights.len(), params.lattice_mode);
         let mono_mz = (mono_mass + z as f64 * PROTON_MASS) / z as f64;
         let mut observed: HashSet<usize> = HashSet::new();
         let mut resp = 0.0;
         for &(s, g) in window {
             for (k, &wk) in weights.iter().enumerate() {
-                let expected_mz = mono_mz + (k as f64) * spacing;
+                let expected_mz = mono_mz + offsets[k];
                 if let Some(peak) = engine.get_indexed_peak(expected_mz, s, ppm) {
                     let key = peak.key();
                     if !claimed.contains(&key) && used.insert(key) {
@@ -2673,7 +2701,7 @@ fn score_mass_hypothesis(
         if mono_mz > mz_hi {
             continue;
         }
-        let top_mz = mono_mz + (n_teeth.saturating_sub(1) as f64) * (C13_MINUS_C12 / z as f64);
+        let top_mz = mono_mz + (n_teeth.saturating_sub(1) as f64) * tooth_step(z, params.lattice_mode);
         if top_mz < mz_lo {
             continue;
         }
@@ -2721,11 +2749,7 @@ fn refine_mono_offset(
         if m < MULTICHARGE_MIN_MASS {
             continue;
         }
-        let weights = crate::deconvolution::averagine_intensities_from_mono(
-            m,
-            params.min_isotope_weight,
-            params.max_isotopes,
-        );
+        let weights = multicharge_weights(m, params);
         if weights.is_empty() {
             continue;
         }
@@ -2735,9 +2759,9 @@ fn refine_mono_offset(
         for ce in &hyp.charges {
             let z = ce.charge;
             let mono_mz = (m + z as f64 * PROTON_MASS) / z as f64;
-            let spacing = C13_MINUS_C12 / z as f64;
+            let offsets = tooth_offsets(z, weights.len(), params.lattice_mode);
             for (k, &wk) in weights.iter().enumerate() {
-                let tooth_mz = mono_mz + (k as f64) * spacing;
+                let tooth_mz = mono_mz + offsets[k];
                 let mut obs = 0.0;
                 for &(s, _g) in window {
                     if let Some(p) = engine.get_indexed_peak(tooth_mz, s, ppm) {
@@ -2771,16 +2795,17 @@ fn gather_charge_extent(
     mono_mz: f64,
     charge: i32,
     weights: &[f64],
+    lattice: LatticeMode,
     s_lo: i32,
     s_hi: i32,
     ppm: &PpmTolerance,
     claimed: &HashSet<PeakKey>,
     seen: &mut HashSet<PeakKey>,
 ) -> Vec<IndexedMassSpectralPeak> {
-    let spacing = C13_MINUS_C12 / charge as f64;
+    let offsets = tooth_offsets(charge, weights.len(), lattice);
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
     for k in 0..weights.len() {
-        let tooth_mz = mono_mz + (k as f64) * spacing;
+        let tooth_mz = mono_mz + offsets[k];
         for s in s_lo..=s_hi {
             if let Some(p) = engine.get_indexed_peak(tooth_mz, s, ppm) {
                 let key = p.key();
@@ -2809,8 +2834,7 @@ fn emit_mass_hypothesis(
     claimed: &mut HashSet<PeakKey>,
     features: &mut Vec<DetectedFeature>,
 ) -> bool {
-    let weights =
-        crate::deconvolution::averagine_intensities_from_mono(hyp.mono_mass, params.min_isotope_weight, params.max_isotopes);
+    let weights = multicharge_weights(hyp.mono_mass, params);
     if weights.is_empty() {
         return false;
     }
@@ -2823,7 +2847,7 @@ fn emit_mass_hypothesis(
         // the pre-refinement mass, so it would place the gather comb one ¹³C off after a correction.
         let mono_mz = (hyp.mono_mass + ce.charge as f64 * PROTON_MASS) / ce.charge as f64;
         let peaks = gather_charge_extent(
-            engine, mono_mz, ce.charge, &weights, s_lo, s_hi, ppm, claimed, &mut seen,
+            engine, mono_mz, ce.charge, &weights, params.lattice_mode, s_lo, s_hi, ppm, claimed, &mut seen,
         );
         if peaks.is_empty() {
             continue;
@@ -2988,7 +3012,7 @@ fn detect_features_multicharge(
             if z_seed == 0 {
                 continue;
             }
-            let spacing = C13_MINUS_C12 / z_seed as f64;
+            let spacing = tooth_step(z_seed, params.lattice_mode);
             let mut screen_teeth = 0usize;
             for j in -2..=3 {
                 let mz = seed_mz + j as f64 * spacing;

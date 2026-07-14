@@ -23,16 +23,23 @@ use flashlfq_core::peak_indexing::{read_ms1_scans, Scan};
 use flashlfq_core::trace_kernel::{tooth_offsets, LatticeMode};
 
 const TEMPLATE_MIN_WEIGHT: f64 = 1e-3;
-const TEMPLATE_MAX_ISOTOPES: usize = 24;
+/// Default template length. Bottom-up envelopes fit inside ~24 teeth; heavy top-down proteoforms span
+/// 40–60 significant peaks with the mode well above tooth 24, so `SCORE_MAX_ISOTOPES` raises this for
+/// top-down (the ≥`MIN_REL` band is trimmed per feature anyway, so an oversized cap is harmless).
+const TEMPLATE_MAX_ISOTOPES_DEFAULT: usize = 24;
 const TOL_PPM: f64 = 20.0;
 const MIN_REL: f64 = 0.2;
-/// RT Gaussian σ (minutes) for the 3-D elution template — ~0.15 min ≈ 21 s FWHM, in the CA/Lumos
-/// peak-width range. The same weighting is laid for target and decoy, so it does not bias the contrast.
-const RT_SIGMA_MIN: f64 = 0.15;
-/// Half-width (minutes) of the RT window the 3-D score integrates over (± around the apex). Set to
-/// 2·σ so the integration spans the modelled elution rather than a wide noise band — beyond ±2σ the
-/// template weight is < 0.14 and only unexplained off-elution noise would enter the denominator.
-const RT_HALF_WINDOW_MIN: f64 = 2.0 * RT_SIGMA_MIN;
+/// Default RT Gaussian σ (minutes) for the 3-D elution template — ~0.15 min ≈ 21 s FWHM, in the CA/Lumos
+/// peak-width range. Top-down species elute broader (trace half-width ~60 s), so `SCORE_RT_SIGMA` widens
+/// it. The same weighting is laid for target and decoy, so it does not bias the contrast.
+const RT_SIGMA_MIN_DEFAULT: f64 = 0.15;
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
 
 fn model_from_name(name: &str) -> EnvelopeModel {
     match name {
@@ -174,9 +181,17 @@ fn main() {
         LatticeMode::Scaled(spacing_scale)
     };
 
+    let template_max_isotopes = env_usize("SCORE_MAX_ISOTOPES", TEMPLATE_MAX_ISOTOPES_DEFAULT);
+    let rt_sigma_min = env_f64("SCORE_RT_SIGMA", RT_SIGMA_MIN_DEFAULT);
+    let rt_half_window_min = 2.0 * rt_sigma_min;
+
     let scans = read_ms1_scans(raw.clone()).expect("read raw");
     let feats = read_refined(refined_path);
-    eprintln!("scoring {} features from {refined_path} against {:?} (scale {spacing_scale})", feats.len(), model);
+    eprintln!(
+        "scoring {} features from {refined_path} against {:?} (scale {spacing_scale}, max_iso {template_max_isotopes}, rt_sigma {rt_sigma_min})",
+        feats.len(),
+        model
+    );
 
     let mut out = std::fs::File::create(out_path).expect("create out");
     writeln!(out, "mono\tz\trt\tscore2d\tscore3d").unwrap();
@@ -186,7 +201,7 @@ fn main() {
             continue;
         }
         let mono_mz = mass_to_mz_f64(f.mono, f.z);
-        let template = model.intensities_from_mono(f.mono, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
+        let template = model.intensities_from_mono(f.mono, TEMPLATE_MIN_WEIGHT, template_max_isotopes);
         if template.is_empty() {
             continue;
         }
@@ -212,10 +227,10 @@ fn main() {
 
         // 3-D: every scan in the RT window, weighted by the elution Gaussian.
         let mut acc3 = (0.0, 0.0, 0.0);
-        let s_lo = scans.partition_point(|s| s.retention_time < f.rt - RT_HALF_WINDOW_MIN);
-        let s_hi = scans.partition_point(|s| s.retention_time <= f.rt + RT_HALF_WINDOW_MIN);
+        let s_lo = scans.partition_point(|s| s.retention_time < f.rt - rt_half_window_min);
+        let s_hi = scans.partition_point(|s| s.retention_time <= f.rt + rt_half_window_min);
         for scan in &scans[s_lo..s_hi] {
-            let g = gaussian(scan.retention_time - f.rt, RT_SIGMA_MIN);
+            let g = gaussian(scan.retention_time - f.rt, rt_sigma_min);
             if g < 1e-4 {
                 continue;
             }
