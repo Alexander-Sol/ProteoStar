@@ -10,8 +10,8 @@ of its frontends:
 - **`apps/desktop`** — the **MsViewer** Tauri desktop app (TypeScript/Vite UI + a Rust backend
   crate at `apps/desktop/src-tauri`) that reads raw data directly through the core and overlays
   detected features.
-- **`packages/*`** — the shared TypeScript packages (`viewer-state`, `plot-adapter`,
-  `ui`) the desktop UI is built from.
+- **`packages/*`** — the shared TypeScript packages (`plot-adapter`, `ui`) the
+  desktop UI is built from.
 
 This repo is the merge of the former `flashlfq-rust` (engine + Python bindings) and `MsBrowser`
 (the desktop viewer). Both frontends build against the **one** `flashlfq-core` — the desktop
@@ -31,7 +31,7 @@ ProteoStar/
 ├── apps/
 │   └── desktop/               MsViewer: Vite/React UI …
 │       └── src-tauri/         … and its Tauri (Rust) backend — a workspace member
-├── packages/                  viewer-state · plot-adapter · ui
+├── packages/                  plot-adapter · ui
 ├── agent_info/                design docs, architecture notes, task logs
 ├── package.json               Bun workspaces root (name: proteostar)
 └── tsconfig.*.json  vitest.config.ts
