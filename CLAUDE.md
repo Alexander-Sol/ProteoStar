@@ -6,6 +6,14 @@ bindings (`crates/flashlfq-py`), and the MsViewer Tauri desktop app (`apps/deskt
 Design docs live in `agent_info/` (start with `Feature-Detection-Design.md`,
 `Detector-Perf-and-Parallelization.md`, and `MsViewer_Architecture.md`).
 
+## Querying the codebase — use serena first
+
+**Use the serena MCP tools for codebase queries.** Serena provides semantic, symbol-aware search
+(`find_symbol`, `find_referencing_symbols`, `get_symbols_overview`, etc.) that is more efficient and
+precise than raw text search for navigating this workspace. Reach for serena before falling back to
+Grep/Glob/Read when you need to locate definitions, callers, or the shape of a module. Per serena's
+own instruction, call `initial_instructions` to load its manual before starting a coding task.
+
 ## Benchmarking
 
 **Whenever you benchmark the detector, follow `agent_info/Benchmarking-Guide.md`.** It is the
