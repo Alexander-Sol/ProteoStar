@@ -14,14 +14,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
-use flashlfq_core::deconvolution::{ClassicDeconvolutionParameters, Polarity};
+use flashlfq_core::deconvolution::{ClassicDeconvolutionParameters, EnvelopeModel, Polarity};
 use flashlfq_core::feature_refinement::{
     four_way_decon, four_way_decon_detector_anchor, four_way_decon_gated, refine_feature,
-    refine_feature_censored, refine_feature_multi, refine_feature_shift, refine_feature_shift_neighbor,
-    resolve_charge_state_consensus, resolve_consensus_by_apex, DeconView, FourWayDecon, NeighborIndex,
-    RefinedFeature, ResolvedFeature,
+    refine_feature_censored, refine_feature_multi, refine_feature_shift,
+    refine_feature_shift_neighbor_with, refine_feature_shift_with, resolve_charge_state_consensus,
+    resolve_consensus_by_apex, DeconView, FourWayDecon, NeighborIndex, RefinedFeature, ResolvedFeature,
 };
-use flashlfq_core::isotope_shift_decon::envelope_fit_cosine;
+use flashlfq_core::isotope_shift_decon::{envelope_fit_cosine, Deconvoluter};
 use flashlfq_core::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12};
 use flashlfq_core::joint_fit::{joint_fit_target_shift, Component};
 use flashlfq_core::peak_indexing::{
@@ -29,7 +29,7 @@ use flashlfq_core::peak_indexing::{
 };
 use flashlfq_core::trace_kernel::{
     detect_features, estimate_noise_floor, median_ms1_scan_spacing_minutes, CombWeightModel,
-    DetectedFeature, ScoreModel, TraceKernelParameters, FWHM_TO_SIGMA,
+    DetectedFeature, LatticeMode, RtProfile, ScoreModel, TraceKernelParameters, FWHM_TO_SIGMA,
 };
 
 /// Neighbour isotope-m/z positions in feature `f`'s window that are **not** on its own grid — the peaks
@@ -302,9 +302,65 @@ fn main() {
 
     // --- detect --------------------------------------------------------------------------------
     // Comb-weight model selectable via COMB_MODEL=averagine|poisson (default averagine) for benchmarking.
+    // The decoy models (target-decoy FDR) select a non-physical envelope whose detections are noise
+    // coincidences — run a separate decoy pass per model and compare score histograms.
     let weight_model = match std::env::var("COMB_MODEL").as_deref() {
         Ok("poisson") => CombWeightModel::Poisson,
+        // Chlorinated-averagine decoy (A+2-dominated, mode shifted off the mono).
+        Ok("decoy") => CombWeightModel::Decoy,
+        // Rotated-averagine decoy — real envelope, weights rotated by half (reversed-peptide analogue).
+        Ok("rotated") => CombWeightModel::RotatedAveragine,
+        // Chloro-boro-phosphate decoy — averagine + per-unit Cl/B/P (CBP_CL/CBP_B/CBP_P tune the load).
+        Ok("cbp") | Ok("chloroboro") => CombWeightModel::ChloroBoroPhosphate,
+        // Fully custom decoy — composition REPLACES the backbone, set via CUSTOM_AVERAGINE env
+        // (default "P2 C1 N1 Cl1 Fe1" — the weird Fe+Cl averagine).
+        Ok("custom") => CombWeightModel::Custom,
+        // Shuffled-averagine decoy — real averagine weights randomly permuted (SHUFFLE_SEED varies it).
+        Ok("shuffled") => CombWeightModel::ShuffledAveragine,
+        // Hybrid — custom (CUSTOM_AVERAGINE) comb below HYBRID_MASS Da, shuffled averagine above.
+        Ok("hybrid") => CombWeightModel::Hybrid,
         _ => CombWeightModel::Averagine,
+    };
+    // End-to-end envelope model for *refinement*, mirroring COMB_MODEL so a decoy is applied through
+    // detection AND refinement (shift/recharge/walk-back/score all fit the decoy template, not the real
+    // averagine — the fix for score "laundering" where refinement re-anchored decoys onto real peaks).
+    let refine_model = match weight_model {
+        CombWeightModel::Decoy => EnvelopeModel::ChlorinatedDecoy,
+        CombWeightModel::RotatedAveragine => EnvelopeModel::RotatedDecoy,
+        CombWeightModel::ChloroBoroPhosphate => EnvelopeModel::ChloroBoroPhosphateDecoy,
+        CombWeightModel::Custom => EnvelopeModel::CustomDecoy,
+        CombWeightModel::ShuffledAveragine => EnvelopeModel::ShuffledDecoy,
+        CombWeightModel::Hybrid => EnvelopeModel::HybridDecoy,
+        _ => EnvelopeModel::Averagine,
+    };
+    // Decoy comb *lattice* (tooth positions), independent of the weight model. DECOY_LATTICE=scaled with
+    // DECOY_SPACING_SCALE=0.9368 lays a 0.94-Da off-lattice comb (teeth off the real isotope positions);
+    // DECOY_LATTICE=mixed uses per-step mixed-charge spacings (globally impossible comb).
+    let lattice_mode = match std::env::var("DECOY_LATTICE").as_deref() {
+        Ok("mixed") => LatticeMode::MixedCharge,
+        Ok("scaled") => {
+            let s = std::env::var("DECOY_SPACING_SCALE")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.5);
+            LatticeMode::Scaled(s)
+        }
+        _ => LatticeMode::Uniform,
+    };
+    // Refine-stage deconvoluter: the decoy envelope model + (for a scaled lattice) the same spacing
+    // scale, so detection and refinement share both the weight model AND the tooth positions. A mixed
+    // lattice has no single scale, so refinement stays on the physical lattice there (weights still decoy).
+    let refine_spacing_scale = match lattice_mode {
+        LatticeMode::Scaled(s) => s,
+        _ => 1.0,
+    };
+    let env_decon = Deconvoluter::new_with_spacing(refine_model, refine_spacing_scale);
+    // Decoy elution profile (RT weighting). RT_PROFILE=uniform (flat) or inverted (1−gaussian, U-shaped)
+    // for a target-decoy on the chromatographic axis; default gaussian (the real elution template).
+    let rt_profile = match std::env::var("RT_PROFILE").as_deref() {
+        Ok("uniform") => RtProfile::Uniform,
+        Ok("inverted") => RtProfile::InvertedGaussian,
+        _ => RtProfile::Gaussian,
     };
     // Coverage target (fraction of ΣTIC to explain) selectable via COVERAGE_TARGET=0.80|0.90|0.99…
     // Default 1.0 (uncapped): the detector runs to the seed-intensity floor. This is also what keeps the
@@ -488,6 +544,8 @@ fn main() {
         min_seed_intensity,
         coverage_target,
         weight_model,
+        lattice_mode,
+        rt_profile,
         score_model,
         noise_floor,
         score_use_seed_amplitude,
@@ -866,7 +924,7 @@ fn main() {
             // Pass 1: plain refine, then index the corrected placements for the masked pass below.
             let pass1: Vec<RefinedFeature> = detected
                 .iter()
-                .filter_map(|f| refine_feature_shift(f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra))
+                .filter_map(|f| refine_feature_shift_with(&env_decon, f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra))
                 .collect();
             eprintln!(
                 "  NEIGHBOR_REFINE=refined: two-pass, masking neighbours >= {neighbor_min_ratio}x (from {} refined)",
@@ -898,7 +956,7 @@ fn main() {
         // Pass 1: plain refine to get each feature's initial score.
         let init: Vec<Option<RefinedFeature>> = detected
             .iter()
-            .map(|f| refine_feature_shift(f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra))
+            .map(|f| refine_feature_shift_with(&env_decon, f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra))
             .collect();
         // Process indices in descending initial score.
         let mut order: Vec<usize> = (0..detected.len()).filter(|&i| init[i].is_some()).collect();
@@ -914,7 +972,7 @@ fn main() {
             let win_min = (f.mono_mz - 1.5).max(0.0);
             let win_max = f.mono_mz + (f.num_isotopes_observed as f64 + 3.0) * spacing + 1.0;
             let mask = filter_off_own_grid(locked.positions(f.apex_rt, win_min, win_max), f);
-            let r = refine_feature_shift_neighbor(f, &scans, &avg, 20.0, use_shift_apex, recharge, &mask, average_spectra)
+            let r = refine_feature_shift_neighbor_with(&env_decon, f, &scans, &avg, 20.0, use_shift_apex, recharge, &mask, average_spectra)
                 .or_else(|| init[i].clone());
             if let Some(rr) = &r {
                 // Only confident features become mask sources for the lower-scoring ones that follow.
@@ -937,9 +995,9 @@ fn main() {
                 refine_feature_multi(f, &scans, &avg, 20.0, multi_components)
             } else if let Some(idx) = &neighbor_idx {
                 let mask = neighbor_mask_for(idx, f, neighbor_min_ratio);
-                refine_feature_shift_neighbor(f, &scans, &avg, 20.0, use_shift_apex, recharge, &mask, average_spectra)
+                refine_feature_shift_neighbor_with(&env_decon, f, &scans, &avg, 20.0, use_shift_apex, recharge, &mask, average_spectra)
             } else if use_shift {
-                refine_feature_shift(f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra)
+                refine_feature_shift_with(&env_decon, f, &scans, &avg, 20.0, use_shift_apex, recharge, average_spectra)
             } else if censor_claimed {
                 refine_feature_censored(f, &scans, &avg, &decon, &all_claimed)
             } else {

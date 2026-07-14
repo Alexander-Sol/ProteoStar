@@ -37,12 +37,12 @@
 
 use crate::deconvolution::{
     averagine_mono_from_most_intense, classic_deconvolute, ClassicDeconvolutionParameters,
+    EnvelopeModel,
 };
 use crate::joint_fit::{joint_envelope_fit, Component};
 use crate::isotope_shift_decon::{
-    best_charge_by_fit, envelope_fit_cosine_masked, shift_decon, shift_decon_gated,
-    shift_decon_in_window, walkback_mono_high_charge, NEIGHBOR_MASK_PPM, RECHARGE_PREFER_MARGIN,
-
+    envelope_fit_cosine_masked, shift_decon, shift_decon_gated, shift_decon_in_window,
+    Deconvoluter, NEIGHBOR_MASK_PPM, RECHARGE_PREFER_MARGIN,
 };
 use crate::isotopic_envelope::{mass_to_mz_f64, C13_MINUS_C12, PROTON_MASS};
 use crate::peak_indexing::{PeakKey, Scan};
@@ -269,6 +269,34 @@ pub fn refine_feature_shift(
     average_spectra: bool,
 ) -> Option<RefinedFeature> {
     refine_feature_shift_inner(
+        &Deconvoluter::new(EnvelopeModel::Averagine),
+        feature,
+        scans,
+        averaging_params,
+        shift_tol_ppm,
+        use_apex,
+        recharge,
+        &[],
+        average_spectra,
+    )
+}
+
+/// [`refine_feature_shift`] with an explicit [`Deconvoluter`], so detection and refinement can share
+/// one [`EnvelopeModel`] (target *or* decoy) end-to-end. The no-`_with` form is exactly this with an
+/// `Averagine` deconvoluter.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_feature_shift_with(
+    decon: &Deconvoluter,
+    feature: &DetectedFeature,
+    scans: &[Scan],
+    averaging_params: &SpectralAveragingParameters,
+    shift_tol_ppm: f64,
+    use_apex: bool,
+    recharge: bool,
+    average_spectra: bool,
+) -> Option<RefinedFeature> {
+    refine_feature_shift_inner(
+        decon,
         feature,
         scans,
         averaging_params,
@@ -299,6 +327,34 @@ pub fn refine_feature_shift_neighbor(
     average_spectra: bool,
 ) -> Option<RefinedFeature> {
     refine_feature_shift_inner(
+        &Deconvoluter::new(EnvelopeModel::Averagine),
+        feature,
+        scans,
+        averaging_params,
+        shift_tol_ppm,
+        use_apex,
+        recharge,
+        neighbor_mz,
+        average_spectra,
+    )
+}
+
+/// [`refine_feature_shift_neighbor`] with an explicit [`Deconvoluter`] (see
+/// [`refine_feature_shift_with`]).
+#[allow(clippy::too_many_arguments)]
+pub fn refine_feature_shift_neighbor_with(
+    decon: &Deconvoluter,
+    feature: &DetectedFeature,
+    scans: &[Scan],
+    averaging_params: &SpectralAveragingParameters,
+    shift_tol_ppm: f64,
+    use_apex: bool,
+    recharge: bool,
+    neighbor_mz: &[f64],
+    average_spectra: bool,
+) -> Option<RefinedFeature> {
+    refine_feature_shift_inner(
+        decon,
         feature,
         scans,
         averaging_params,
@@ -312,6 +368,7 @@ pub fn refine_feature_shift_neighbor(
 
 #[allow(clippy::too_many_arguments)]
 fn refine_feature_shift_inner(
+    decon: &Deconvoluter,
     feature: &DetectedFeature,
     scans: &[Scan],
     averaging_params: &SpectralAveragingParameters,
@@ -338,7 +395,7 @@ fn refine_feature_shift_inner(
         let candidates = charge_candidates(feature.charge);
         // Keep the detector's charge unless another candidate fits clearly better — blocks a spurious
         // z<->2z harmonic flip in crowded windows (e.g. a real z=2 re-charged to z=4, mass doubled).
-        let (z, mono, _cos) = best_charge_by_fit(
+        let (z, mono, _cos) = decon.best_charge_by_fit(
             mz,
             inten,
             anchor_mz,
@@ -352,13 +409,13 @@ fn refine_feature_shift_inner(
         )?;
         (z, mono)
     } else {
-        let r = shift_decon(mz, inten, anchor_mz, feature.charge, shift_tol_ppm)?;
+        let r = decon.shift_decon(mz, inten, anchor_mz, feature.charge, shift_tol_ppm)?;
         (feature.charge, r.monoisotopic_mass)
     };
     // High-charge double-check: heavy peptides can seed the mono one or two ¹³C too high (the envelope
     // mode sits well above the mono), and the fit window never sees the unexplained peak beneath it.
     // Walk the mono back up to 2 ¹³C and keep the lowest that still fits (no-op for |z| < 4 / good mono).
-    let refined_mono = walkback_mono_high_charge(
+    let refined_mono = decon.walkback_mono_high_charge(
         mz,
         inten,
         refined_mono0,
@@ -377,7 +434,7 @@ fn refine_feature_shift_inner(
         refined_monoisotopic_mass: refined_mono,
         refined_charge,
         candidate_masses: vec![refined_mono],
-        decon_score: envelope_fit_cosine_masked(
+        decon_score: decon.envelope_fit_cosine_masked(
             mz,
             inten,
             mass_to_mz_f64(refined_mono, refined_charge),

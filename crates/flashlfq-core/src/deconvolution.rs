@@ -503,9 +503,572 @@ pub fn averagine_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isot
 /// the mode — the low-mass teeth are what place the monoisotope).
 fn averagine_envelope_by_index(idx: usize, mono: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
     let model = &*AVERAGINE;
-    let masses = model.get_all_theoretical_masses(idx);
-    let intensities = model.get_all_theoretical_intensities(idx);
+    bin_envelope_to_comb_weights(
+        model.get_all_theoretical_masses(idx),
+        model.get_all_theoretical_intensities(idx),
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
 
+// ---------------------------------------------------------------------------
+// Decoy model — chlorinated averagine (target-decoy FDR)
+// ---------------------------------------------------------------------------
+
+/// Chlorine atoms per averagine unit (`multiplier = (i+1)/2`) for the decoy comb. Chosen so the ³⁷Cl
+/// A+2 ladder dominates the envelope and pushes its mode several ¹³C units off the monoisotope — a
+/// shape no tryptic peptide produces. A real peptide envelope (monotonic decay from the mono)
+/// correlates poorly against it, so decoy detections are (near-)coincidences of noise: the negatives
+/// a target-decoy FDR / classifier needs. ~0.6·13.5 ≈ 8 Cl at ~1.5 kDa. The teeth still sit on the
+/// ¹³C lattice (composition barely moves the spacing); the *weights* are the discriminant.
+const DECOY_CL_PER_UNIT: f64 = 0.6;
+
+/// A chlorinated-averagine decoy model — the same peptide backbone as [`Averagine`] plus a
+/// mass-proportional chlorine load, giving a radically different (A+2-dominated, mode-shifted)
+/// isotope envelope for target-decoy FDR. Built like `Averagine`; keyed by most-intense mass.
+struct DecoyAveragine {
+    all_masses: Vec<Vec<f64>>,
+    all_intensities: Vec<Vec<f64>>,
+    most_intense_masses: Vec<f64>,
+    diff_to_monoisotopic: Vec<f64>,
+    /// Monoisotopic mass of each entry (`most_intense − diff_to_monoisotopic`), for mono-keyed lookup.
+    monoisotopic_masses: Vec<f64>,
+}
+
+impl DecoyAveragine {
+    fn build() -> Self {
+        // Same averagine backbone constants as `Averagine::build`, plus chlorine.
+        const AVERAGE_C: f64 = 4.9384;
+        const AVERAGE_H: f64 = 7.7583;
+        const AVERAGE_O: f64 = 1.4773;
+        const AVERAGE_N: f64 = 1.3577;
+        const AVERAGE_S: f64 = 0.0417;
+
+        let pt = periodic_table();
+        let an = |symbol: &str| {
+            pt.element_by_symbol(symbol)
+                .unwrap_or_else(|| panic!("decoy element {symbol} missing from periodic table"))
+                .atomic_number
+        };
+        let (c, h, o, n, s, cl) = (an("C"), an("H"), an("O"), an("N"), an("S"), an("Cl"));
+
+        let mut all_masses = Vec::with_capacity(NUM_AVERAGINES_TO_GENERATE);
+        let mut all_intensities = Vec::with_capacity(NUM_AVERAGINES_TO_GENERATE);
+        let mut most_intense_masses = vec![0.0; NUM_AVERAGINES_TO_GENERATE];
+        let mut diff_to_monoisotopic = vec![0.0; NUM_AVERAGINES_TO_GENERATE];
+
+        for i in 0..NUM_AVERAGINES_TO_GENERATE {
+            let averagine_multiplier = (i as f64 + 1.0) / 2.0;
+            let mut formula = ChemicalFormula::new();
+            formula.add_element(c, (AVERAGE_C * averagine_multiplier).round_ties_even() as i32);
+            formula.add_element(h, (AVERAGE_H * averagine_multiplier).round_ties_even() as i32);
+            formula.add_element(o, (AVERAGE_O * averagine_multiplier).round_ties_even() as i32);
+            formula.add_element(n, (AVERAGE_N * averagine_multiplier).round_ties_even() as i32);
+            formula.add_element(s, (AVERAGE_S * averagine_multiplier).round_ties_even() as i32);
+            let n_cl = (DECOY_CL_PER_UNIT * averagine_multiplier).round() as i32;
+            if n_cl > 0 {
+                formula.add_element(cl, n_cl);
+            }
+
+            let dist = IsotopicDistribution::get_distribution_with(
+                &formula,
+                FINE_RESOLUTION,
+                MIN_PROBABILITY,
+                DEFAULT_MOLECULAR_WEIGHT_RESOLUTION,
+            );
+
+            // Sort by intensity descending (same convention as `Averagine::build`).
+            let mut pairs: Vec<(f64, f64)> = dist
+                .intensities
+                .iter()
+                .copied()
+                .zip(dist.masses.iter().copied())
+                .collect();
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            pairs.reverse();
+
+            let masses: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+            let intensities: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+
+            most_intense_masses[i] = masses[0];
+            diff_to_monoisotopic[i] = masses[0] - formula.monoisotopic_mass();
+            all_masses.push(masses);
+            all_intensities.push(intensities);
+        }
+
+        let monoisotopic_masses = most_intense_masses
+            .iter()
+            .zip(diff_to_monoisotopic.iter())
+            .map(|(mi, d)| mi - d)
+            .collect();
+
+        DecoyAveragine {
+            all_masses,
+            all_intensities,
+            most_intense_masses,
+            diff_to_monoisotopic,
+            monoisotopic_masses,
+        }
+    }
+}
+
+/// Process-wide, lazily built decoy (chlorinated-averagine) model.
+static DECOY_AVERAGINE: LazyLock<DecoyAveragine> = LazyLock::new(DecoyAveragine::build);
+
+/// Decoy isotope-comb weights for the untargeted trace kernel's `CombWeightModel::Decoy`. Same
+/// contract as [`averagine_comb_weights`] — keyed by the most-intense (seed) mass, returned as
+/// per-¹³C-index weights normalized to max `1.0` — but from the chlorinated-averagine
+/// [`DecoyAveragine`] envelope. The mode sits several teeth above the monoisotope and the mono tooth
+/// is weak, so anchoring the seed on the mode places a comb a real peptide cannot satisfy.
+pub fn decoy_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*DECOY_AVERAGINE;
+    let idx =
+        get_closest_index(&model.most_intense_masses, most_intense_mass, ArraySearchOption::Closest);
+    let mono = model.most_intense_masses[idx] - model.diff_to_monoisotopic[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+/// **Rotated-averagine decoy** comb weights for `CombWeightModel::RotatedAveragine`. Takes the real
+/// averagine envelope and circularly rotates it by ⌊n/2⌋ teeth, so the monoisotopic (tallest) weight
+/// lands in the *middle* of the comb and the mid-envelope weight moves to the *edge*. The multiset of
+/// weights is preserved and only their *order* is permuted — the closest analogue to a
+/// reversed-sequence decoy peptide, which preserves composition and permutes order. Teeth stay on the
+/// physical ¹³C lattice (same positions as the target); only the expected intensity *ratios* are
+/// scrambled, so this decoy is caught by ratio-fidelity, not by mass or co-elution.
+pub fn rotated_averagine_comb_weights(
+    most_intense_mass: f64,
+    min_weight: f64,
+    max_isotopes: usize,
+) -> Vec<f64> {
+    rotate_half(averagine_comb_weights(most_intense_mass, min_weight, max_isotopes))
+}
+
+/// Circularly rotates a weight vector by ⌊n/2⌋ (mono weight → middle, mid → edge). See
+/// [`rotated_averagine_comb_weights`].
+fn rotate_half(w: Vec<f64>) -> Vec<f64> {
+    let n = w.len();
+    if n < 2 {
+        return w;
+    }
+    let shift = n / 2;
+    let mut out = vec![0.0; n];
+    for (i, &wi) in w.iter().enumerate() {
+        out[(i + shift) % n] = wi;
+    }
+    out
+}
+
+/// Mono-keyed counterpart of [`decoy_comb_weights`] (chlorinated averagine), keyed by the
+/// **monoisotopic** mass instead of the most-intense mass. The refinement layer's mono-anchored
+/// template accessor for `EnvelopeModel::ChlorinatedDecoy`.
+pub fn decoy_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*DECOY_AVERAGINE;
+    let idx = get_closest_index(&model.monoisotopic_masses, mono_mass, ArraySearchOption::Closest);
+    let mono = model.monoisotopic_masses[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+/// Mono-keyed counterpart of [`rotated_averagine_comb_weights`] — the real mono-keyed averagine
+/// envelope, weights circularly rotated by half. The mono-anchored template for `EnvelopeModel::RotatedDecoy`.
+pub fn rotated_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    rotate_half(averagine_intensities_from_mono(mono_mass, min_weight, max_isotopes))
+}
+
+/// Seed for the shuffled-averagine decoy permutation (env `SHUFFLE_SEED`, default 1). Cached so the
+/// hot detection path does not re-read the env per candidate.
+static SHUFFLE_SEED: LazyLock<u64> =
+    LazyLock::new(|| std::env::var("SHUFFLE_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1));
+
+/// **Randomly permute** a weight vector — a deterministic Fisher–Yates shuffle seeded by
+/// [`SHUFFLE_SEED`] XORed with the vector length (so a given length always gets the same permutation,
+/// making detection and refinement agree, and runs reproducible). The multiset of weights is preserved
+/// and the teeth stay on the ¹³C lattice — only the intensity *order* is scrambled, a random-permutation
+/// analogue of [`rotate_half`]'s fixed rotation. Uses an inline splitmix64 PRNG (no `rand` dependency).
+fn shuffle_weights(mut w: Vec<f64>) -> Vec<f64> {
+    let n = w.len();
+    if n < 2 {
+        return w;
+    }
+    let mut state = *SHUFFLE_SEED ^ (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..n).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        w.swap(i, j);
+    }
+    w
+}
+
+/// **Shuffled-averagine decoy** comb weights for `CombWeightModel::ShuffledAveragine` — the real
+/// averagine comb with its weights randomly permuted ([`shuffle_weights`]). Like [`rotated_averagine_comb_weights`]
+/// but a random permutation instead of a fixed rotate; on-lattice, caught by ratio fidelity. `SHUFFLE_SEED` varies it.
+pub fn shuffled_averagine_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    shuffle_weights(averagine_comb_weights(most_intense_mass, min_weight, max_isotopes))
+}
+
+/// Mono-keyed counterpart of [`shuffled_averagine_comb_weights`] — for `EnvelopeModel::ShuffledDecoy`.
+pub fn shuffled_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    shuffle_weights(averagine_intensities_from_mono(mono_mass, min_weight, max_isotopes))
+}
+
+/// Neutral-mass (Da) crossover for the hybrid decoy: the custom (`CUSTOM_AVERAGINE`) comb is used
+/// **below** this mass, the shuffled averagine **above** it. Env `HYBRID_MASS`, default 3000 — chosen
+/// because the exotic Cl=Fe comb separates best at low/mid mass but under-fires the high-mass corner
+/// (where averagine vs decoy envelopes diverge), which the on-lattice shuffled averagine covers.
+static HYBRID_MASS: LazyLock<f64> =
+    LazyLock::new(|| std::env::var("HYBRID_MASS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000.0));
+
+/// **Hybrid decoy** comb weights: the custom Cl=Fe comb below [`HYBRID_MASS`], the shuffled averagine
+/// above. For `CombWeightModel::Hybrid`.
+pub fn hybrid_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    if most_intense_mass < *HYBRID_MASS {
+        custom_comb_weights(most_intense_mass, min_weight, max_isotopes)
+    } else {
+        shuffled_averagine_comb_weights(most_intense_mass, min_weight, max_isotopes)
+    }
+}
+
+/// Mono-keyed counterpart of [`hybrid_comb_weights`] — for `EnvelopeModel::HybridDecoy`.
+pub fn hybrid_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    if mono_mass < *HYBRID_MASS {
+        custom_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+    } else {
+        shuffled_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoy model — chloro-boro-phosphate averagine (exotic multi-element decoy)
+// ---------------------------------------------------------------------------
+
+/// A generic **exotic-averagine** decoy: the averagine backbone plus a mass-proportional
+/// (per-averagine-unit) load of arbitrary heavy / multi-isotope elements. Generalises
+/// [`DecoyAveragine`] (which is this with chlorine only). Built exactly like [`Averagine`] — same
+/// backbone constants, same intensity-descending sort, same mono/most-intense/diff tables.
+struct ExoticAveragine {
+    all_masses: Vec<Vec<f64>>,
+    all_intensities: Vec<Vec<f64>>,
+    most_intense_masses: Vec<f64>,
+    diff_to_monoisotopic: Vec<f64>,
+    monoisotopic_masses: Vec<f64>,
+}
+
+impl ExoticAveragine {
+    /// `extra` = `(element symbol, atoms per averagine unit)` **added** to the standard Senko backbone
+    /// (C/H/O/N/S). Each averagine size `i` gets `round(rate · multiplier)` atoms of every element.
+    fn build(extra: &[(&str, f64)]) -> Self {
+        let mut comp: Vec<(&str, f64)> = vec![
+            ("C", 4.9384),
+            ("H", 7.7583),
+            ("O", 1.4773),
+            ("N", 1.3577),
+            ("S", 0.0417),
+        ];
+        comp.extend_from_slice(extra);
+        Self::build_from(&comp)
+    }
+
+    /// Build from a **full** per-averagine-unit composition (element symbol → atoms per multiplier) —
+    /// no implicit backbone. Each size `i` (multiplier `(i+1)/2`) gets `round(rate · multiplier)` atoms
+    /// of every listed element. This is the general form; [`Self::build`] is this with the backbone
+    /// prepended. Used by the `custom` decoy, whose composition *replaces* the averagine.
+    fn build_from<S: AsRef<str>>(comp: &[(S, f64)]) -> Self {
+        let pt = periodic_table();
+        let an = |symbol: &str| {
+            pt.element_by_symbol(symbol)
+                .unwrap_or_else(|| panic!("exotic-decoy element {symbol} missing from periodic table"))
+                .atomic_number
+        };
+        let comp_z: Vec<(u16, f64)> =
+            comp.iter().map(|(sym, rate)| (an(sym.as_ref()), *rate)).collect();
+
+        let mut all_masses = Vec::with_capacity(NUM_AVERAGINES_TO_GENERATE);
+        let mut all_intensities = Vec::with_capacity(NUM_AVERAGINES_TO_GENERATE);
+        let mut most_intense_masses = vec![0.0; NUM_AVERAGINES_TO_GENERATE];
+        let mut diff_to_monoisotopic = vec![0.0; NUM_AVERAGINES_TO_GENERATE];
+
+        for i in 0..NUM_AVERAGINES_TO_GENERATE {
+            let averagine_multiplier = (i as f64 + 1.0) / 2.0;
+            let mut formula = ChemicalFormula::new();
+            for &(z, rate) in &comp_z {
+                let count = (rate * averagine_multiplier).round_ties_even() as i32;
+                if count > 0 {
+                    formula.add_element(z, count);
+                }
+            }
+
+            let dist = IsotopicDistribution::get_distribution_with(
+                &formula,
+                FINE_RESOLUTION,
+                MIN_PROBABILITY,
+                DEFAULT_MOLECULAR_WEIGHT_RESOLUTION,
+            );
+
+            let mut pairs: Vec<(f64, f64)> = dist
+                .intensities
+                .iter()
+                .copied()
+                .zip(dist.masses.iter().copied())
+                .collect();
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            pairs.reverse();
+
+            let masses: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+            let intensities: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+
+            most_intense_masses[i] = masses[0];
+            diff_to_monoisotopic[i] = masses[0] - formula.monoisotopic_mass();
+            all_masses.push(masses);
+            all_intensities.push(intensities);
+        }
+
+        let monoisotopic_masses = most_intense_masses
+            .iter()
+            .zip(diff_to_monoisotopic.iter())
+            .map(|(mi, d)| mi - d)
+            .collect();
+
+        ExoticAveragine {
+            all_masses,
+            all_intensities,
+            most_intense_masses,
+            diff_to_monoisotopic,
+            monoisotopic_masses,
+        }
+    }
+}
+
+/// Default per-averagine-unit loads for the chloro-boro-phosphate decoy. Chosen (see
+/// `examples/weird_averagine_probe`) so the envelope is radically non-averagine at *all* masses:
+/// boron's ¹⁰B pushes real intensity below the monoisotope (~5–15%, which no tryptic peptide shows),
+/// chlorine's ³⁷Cl builds an A+2 ladder that flattens and broadens the comb, phosphorus adds mass.
+/// Overridable at process start via env `CBP_CL` / `CBP_B` / `CBP_P` (atoms per averagine unit).
+fn cbp_loads() -> Vec<(&'static str, f64)> {
+    let rate = |key: &str, default: f64| -> f64 {
+        std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    };
+    vec![
+        ("Cl", rate("CBP_CL", 0.5)),
+        ("B", rate("CBP_B", 0.5)),
+        ("P", rate("CBP_P", 0.3)),
+    ]
+}
+
+/// Process-wide, lazily built chloro-boro-phosphate decoy model.
+static CBP_AVERAGINE: LazyLock<ExoticAveragine> =
+    LazyLock::new(|| ExoticAveragine::build(&cbp_loads()));
+
+/// Chloro-boro-phosphate decoy comb weights for `CombWeightModel::ChloroBoroPhosphate` — same contract
+/// as [`decoy_comb_weights`] (most-intense-keyed, normalized to max `1.0`) but from the multi-element
+/// [`CBP_AVERAGINE`] envelope.
+pub fn cbp_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*CBP_AVERAGINE;
+    let idx =
+        get_closest_index(&model.most_intense_masses, most_intense_mass, ArraySearchOption::Closest);
+    let mono = model.most_intense_masses[idx] - model.diff_to_monoisotopic[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+/// Mono-keyed counterpart of [`cbp_comb_weights`] — the chloro-boro-phosphate template for
+/// `EnvelopeModel::ChloroBoroPhosphateDecoy`, keyed by the **monoisotopic** mass.
+pub fn cbp_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*CBP_AVERAGINE;
+    let idx = get_closest_index(&model.monoisotopic_masses, mono_mass, ArraySearchOption::Closest);
+    let mono = model.monoisotopic_masses[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Decoy model — fully custom averagine (composition REPLACES the backbone)
+// ---------------------------------------------------------------------------
+
+/// Per-averagine-unit composition (element symbol → atoms/unit) for the fully-custom decoy, parsed from
+/// the `CUSTOM_AVERAGINE` env. Format is whitespace/comma-separated `<Element><rate>` tokens, e.g.
+/// `"P2 C1.0 N1 Cl1.0 Fe1.0"` — the composition **replaces** the averagine backbone entirely (no implicit
+/// C/H/O/N/S).
+///
+/// Default (env unset) = **`P2 C1 N1 Cl1 Fe1`** — the chosen decoy after a broad sweep. Rationale: Cl
+/// (³⁷Cl) and Fe (⁵⁷/⁵⁸Fe) put the mode near the mono and their A+2 satellites sit ~on the ¹³C+2 lattice,
+/// so it fires normally (on-lattice, ~45 s, 90% coverage) yet its ratios are wrong enough to separate.
+fn custom_loads() -> Vec<(String, f64)> {
+    let spec = std::env::var("CUSTOM_AVERAGINE").unwrap_or_else(|_| "P2 C1.0 N1 Cl1.0 Fe1.0".to_string());
+    let mut out = Vec::new();
+    for tok in spec.split([' ', ',', '\t']).filter(|t| !t.is_empty()) {
+        // Split leading element symbol (1 upper + optional lowercase letters) from the trailing rate.
+        let split = tok
+            .char_indices()
+            .find(|(i, c)| *i > 0 && !c.is_ascii_alphabetic())
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| panic!("CUSTOM_AVERAGINE token '{tok}' is not <Element><rate>"));
+        let (sym, rate) = tok.split_at(split);
+        let rate: f64 = rate
+            .parse()
+            .unwrap_or_else(|_| panic!("CUSTOM_AVERAGINE token '{tok}' has a non-numeric rate"));
+        out.push((sym.to_string(), rate));
+    }
+    assert!(!out.is_empty(), "CUSTOM_AVERAGINE parsed to an empty composition");
+    out
+}
+
+/// Process-wide, lazily built fully-custom decoy model (composition from `CUSTOM_AVERAGINE`).
+static CUSTOM_AVERAGINE: LazyLock<ExoticAveragine> =
+    LazyLock::new(|| ExoticAveragine::build_from(&custom_loads()));
+
+/// Custom-composition decoy comb weights for `CombWeightModel::Custom` — same contract as
+/// [`averagine_comb_weights`] but from the `CUSTOM_AVERAGINE` envelope (backbone fully replaced).
+pub fn custom_comb_weights(most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*CUSTOM_AVERAGINE;
+    let idx =
+        get_closest_index(&model.most_intense_masses, most_intense_mass, ArraySearchOption::Closest);
+    let mono = model.most_intense_masses[idx] - model.diff_to_monoisotopic[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+/// Mono-keyed counterpart of [`custom_comb_weights`] — for `EnvelopeModel::CustomDecoy`.
+pub fn custom_intensities_from_mono(mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+    let model = &*CUSTOM_AVERAGINE;
+    let idx = get_closest_index(&model.monoisotopic_masses, mono_mass, ArraySearchOption::Closest);
+    let mono = model.monoisotopic_masses[idx];
+    bin_envelope_to_comb_weights(
+        &model.all_masses[idx],
+        &model.all_intensities[idx],
+        mono,
+        min_weight,
+        max_isotopes,
+    )
+}
+
+/// A pluggable isotope-envelope model — the single template source threaded through **both**
+/// detection and refinement so a decoy is applied consistently end-to-end (not just at detection).
+/// Provides the two accessors the pipeline needs: [`Self::comb_weights`] keyed by the most-intense
+/// (seed/anchor) mass, and [`Self::intensities_from_mono`] keyed by the monoisotopic mass.
+///
+/// **Decoy-strategy trade-offs** (metric = recall@1%-decoy-FDR, higher = better separation):
+/// - [`Self::CustomDecoy`] with the default `Cl=Fe=1` composition (`P2 C1 N1 Cl1 Fe1`) is **the pick**
+///   (~79%, ~45 s, on-lattice/clean). Cl=Fe=2 reaches ~81% at 2× runtime.
+/// - [`Self::ChloroBoroPhosphateDecoy`] ~77%; [`Self::ShuffledDecoy`] ~67–73% (random permutation — much
+///   better than [`Self::RotatedDecoy`]'s **8.8%**: rotate-half keeps adjacency ⇒ fat high-score tail).
+/// - `HybridDecoy` (Cl=Fe below `HYBRID_MASS`, shuffled above) = best mass/charge *balance*, ~78%.
+/// - Hard constraint: an **off-lattice / sub-monoisotope** comb (e.g. heavy Ge/B) that fits no real
+///   envelope explains ≈0 ΣTIC ⇒ the coverage detector grinds forever. Keep decoy teeth on the ¹³C
+///   lattice (Cl/Fe A+2 ≈ 2·¹³C is why the pick works). Capping `MAX_ISOTOPES` does NOT rescue such combs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnvelopeModel {
+    /// The real averagine envelope — the target model.
+    #[default]
+    Averagine,
+    /// Chlorinated-averagine decoy (A+2 ladder, mode shifted off the mono).
+    ChlorinatedDecoy,
+    /// Rotated-averagine decoy (weights rotated by half; reversed-peptide analogue).
+    RotatedDecoy,
+    /// Chloro-boro-phosphate decoy — averagine + a per-unit Cl/B/P load. Boron's ¹⁰B seats real
+    /// intensity below the monoisotope and chlorine's ³⁷Cl flattens the comb, a shape no peptide makes.
+    ChloroBoroPhosphateDecoy,
+    /// Fully custom decoy — a per-averagine-unit composition (from `CUSTOM_AVERAGINE`) that **replaces**
+    /// the backbone. For trying arbitrary exotic averagines end-to-end without recompiling.
+    CustomDecoy,
+    /// Shuffled-averagine decoy — the real averagine weights **randomly permuted** (`SHUFFLE_SEED`).
+    /// On-lattice like [`Self::RotatedDecoy`], but a random permutation rather than a fixed rotate.
+    ShuffledDecoy,
+    /// Hybrid decoy — the custom Cl=Fe comb below `HYBRID_MASS`, the shuffled averagine above it.
+    HybridDecoy,
+}
+
+impl EnvelopeModel {
+    /// Per-¹³C-index comb weights keyed by the **most-intense** mass, normalized to max 1.0.
+    pub fn comb_weights(&self, most_intense_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+        match self {
+            EnvelopeModel::Averagine => averagine_comb_weights(most_intense_mass, min_weight, max_isotopes),
+            EnvelopeModel::ChlorinatedDecoy => decoy_comb_weights(most_intense_mass, min_weight, max_isotopes),
+            EnvelopeModel::RotatedDecoy => {
+                rotated_averagine_comb_weights(most_intense_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::ChloroBoroPhosphateDecoy => {
+                cbp_comb_weights(most_intense_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::CustomDecoy => {
+                custom_comb_weights(most_intense_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::ShuffledDecoy => {
+                shuffled_averagine_comb_weights(most_intense_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::HybridDecoy => {
+                hybrid_comb_weights(most_intense_mass, min_weight, max_isotopes)
+            }
+        }
+    }
+
+    /// Per-¹³C-index intensities keyed by the **monoisotopic** mass, normalized to max 1.0.
+    pub fn intensities_from_mono(&self, mono_mass: f64, min_weight: f64, max_isotopes: usize) -> Vec<f64> {
+        match self {
+            EnvelopeModel::Averagine => averagine_intensities_from_mono(mono_mass, min_weight, max_isotopes),
+            EnvelopeModel::ChlorinatedDecoy => decoy_intensities_from_mono(mono_mass, min_weight, max_isotopes),
+            EnvelopeModel::RotatedDecoy => rotated_intensities_from_mono(mono_mass, min_weight, max_isotopes),
+            EnvelopeModel::ChloroBoroPhosphateDecoy => {
+                cbp_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::CustomDecoy => {
+                custom_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::ShuffledDecoy => {
+                shuffled_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+            }
+            EnvelopeModel::HybridDecoy => {
+                hybrid_intensities_from_mono(mono_mass, min_weight, max_isotopes)
+            }
+        }
+    }
+}
+
+/// Bins a discrete `(masses, intensities)` isotopic envelope back into per-¹³C-index **comb weights**
+/// relative to `mono`: tooth `k` accumulates every peak within ½ a ¹³C spacing of `mono + k·(C13−C12)`,
+/// peaks below the mono are dropped, the vector is normalized to max `1.0`, capped at `max_isotopes`,
+/// and the descending high-mass tail below `min_weight` is trimmed (keeping every tooth up to and
+/// including the mode — the low teeth are what place the monoisotope). Shared by the averagine comb and
+/// the [`decoy_comb_weights`] exotic-envelope comb so both bin identically.
+fn bin_envelope_to_comb_weights(
+    masses: &[f64],
+    intensities: &[f64],
+    mono: f64,
+    min_weight: f64,
+    max_isotopes: usize,
+) -> Vec<f64> {
     let mut weights: Vec<f64> = Vec::new();
     for (&m, &inten) in masses.iter().zip(intensities.iter()) {
         let k = ((m - mono) / C13_MINUS_C12).round();

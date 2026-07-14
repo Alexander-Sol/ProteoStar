@@ -70,6 +70,61 @@ pub enum CombWeightModel {
     /// accurate than Poisson near ~1.8 kDa where the envelope mode shifts off the monoisotope — the
     /// regime where a Poisson `i*` can misplace the monoisotope by one ¹³C unit (off-by-one).
     Averagine,
+    /// **Decoy** comb — a chlorinated-averagine envelope
+    /// ([`crate::deconvolution::decoy_comb_weights`]) whose ³⁷Cl A+2 ladder pushes the mode several
+    /// ¹³C units off the monoisotope, a shape no tryptic peptide produces. Detections under this model
+    /// are (near-)coincidences of noise: the known negatives for target-decoy FDR / classifier
+    /// training. The teeth still sit on the ¹³C lattice; the *weights* are the discriminant.
+    Decoy,
+    /// **Rotated-averagine decoy** — the real averagine envelope with its weights circularly rotated by
+    /// half ([`crate::deconvolution::rotated_averagine_comb_weights`]). Preserves the weight multiset,
+    /// permutes only the order — the closest analogue to a reversed-sequence decoy peptide. On-lattice.
+    RotatedAveragine,
+    /// **Chloro-boro-phosphate decoy** — averagine plus a per-averagine-unit Cl/B/P load
+    /// ([`crate::deconvolution::cbp_comb_weights`]). Boron's ¹⁰B puts real intensity below the
+    /// monoisotope and chlorine's ³⁷Cl flattens the comb — a shape no tryptic peptide produces.
+    ChloroBoroPhosphate,
+    /// **Fully custom decoy** — a per-averagine-unit composition from `CUSTOM_AVERAGINE` that replaces
+    /// the backbone ([`crate::deconvolution::custom_comb_weights`]). For trying arbitrary averagines.
+    Custom,
+    /// **Shuffled-averagine decoy** — the real averagine weights randomly permuted (`SHUFFLE_SEED`;
+    /// [`crate::deconvolution::shuffled_averagine_comb_weights`]). On-lattice, ratio-fidelity decoy.
+    ShuffledAveragine,
+    /// **Hybrid decoy** — the custom Cl=Fe comb below `HYBRID_MASS`, the shuffled averagine above
+    /// ([`crate::deconvolution::hybrid_comb_weights`]).
+    Hybrid,
+}
+
+/// How the isotope comb's **tooth positions** are spaced in m/z. [`Self::Uniform`] is the physical
+/// ¹³C comb (`k · (C13−C12)/z`); the others are deliberately non-physical decoy lattices for
+/// target-decoy FDR — they move the teeth off the real isotope positions so a match can only be a
+/// noise coincidence. Independent of [`CombWeightModel`] (which sets the tooth *weights*).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LatticeMode {
+    /// Physical ¹³C comb: tooth `k` at `mono + k · (C13−C12)/z`. The real detector.
+    Uniform,
+    /// **Off-lattice decoy** — uniform spacing scaled by a non-physical factor: tooth `k` at
+    /// `mono + k · s · (C13−C12)/z`. `s ≈ 0.94` a near-but-wrong spacing real envelopes cannot satisfy
+    /// beyond the first tooth, so detections are coincidences.
+    Scaled(f64),
+    /// **Mixed-charge decoy** — each inter-tooth step uses a `(C13−C12)/z'` spacing for a *different*
+    /// pseudo-charge `z'`, drawn from a deterministic per-(base-charge, step) pattern. A globally-
+    /// impossible comb whose local peak-finding odds still resemble a real one.
+    MixedCharge,
+}
+
+/// The retention-time weighting the matched filter lays across the scan window. [`Self::Gaussian`] is
+/// the physical elution template; the others are decoy **elution** profiles for a target-decoy on the
+/// RT axis — a real chromatographic peak fits them poorly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtProfile {
+    /// Physical elution: `exp(−½(Δ/σ)²)`, peaked at the apex. The real detector.
+    Gaussian,
+    /// **Uniform decoy** — flat weight `1.0` across the window (no chromatographic shape).
+    Uniform,
+    /// **Inverted-Gaussian (U-shaped) decoy** — `1 − exp(−½(Δ/σ)²)`: zero at the apex, rising to the
+    /// window edges. Anti-correlated with real elution, so a genuine peak scores low.
+    InvertedGaussian,
 }
 
 /// How a charge hypothesis's matched-filter response is scored for cross-z non-max suppression.
@@ -107,6 +162,10 @@ pub struct TraceKernelParameters {
     pub half_window_scans: i32,
     /// Which comb-weight model to use.
     pub weight_model: CombWeightModel,
+    /// How the comb's tooth positions are spaced (physical ¹³C vs a non-physical decoy lattice).
+    pub lattice_mode: LatticeMode,
+    /// The retention-time weighting profile (physical Gaussian vs a decoy elution shape).
+    pub rt_profile: RtProfile,
     /// How the hypothesis response is scored (raw sum vs normalised; see [`ScoreModel`]).
     pub score_model: ScoreModel,
     /// Run-level noise floor `η` for [`ScoreModel::NormalizedNoiseFloor`] — comb slots whose
@@ -235,6 +294,8 @@ impl Default for TraceKernelParameters {
             rt_sigma_minutes: 0.1,
             half_window_scans: 3,
             weight_model: CombWeightModel::Averagine,
+            lattice_mode: LatticeMode::Uniform,
+            rt_profile: RtProfile::Gaussian,
             score_model: ScoreModel::RawSum,
             noise_floor: 0.0,
             score_use_seed_amplitude: false,
@@ -516,6 +577,83 @@ fn comb_weights(neutral_mass: f64, params: &TraceKernelParameters) -> Vec<f64> {
             params.min_isotope_weight,
             params.max_isotopes,
         ),
+        CombWeightModel::Decoy => crate::deconvolution::decoy_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+        CombWeightModel::RotatedAveragine => crate::deconvolution::rotated_averagine_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+        CombWeightModel::ChloroBoroPhosphate => crate::deconvolution::cbp_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+        CombWeightModel::Custom => crate::deconvolution::custom_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+        CombWeightModel::ShuffledAveragine => crate::deconvolution::shuffled_averagine_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+        CombWeightModel::Hybrid => crate::deconvolution::hybrid_comb_weights(
+            neutral_mass,
+            params.min_isotope_weight,
+            params.max_isotopes,
+        ),
+    }
+}
+
+/// Per-tooth m/z offset from the monoisotope for isotope indices `0..n`, under the configured
+/// [`LatticeMode`]. [`LatticeMode::Uniform`] is the physical comb `k · (C13−C12)/z`; the decoy
+/// lattices deviate. Shared by the scorer and the claim tracer so both lay the identical comb. The
+/// monoisotope anchor uses `offsets[i*]`, so a non-uniform lattice still places the mode on the seed.
+pub fn tooth_offsets(charge: i32, n: usize, mode: LatticeMode) -> Vec<f64> {
+    let base = C13_MINUS_C12 / charge as f64;
+    match mode {
+        LatticeMode::Uniform => (0..n).map(|k| k as f64 * base).collect(),
+        LatticeMode::Scaled(s) => (0..n).map(|k| k as f64 * base * s).collect(),
+        LatticeMode::MixedCharge => {
+            let mut offs = Vec::with_capacity(n);
+            let mut acc = 0.0;
+            for k in 0..n {
+                if k > 0 {
+                    acc += C13_MINUS_C12 / mixed_step_charge(charge, k) as f64;
+                }
+                offs.push(acc);
+            }
+            offs
+        }
+    }
+}
+
+/// Deterministic pseudo-random per-step charge `z' ∈ [1, 6]` for [`LatticeMode::MixedCharge`], varied
+/// by `(base_charge, step)` via a cheap integer hash. No RNG — reproducible across runs — yet each
+/// base charge gets its own "randomly alternating" spacing sequence.
+fn mixed_step_charge(base_charge: i32, step: usize) -> i32 {
+    let mut h = (base_charge as u64)
+        .wrapping_mul(0x9E37_79B1_85EB_CA87)
+        .wrapping_add((step as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    1 + (h % 6) as i32
+}
+
+/// RT weight at retention-time offset `delta` under the configured [`RtProfile`]. `Gaussian` is the
+/// physical elution template; `Uniform`/`InvertedGaussian` are decoy elution shapes.
+#[inline]
+fn rt_weight(delta: f64, sigma: f64, profile: RtProfile) -> f64 {
+    match profile {
+        RtProfile::Gaussian => gaussian(delta, sigma),
+        RtProfile::Uniform => 1.0,
+        RtProfile::InvertedGaussian => 1.0 - gaussian(delta, sigma),
     }
 }
 
@@ -593,12 +731,12 @@ fn seed_rt_window(
     let mut window: Vec<(i32, f64)> = Vec::new();
     let mut s = apex;
     while s >= 0 && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
-        window.push((s, gaussian(scan_info[s as usize].retention_time - rt_apex, sigma)));
+        window.push((s, rt_weight(scan_info[s as usize].retention_time - rt_apex, sigma, params.rt_profile)));
         s -= 1;
     }
     let mut s = apex + 1;
     while s < n_scans && (scan_info[s as usize].retention_time - rt_apex).abs() <= rt_win {
-        window.push((s, gaussian(scan_info[s as usize].retention_time - rt_apex, sigma)));
+        window.push((s, rt_weight(scan_info[s as usize].retention_time - rt_apex, sigma, params.rt_profile)));
         s += 1;
     }
     window
@@ -645,8 +783,8 @@ fn score_hypothesis(
         };
     }
     let i_star = most_abundant_index(&weights);
-    let spacing = C13_MINUS_C12 / charge as f64;
-    let mono_mz = seed_mz - (i_star as f64) * spacing;
+    let offsets = tooth_offsets(charge, weights.len(), params.lattice_mode);
+    let mono_mz = seed_mz - offsets[i_star];
 
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
     let mut observed_isotopes: HashSet<usize> = HashSet::new();
@@ -672,11 +810,11 @@ fn score_hypothesis(
         .iter()
         .fold((i32::MAX, i32::MIN), |(lo, hi), &(s, _)| (lo.min(s), hi.max(s)));
     let tooth_keys: Vec<i64> = (0..weights.len())
-        .map(|k| ((mono_mz + (k as f64) * spacing) * 1.0e6).round() as i64)
+        .map(|k| ((mono_mz + offsets[k]) * 1.0e6).round() as i64)
         .collect();
     for (k, &key) in tooth_keys.iter().enumerate() {
         if !tooth_cache.contains_key(&key) {
-            let tooth_mz = mono_mz + (k as f64) * spacing;
+            let tooth_mz = mono_mz + offsets[k];
             let peaks = engine.get_indexed_peaks_in_scan_range(tooth_mz, scan_lo, scan_hi, ppm);
             tooth_cache.insert(key, peaks);
         }
@@ -877,13 +1015,13 @@ fn gather_extent_peaks(
             .copied()
             .collect();
     }
-    let spacing = C13_MINUS_C12 / charge as f64;
+    let offsets = tooth_offsets(charge, weights.len(), params.lattice_mode);
     let mono_mz = hyp.mono_mz;
 
     let mut seen: HashSet<PeakKey> = HashSet::new();
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
     for k in 0..weights.len() {
-        let tooth_mz = mono_mz + (k as f64) * spacing;
+        let tooth_mz = mono_mz + offsets[k];
         for s in s_lo..=s_hi {
             if let Some(p) = engine.get_indexed_peak(tooth_mz, s, ppm) {
                 let key = p.key();

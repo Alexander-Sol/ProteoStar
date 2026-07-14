@@ -51,11 +51,11 @@
 //! treats a zero as no contribution so a predicted-but-absent tooth and an unexplained observed peak
 //! each lower the score — the standard MS spectral-angle behaviour.
 
-use crate::deconvolution::{averagine_comb_weights, averagine_intensities_from_mono};
+use crate::deconvolution::{averagine_intensities_from_mono, EnvelopeModel};
 use crate::isotopic_envelope::{C13_MINUS_C12, PROTON_MASS};
 
 /// Relative weight below which the averagine template's descending high-mass tail is dropped
-/// (passed to [`averagine_comb_weights`]). Teeth up to and including the mode are always kept.
+/// (passed to [`crate::deconvolution::averagine_comb_weights`]). Teeth up to and including the mode are always kept.
 const TEMPLATE_MIN_WEIGHT: f64 = 1e-3;
 
 /// Hard cap on averagine template length (isotope teeth) requested from the model.
@@ -235,7 +235,136 @@ fn nearest_within_ppm(mz: &[f64], intensity: &[f64], target_mz: f64, tol_ppm: f6
 /// hypothesis is degenerate (no correlation could be computed). Otherwise returns the winning shift,
 /// the implied monoisotopic mass, the per-shift correlations, and the FlashLFQ acceptance-gate
 /// verdict for the accurate hypothesis.
+/// A deconvolution **service** bound to a single [`EnvelopeModel`] (the target averagine, or a decoy).
+///
+/// Construct one per model — `Deconvoluter::new(EnvelopeModel::Averagine)` for the real search,
+/// `Deconvoluter::new(EnvelopeModel::RotatedDecoy)` for a decoy search — and run both over the same
+/// features to get target and decoy scores for a target-decoy FDR / q-value calculation. The model is
+/// carried as state (`self.model`), so it is not threaded through every call, and a target and a decoy
+/// deconvoluter coexist in one process (unlike a global provider). Every method uses this
+/// deconvoluter's model for all its templates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Deconvoluter {
+    model: EnvelopeModel,
+    /// Multiplier on the physical ¹³C tooth spacing (`k · C13 · scale / z`). `1.0` = the real lattice;
+    /// an off-lattice **spacing decoy** (e.g. `0.9`) places teeth where no real isotope sits, so a real
+    /// peptide fits it poorly — the end-to-end analogue of the detector's `LatticeMode::Scaled`.
+    spacing_scale: f64,
+}
+
+impl Deconvoluter {
+    /// A deconvoluter that uses `model` for every template it builds, on the physical ¹³C lattice.
+    pub fn new(model: EnvelopeModel) -> Self {
+        Self { model, spacing_scale: 1.0 }
+    }
+
+    /// A deconvoluter whose tooth spacing is scaled by `spacing_scale` (an off-lattice spacing decoy;
+    /// `1.0` is the physical lattice, matching [`Self::new`]).
+    pub fn new_with_spacing(model: EnvelopeModel, spacing_scale: f64) -> Self {
+        Self { model, spacing_scale }
+    }
+
+    /// The [`EnvelopeModel`] this deconvoluter uses.
+    pub fn model(&self) -> EnvelopeModel {
+        self.model
+    }
+
+    /// This deconvoluter's tooth-spacing multiplier (`1.0` = physical ¹³C lattice).
+    pub fn spacing_scale(&self) -> f64 {
+        self.spacing_scale
+    }
+
+    /// Places the monoisotope via the ¹³C shift search (see [`shift_decon`]) using `self.model`.
+    pub fn shift_decon(
+        &self,
+        mz: &[f64],
+        intensity: &[f64],
+        anchor_mz: f64,
+        charge: i32,
+        tol_ppm: f64,
+    ) -> Option<ShiftDeconResult> {
+        shift_decon_model(self.model, self.spacing_scale, mz, intensity, anchor_mz, charge, tol_ppm)
+    }
+
+    /// Envelope-fit cosine at a fixed mono/charge (see [`envelope_fit_cosine_masked`]) using `self.model`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn envelope_fit_cosine_masked(
+        &self,
+        mz: &[f64],
+        intensity: &[f64],
+        mono_mz: f64,
+        charge: i32,
+        tol_ppm: f64,
+        min_rel: f64,
+        noise_floor: f64,
+        excluded: &[f64],
+        excl_ppm: f64,
+    ) -> f64 {
+        envelope_fit_cosine_masked_model(
+            self.model, self.spacing_scale, mz, intensity, mono_mz, charge, tol_ppm, min_rel,
+            noise_floor, excluded, excl_ppm,
+        )
+    }
+
+    /// Re-selects the charge by best fit (see [`best_charge_by_fit`]) using `self.model`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn best_charge_by_fit(
+        &self,
+        mz: &[f64],
+        intensity: &[f64],
+        anchor_mz: f64,
+        candidates: &[i32],
+        tol_ppm: f64,
+        noise_floor: f64,
+        prefer_charge: i32,
+        prefer_margin: f64,
+        excluded: &[f64],
+        excl_ppm: f64,
+    ) -> Option<(i32, f64, f64)> {
+        best_charge_by_fit_model(
+            self.model, self.spacing_scale, mz, intensity, anchor_mz, candidates, tol_ppm,
+            noise_floor, prefer_charge, prefer_margin, excluded, excl_ppm,
+        )
+    }
+
+    /// Walks a heavy-peptide monoisotope back up to [`WALKBACK_MAX_C13`] ¹³C (see
+    /// [`walkback_mono_high_charge`]) using `self.model`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn walkback_mono_high_charge(
+        &self,
+        mz: &[f64],
+        intensity: &[f64],
+        mono_mass: f64,
+        charge: i32,
+        tol_ppm: f64,
+        noise_floor: f64,
+        excluded: &[f64],
+        excl_ppm: f64,
+    ) -> f64 {
+        walkback_mono_high_charge_model(
+            self.model, self.spacing_scale, mz, intensity, mono_mass, charge, tol_ppm, noise_floor,
+            excluded, excl_ppm,
+        )
+    }
+}
+
 pub fn shift_decon(
+    mz: &[f64],
+    intensity: &[f64],
+    anchor_mz: f64,
+    charge: i32,
+    tol_ppm: f64,
+) -> Option<ShiftDeconResult> {
+    shift_decon_model(EnvelopeModel::Averagine, 1.0, mz, intensity, anchor_mz, charge, tol_ppm)
+}
+
+/// [`shift_decon`] against an arbitrary [`EnvelopeModel`] and tooth-spacing scale — the templates (both
+/// the anchor-keyed comb and each shift's mono-keyed envelope) come from `model` instead of hardcoded
+/// averagine, and the ¹³C spacing is multiplied by `spacing_scale` (`1.0` = physical lattice). The
+/// implementation behind [`Deconvoluter::shift_decon`]; Averagine + `1.0` ⇒ identical to `shift_decon`.
+fn shift_decon_model(
+    model: EnvelopeModel,
+    spacing_scale: f64,
     mz: &[f64],
     intensity: &[f64],
     anchor_mz: f64,
@@ -248,15 +377,15 @@ pub fn shift_decon(
     }
 
     let most_intense_mass = mz_to_mass(anchor_mz, charge);
-    // Anchor-keyed averagine (indexed from the monoisotope, k = 0) used ONLY to locate the mono
+    // Anchor-keyed template (indexed from the monoisotope, k = 0) used ONLY to locate the mono
     // relative to the tallest (anchor) peak: its mode sits `mode_index` ¹³C units above the mono, so
     // the shift-0 monoisotope is `mode_index` units below the anchor.
-    let base = averagine_comb_weights(most_intense_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
+    let base = model.comb_weights(most_intense_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
     if base.is_empty() {
         return None;
     }
     let mode_index = argmax(&base) as i32;
-    let spacing = C13_MINUS_C12 / charge.abs() as f64;
+    let spacing = C13_MINUS_C12 * spacing_scale / charge.abs() as f64;
 
     let shifts = shifts_for_charge(charge);
 
@@ -271,7 +400,7 @@ pub fn shift_decon(
     for &shift in shifts {
         let o_s = shift - mode_index;
         let cand_mono_mass = mz_to_mass(anchor_mz + o_s as f64 * spacing, charge);
-        let t = averagine_intensities_from_mono(cand_mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
+        let t = model.intensities_from_mono(cand_mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
         j_lo = j_lo.min(o_s - 1);
         j_hi = j_hi.max(o_s + t.len() as i32 - 1).max(o_s);
         templates.push(t);
@@ -487,12 +616,36 @@ pub fn envelope_fit_cosine_masked(
     excluded: &[f64],
     excl_ppm: f64,
 ) -> f64 {
+    envelope_fit_cosine_masked_model(
+        EnvelopeModel::Averagine, 1.0, mz, intensity, mono_mz, charge, tol_ppm, min_rel, noise_floor,
+        excluded, excl_ppm,
+    )
+}
+
+/// [`envelope_fit_cosine_masked`] against an arbitrary [`EnvelopeModel`] and tooth-spacing scale — the
+/// fit template comes from `model` (not hardcoded averagine) and its teeth sit at `spacing_scale`× the
+/// physical ¹³C spacing, so a decoy's `decon_score` measures fit to the *decoy* envelope/lattice (low
+/// for real data). Behind [`Deconvoluter::envelope_fit_cosine_masked`]; Averagine + `1.0` ⇒ identical.
+#[allow(clippy::too_many_arguments)]
+fn envelope_fit_cosine_masked_model(
+    model: EnvelopeModel,
+    spacing_scale: f64,
+    mz: &[f64],
+    intensity: &[f64],
+    mono_mz: f64,
+    charge: i32,
+    tol_ppm: f64,
+    min_rel: f64,
+    noise_floor: f64,
+    excluded: &[f64],
+    excl_ppm: f64,
+) -> f64 {
     if mz.is_empty() || charge == 0 {
         return 0.0;
     }
     let mono_mass = mz_to_mass(mono_mz, charge);
     let template =
-        averagine_intensities_from_mono(mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
+        model.intensities_from_mono(mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
     if template.is_empty() {
         return 0.0;
     }
@@ -500,7 +653,7 @@ pub fn envelope_fit_cosine_masked(
     if mode_w <= 0.0 {
         return 0.0;
     }
-    let spacing = C13_MINUS_C12 / charge.abs() as f64;
+    let spacing = C13_MINUS_C12 * spacing_scale / charge.abs() as f64;
     let sig: Vec<(usize, f64)> = template
         .iter()
         .enumerate()
@@ -613,6 +766,8 @@ pub const RECHARGE_HALVING_MAX_INTERVENING: f64 = 0.30;
 /// this envelope's own unexplained signal. Returns `0.0` when the anchor peak is absent or degenerate.
 #[allow(clippy::too_many_arguments)]
 fn max_intervening_fraction(
+    model: EnvelopeModel,
+    spacing_scale: f64,
     mz: &[f64],
     intensity: &[f64],
     anchor_mz: f64,
@@ -632,7 +787,7 @@ fn max_intervening_fraction(
         _ => return 0.0,
     };
     let template =
-        averagine_intensities_from_mono(mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
+        model.intensities_from_mono(mono_mass, TEMPLATE_MIN_WEIGHT, TEMPLATE_MAX_ISOTOPES);
     if template.is_empty() {
         return 0.0;
     }
@@ -650,7 +805,7 @@ fn max_intervening_fraction(
         .unwrap_or(0) as i32;
     let ratio = z_hi.abs() / z_lo.abs();
     let mono_mz = mono_mass / z_lo.abs() as f64 + PROTON_MASS;
-    let spacing_hi = C13_MINUS_C12 / z_hi.abs() as f64;
+    let spacing_hi = C13_MINUS_C12 * spacing_scale / z_hi.abs() as f64;
     let jmax = (kmax_lo + 1) * ratio;
     let mut max_frac = 0.0f64;
     for j in 1..=jmax {
@@ -691,18 +846,44 @@ pub fn best_charge_by_fit(
     excluded: &[f64],
     excl_ppm: f64,
 ) -> Option<(i32, f64, f64)> {
+    best_charge_by_fit_model(
+        EnvelopeModel::Averagine, 1.0, mz, intensity, anchor_mz, candidates, tol_ppm, noise_floor,
+        prefer_charge, prefer_margin, excluded, excl_ppm,
+    )
+}
+
+/// [`best_charge_by_fit`] against an arbitrary [`EnvelopeModel`] and tooth-spacing scale — every
+/// candidate charge is placed and scored with `model`'s templates on the `spacing_scale`× lattice.
+/// Behind [`Deconvoluter::best_charge_by_fit`].
+#[allow(clippy::too_many_arguments)]
+fn best_charge_by_fit_model(
+    model: EnvelopeModel,
+    spacing_scale: f64,
+    mz: &[f64],
+    intensity: &[f64],
+    anchor_mz: f64,
+    candidates: &[i32],
+    tol_ppm: f64,
+    noise_floor: f64,
+    prefer_charge: i32,
+    prefer_margin: f64,
+    excluded: &[f64],
+    excl_ppm: f64,
+) -> Option<(i32, f64, f64)> {
     // (charge, monoisotopic_mass, cosine) for every candidate that yields an envelope.
     let mut evals: Vec<(i32, f64, f64)> = Vec::with_capacity(candidates.len());
     for &z in candidates {
         if z == 0 {
             continue;
         }
-        let Some(r) = shift_decon(mz, intensity, anchor_mz, z, tol_ppm) else {
+        let Some(r) = shift_decon_model(model, spacing_scale, mz, intensity, anchor_mz, z, tol_ppm)
+        else {
             continue;
         };
         let mono_mz = r.monoisotopic_mass / z.abs() as f64 + PROTON_MASS;
-        let cos = envelope_fit_cosine_masked(
-            mz, intensity, mono_mz, z, tol_ppm, 0.2, noise_floor, excluded, excl_ppm,
+        let cos = envelope_fit_cosine_masked_model(
+            model, spacing_scale, mz, intensity, mono_mz, z, tol_ppm, 0.2, noise_floor, excluded,
+            excl_ppm,
         );
         evals.push((z, r.monoisotopic_mass, cos));
     }
@@ -726,8 +907,8 @@ pub fn best_charge_by_fit(
         // which is left untouched. Traced on DSCQGDSGGPVVCSGK — see RECHARGE_HALVING_MAX_INTERVENING.
         if !keep_pref && best.0.abs() < prefer_charge.abs() && prefer_charge.abs() % best.0.abs() == 0 {
             let frac = max_intervening_fraction(
-                mz, intensity, anchor_mz, prefer_charge, best.0, best.1, tol_ppm, noise_floor,
-                excluded, excl_ppm,
+                model, spacing_scale, mz, intensity, anchor_mz, prefer_charge, best.0, best.1,
+                tol_ppm, noise_floor, excluded, excl_ppm,
             );
             if frac > RECHARGE_HALVING_MAX_INTERVENING {
                 keep_pref = true;
@@ -771,6 +952,28 @@ pub fn walkback_mono_high_charge(
     excluded: &[f64],
     excl_ppm: f64,
 ) -> f64 {
+    walkback_mono_high_charge_model(
+        EnvelopeModel::Averagine, 1.0, mz, intensity, mono_mass, charge, tol_ppm, noise_floor,
+        excluded, excl_ppm,
+    )
+}
+
+/// [`walkback_mono_high_charge`] against an arbitrary [`EnvelopeModel`] and tooth-spacing scale (the
+/// walk-back step is `spacing_scale · C13`, matching the decoy lattice). Behind
+/// [`Deconvoluter::walkback_mono_high_charge`].
+#[allow(clippy::too_many_arguments)]
+fn walkback_mono_high_charge_model(
+    model: EnvelopeModel,
+    spacing_scale: f64,
+    mz: &[f64],
+    intensity: &[f64],
+    mono_mass: f64,
+    charge: i32,
+    tol_ppm: f64,
+    noise_floor: f64,
+    excluded: &[f64],
+    excl_ppm: f64,
+) -> f64 {
     if charge.abs() < WALKBACK_MIN_CHARGE || mono_mass < WALKBACK_MIN_MASS_DA || mz.is_empty() {
         return mono_mass;
     }
@@ -778,11 +981,13 @@ pub fn walkback_mono_high_charge(
     let n = (WALKBACK_MAX_C13 + 1) as usize;
     let mut fits = vec![f64::NEG_INFINITY; n];
     let mut best_fit = f64::NEG_INFINITY;
+    let step = C13_MINUS_C12 * spacing_scale;
     for b in 0..n {
-        let cand_mass = mono_mass - b as f64 * C13_MINUS_C12;
+        let cand_mass = mono_mass - b as f64 * step;
         let cand_mz = cand_mass / z + PROTON_MASS;
-        let cos = envelope_fit_cosine_masked(
-            mz, intensity, cand_mz, charge, tol_ppm, 0.2, noise_floor, excluded, excl_ppm,
+        let cos = envelope_fit_cosine_masked_model(
+            model, spacing_scale, mz, intensity, cand_mz, charge, tol_ppm, 0.2, noise_floor,
+            excluded, excl_ppm,
         );
         fits[b] = cos;
         if cos > best_fit {
@@ -793,7 +998,7 @@ pub fn walkback_mono_high_charge(
     // best — the off-by-one error is directionally "mono too high", never too low.
     for b in (0..n).rev() {
         if fits[b] >= best_fit - WALKBACK_FIT_MARGIN {
-            return mono_mass - b as f64 * C13_MINUS_C12;
+            return mono_mass - b as f64 * step;
         }
     }
     mono_mass
@@ -1003,7 +1208,7 @@ mod tests {
         with.sort_by(|a, b| a.0.total_cmp(&b.0));
         let wm: Vec<f64> = with.iter().map(|p| p.0).collect();
         let wi: Vec<f64> = with.iter().map(|p| p.1).collect();
-        let f = max_intervening_fraction(&wm, &wi, mono_mz, 2, 1, z1_mono, 20.0, 0.0, &[], 0.0);
+        let f = max_intervening_fraction(EnvelopeModel::Averagine, 1.0, &wm, &wi, mono_mz, 2, 1, z1_mono, 20.0, 0.0, &[], 0.0);
         assert!(
             f > RECHARGE_HALVING_MAX_INTERVENING,
             "present intervening peak should exceed the floor, got {f}"
@@ -1012,7 +1217,7 @@ mod tests {
         // Absent: a genuine z=1 envelope has empty intervening positions → fraction ~0.
         let am: Vec<f64> = base.iter().map(|p| p.0).collect();
         let ai: Vec<f64> = base.iter().map(|p| p.1).collect();
-        let f0 = max_intervening_fraction(&am, &ai, mono_mz, 2, 1, z1_mono, 20.0, 0.0, &[], 0.0);
+        let f0 = max_intervening_fraction(EnvelopeModel::Averagine, 1.0, &am, &ai, mono_mz, 2, 1, z1_mono, 20.0, 0.0, &[], 0.0);
         assert!(
             f0 <= RECHARGE_HALVING_MAX_INTERVENING,
             "no intervening peak → fraction ~0, got {f0}"

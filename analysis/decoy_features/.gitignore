@@ -1,0 +1,13 @@
+# Large, regenerable detector + scorer outputs (multi-GB) — not tracked.
+# Regenerate with detect_features_tsv (t*.tsv), decoy_score_export (s*.tsv),
+# and dump_ms2_precursors (ms2_*.tsv).
+t*.tsv
+s*.tsv
+ms2_*.tsv
+
+# Logs / scratch
+*.log
+log_*.txt
+_orchestration*
+*.out.txt
+_inspect_ms2.py
