@@ -37,6 +37,10 @@ out/
 .pr_comments/
 AGENTS.md
 
+# --- Analysis scratch data (large text/tsv outputs, not source) ---
+analysis/**/*.txt
+analysis/**/*.tsv
+
 # --- OS / editor ---
 Thumbs.db
 .DS_Store
