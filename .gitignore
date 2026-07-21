@@ -40,6 +40,8 @@ AGENTS.md
 # --- Analysis scratch data (large text/tsv outputs, not source) ---
 analysis/**/*.txt
 analysis/**/*.tsv
+analysis/**/*.png
+analysis/**/*.md
 
 # --- OS / editor ---
 Thumbs.db
