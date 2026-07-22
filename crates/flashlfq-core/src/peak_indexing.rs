@@ -1401,6 +1401,18 @@ impl RandomAccessMs1Reader {
         }
         Some(scan_from_spectrum(&spec))
     }
+
+    /// Reads one spectrum by its **one-based scan number** (file index `n - 1`), post-processed
+    /// like [`read_ms1_scans`], preserving its true MS level in [`Scan::msn_order`]. Unlike
+    /// [`ms1_scan_at_rt`] this does not walk to the nearest MS1 — it returns exactly the requested
+    /// scan (typically an MS2 identified by a PSM). Returns `None` if the number is out of range.
+    pub fn scan_by_one_based_number(&mut self, one_based: i32) -> Option<Scan> {
+        if one_based < 1 {
+            return None;
+        }
+        let spec = self.by_index((one_based - 1) as usize)?;
+        Some(scan_from_spectrum(&spec))
+    }
 }
 
 /// Intensity below which mzLib's mzML reader treats a peak as "zero" and drops it.

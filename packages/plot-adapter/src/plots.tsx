@@ -35,8 +35,9 @@ const TIC_MARGIN = { l: 56, r: 18, t: 20, b: 44 };
 
 export function TicPlot(props: TicPlotProps): ReactElement {
   const { traces, viewport, rangeSelectionEnabled, featureRug, regions, onEvent } = props;
+  const yTitle = props.yTitle ?? "TIC";
 
-  const data: PlotData[] = traces.flatMap((trace) => buildTicTraceData(trace));
+  const data: PlotData[] = traces.flatMap((trace) => buildTicTraceData(trace, yTitle));
   if (featureRug && featureRug.length > 0) {
     data.push(buildFeatureRugData(featureRug));
   }
@@ -55,7 +56,7 @@ export function TicPlot(props: TicPlotProps): ReactElement {
       zeroline: false
     },
     yaxis: {
-      title: { text: "TIC" },
+      title: { text: yTitle },
       range: visibleYRange(traces, viewport),
       gridcolor: "#dfe7f2",
       zeroline: false
@@ -119,7 +120,8 @@ export function TicPlot(props: TicPlotProps): ReactElement {
   );
 }
 
-function buildTicTraceData(trace: TicPlotTrace): PlotData[] {
+function buildTicTraceData(trace: TicPlotTrace, yTitle: string): PlotData[] {
+  const hoverName = trace.label ?? yTitle;
   const lineTrace = {
     type: "scattergl",
     // Invisible (transparent) markers over the line give Plotly a reliable per-point
@@ -134,7 +136,7 @@ function buildTicTraceData(trace: TicPlotTrace): PlotData[] {
     })) as unknown as PlotData["customdata"],
     line: { color: trace.color, width: 2 },
     marker: { size: 8, color: "rgba(0,0,0,0)" },
-    hovertemplate: "RT %{x:.3f} min<br>TIC %{y:.0f}<extra></extra>"
+    hovertemplate: `RT %{x:.3f} min<br>${hoverName} %{y:.0f}<extra></extra>`
   } as unknown as PlotData;
 
   return [lineTrace];
@@ -298,13 +300,17 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   );
 }
 
-/** Compute the y-axis range from points visible within the current x viewport. */
+/** Compute the y-axis range from points visible within the current x viewport. When any trace
+ *  opts in via `yScale`, only those traces drive the range — so a summed-XIC overlay zooms the
+ *  axis to its own abundance and the much taller TIC (drawn on the same absolute scale) simply
+ *  runs off the top of the view. */
 function visibleYRange(
   traces: readonly TicPlotTrace[],
   viewport: PlotViewport
 ): [number, number] | undefined {
+  const scalers = traces.some((t) => t.yScale) ? traces.filter((t) => t.yScale) : traces;
   const { xMin, xMax } = viewport;
-  const points = traces.flatMap((t) =>
+  const points = scalers.flatMap((t) =>
     xMin !== null && xMax !== null
       ? t.points.filter((p) => p.retentionTime >= xMin && p.retentionTime <= xMax)
       : t.points

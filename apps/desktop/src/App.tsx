@@ -21,16 +21,20 @@ import {
 
 import { openDataset } from "./tauri-dataset-provider";
 import { loadFeatures, runFeatureDetection, isotopeGrid } from "./features";
+import { loadPsms, linkPsms, fetchIsotopeXics, sumXics } from "./psms";
 import { scoreSeedLadder } from "./walkthrough";
 import type {
   DatasetMetadata,
   DatasetProvider,
   Feature,
   LadderCharge,
+  Psm,
+  PsmLink,
   ScanSummary,
   SeedLadder,
   Spectrum,
-  TicPoint
+  TicPoint,
+  XicPoint
 } from "./contract";
 
 const SLOT_COLOR = "#2f6fb0";
@@ -76,6 +80,18 @@ export function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // PSMs loaded from a MetaMorpheus .psmtsv, linked to detected features client-side.
+  // Selecting one extracts its isotope XICs (below) and jumps the spectrum to its RT.
+  const [psms, setPsms] = useState<readonly Psm[]>([]);
+  const [psmLinks, setPsmLinks] = useState<readonly PsmLink[]>([]);
+  const [selectedPsm, setSelectedPsm] = useState<number | null>(null);
+  const [psmDrawerOpen, setPsmDrawerOpen] = useState(false);
+
+  // Per-isotope XIC traces for the selected PSM (index 0 = monoisotopic), extracted over the
+  // whole run. Summed into one envelope trace overlaid on the TIC (secondary y-axis).
+  const [xic, setXic] = useState<XicPoint[][]>([]);
+  const [xicLabel, setXicLabel] = useState<string | null>(null);
+
   const [ticViewport, setTicViewport] = useState<PlotViewport>(createDefaultViewport());
   const [spectrumViewport, setSpectrumViewport] = useState<PlotViewport>(createDefaultViewport());
 
@@ -115,11 +131,14 @@ export function App() {
         setLoad({ status: "loading", message: `${progress.phase}…` });
       });
       const meta = await p.getMetadata();
-      const tic = await p.getTicTrace({ maxPoints: 4000 });
       setHandle(h);
       setProvider(p);
       setMetadata(meta);
-      setTicPoints(tic);
+      // Deliberately do NOT paint the fast-path native TIC: on a DDA/mzML file it interleaves
+      // MS2 points (jagged saw-tooth). Wait for the smooth MS1-only trace the index yields —
+      // `markReady` (below) paints it the moment indexing finishes, so there's no jagged
+      // preview and no mid-session swap. Until then the panel shows a "building index" note.
+      setTicPoints([]);
       // ms1ScanCount is 0 until the background index lands; the effect below flips this off.
       setIndexing(meta.ms1ScanCount === 0);
       setLoad({ status: "ready" });
@@ -143,9 +162,9 @@ export function App() {
       setIndexing(false);
       try {
         setMetadata(await provider.getMetadata());
-        // Re-fetch the TIC: for files with no native TIC (e.g. some mzML) the fast-path
-        // trace was empty and only fills in now from the freshly-built index. For Thermo
-        // this just re-serves the same native TIC.
+        // Paint the TIC now that the index exists: `get_tic_trace` serves the smooth
+        // MS1-only per-scan trace (the fast-path native TIC was deliberately not painted, to
+        // avoid the jagged MS1+MS2 preview and a jarring swap). This is the only TIC the user sees.
         setTicPoints(await provider.getTicTrace({ maxPoints: 4000 }));
         // MS1 scan summaries power arrow-key scan stepping (available post-index).
         setScanSummaries(await provider.getScanSummaries());
@@ -185,11 +204,28 @@ export function App() {
   // A side drawer (features or walkthrough) narrows the plot area. react-plotly's
   // `useResizeHandler` only listens to *window* resize, so the plots don't reflow on their own
   // when the drawer opens/closes — nudge them with a synthetic resize once the layout has painted.
-  const drawerVisible = walkthrough || (drawerOpen && features.length > 0);
+  const drawerVisible =
+    walkthrough ||
+    (psmDrawerOpen && psms.length > 0) ||
+    (drawerOpen && features.length > 0);
   useEffect(() => {
     const id = window.setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
     return () => window.clearTimeout(id);
   }, [drawerVisible]);
+
+  // Re-link PSMs to features whenever either list changes (a fresh detection run, a
+  // reloaded feature TSV, or newly loaded PSMs). Unlinked when no features are loaded yet.
+  useEffect(() => {
+    if (psms.length === 0) {
+      setPsmLinks([]);
+      return;
+    }
+    setPsmLinks(
+      features.length > 0
+        ? linkPsms(psms, features)
+        : psms.map(() => ({ featureIndex: null, massPpmError: null, rtDelta: null }))
+    );
+  }, [psms, features]);
 
   // ------------------------------------------------------------ load features
   const handleLoadFeatures = useCallback(async () => {
@@ -206,6 +242,24 @@ export function App() {
       setFeaturesFile(picked.split(/[\\/]/).pop() ?? picked);
       setSelected(null);
       setDrawerOpen(true);
+    } catch (err) {
+      setLoad({ status: "error", message: errMessage(err) });
+    }
+  }, []);
+
+  // ---------------------------------------------------------------- load PSMs
+  const handleLoadPsms = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "PSM TSV", extensions: ["psmtsv", "tsv", "txt"] }]
+    });
+    if (typeof picked !== "string") return;
+    try {
+      const loaded = await loadPsms(picked);
+      setPsms(loaded);
+      setSelectedPsm(null);
+      setPsmDrawerOpen(true);
+      setDrawerOpen(false); // one right-side drawer at a time
     } catch (err) {
       setLoad({ status: "error", message: errMessage(err) });
     }
@@ -256,6 +310,57 @@ export function App() {
       }
     },
     [features, provider, spectrumPinned]
+  );
+
+  // ------------------------------------------------------------- select a PSM
+  // Extract the PSM's isotope XICs over the whole run (from the linked feature's observed
+  // mass/charge when linked, else the PSM's theoretical precursor) — summed and overlaid on
+  // the TIC — and show the identified MS2 scan in the spectrum pane.
+  const selectPsm = useCallback(
+    async (index: number) => {
+      const psm = psms[index];
+      if (!psm) return;
+      setSelectedPsm(index);
+      setSelected(null); // clear any feature selection (its isotope envelope is MS1-only)
+
+      const link = psmLinks[index];
+      const feature =
+        link && link.featureIndex !== null ? features[link.featureIndex] ?? null : null;
+
+      const mass = feature ? feature.monoisotopicMass : psm.monoisotopicMass;
+      const charge = feature ? feature.primaryCharge || psm.precursorCharge : psm.precursorCharge;
+
+      // Full-RT view so the summed XIC is visible over the entire chromatogram.
+      setTicViewport(createDefaultViewport());
+      setXicLabel(
+        `${psm.fullSequence} · z${charge} · ${mass.toFixed(2)} Da` +
+          (feature ? "" : " · no feature (theoretical m/z)")
+      );
+
+      // XIC over the entire RT range (no rtRange) so it spans the whole TIC.
+      if (provider && charge > 0 && mass > 0) {
+        try {
+          setXic(await fetchIsotopeXics(provider, mass, charge, { numIsotopes: 3, maxPoints: 4000 }));
+        } catch (err) {
+          setLoad({ status: "error", message: errMessage(err) });
+        }
+      }
+      // Identified MS2 spectrum by its Scan Number; fall back to the MS1 at the PSM's RT when
+      // the psmtsv gave no scan number.
+      if (provider && !spectrumPinned) {
+        setSpectrumViewport(createDefaultViewport()); // full m/z range for the fragment spectrum
+        try {
+          if (psm.ms2ScanNumber > 0) {
+            setSpectrum(await provider.getMs2Spectrum(psm.ms2ScanNumber));
+          } else if (psm.ms2RetentionTime >= 0) {
+            setSpectrum(await provider.getSpectrumAtRt(psm.ms2RetentionTime));
+          }
+        } catch (err) {
+          setLoad({ status: "error", message: errMessage(err) });
+        }
+      }
+    },
+    [psms, psmLinks, features, provider, spectrumPinned]
   );
 
   // Click the TIC background → nearest scan's spectrum (unless the spectrum is pinned).
@@ -383,17 +488,30 @@ export function App() {
   );
 
   // ----------------------------------------------------------------- overlays
-  const ticTraces = useMemo<TicPlotTrace[]>(
-    () => [
+  // TIC plus, when a PSM is selected, its summed isotope XIC drawn on the *same absolute* axis
+  // (true abundance, not normalised). The XIC opts into `yScale`, so the y-axis zooms to the
+  // XIC's height and the much taller TIC runs off the top of the view.
+  const ticTraces = useMemo<TicPlotTrace[]>(() => {
+    const traces: TicPlotTrace[] = [
       {
         slotIndex: 0,
         points: ticPoints,
         selectedScanIndex: spectrum?.scanIndex ?? null,
         color: SLOT_COLOR
       }
-    ],
-    [ticPoints, spectrum]
-  );
+    ];
+    if (xic.length > 0) {
+      traces.push({
+        slotIndex: 0,
+        points: sumXics(xic),
+        selectedScanIndex: null,
+        color: SELECTED_COLOR,
+        yScale: true,
+        label: "XIC"
+      });
+    }
+    return traces;
+  }, [ticPoints, spectrum, xic]);
 
   const featureRug = useMemo<FeatureMarker[]>(
     () =>
@@ -452,7 +570,13 @@ export function App() {
     );
   }, [walkthrough, ladder, focusCharge, spectrumMz]);
 
-  const spectrumEnvelope = walkthrough ? ladderEnvelope : envelope;
+  // The feature isotope envelope only makes sense over an MS1 scan; a PSM's identified spectrum
+  // is MS2 (fragment ions), so suppress the comb there.
+  const spectrumEnvelope = walkthrough
+    ? ladderEnvelope
+    : spectrum?.msLevel === 1
+      ? envelope
+      : [];
 
   const spectrumTraces = useMemo<SpectrumPlotTrace[]>(
     () => (spectrum ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }] : []),
@@ -482,6 +606,7 @@ export function App() {
           <PanelActionButton onClick={() => void handleLoadFeatures()}>
             Load features…
           </PanelActionButton>
+          <PanelActionButton onClick={() => void handleLoadPsms()}>Load PSMs…</PanelActionButton>
           {handle !== null ? (
             <PanelActionButton onClick={() => void handleRunDetection()}>
               {indexing
@@ -507,8 +632,31 @@ export function App() {
             </PanelActionButton>
           ) : null}
           {features.length > 0 ? (
-            <PanelActionButton pressed={drawerOpen} onClick={() => setDrawerOpen((v) => !v)}>
+            <PanelActionButton
+              pressed={drawerOpen}
+              onClick={() =>
+                setDrawerOpen((v) => {
+                  const next = !v;
+                  if (next) setPsmDrawerOpen(false);
+                  return next;
+                })
+              }
+            >
               Features ({features.length})
+            </PanelActionButton>
+          ) : null}
+          {psms.length > 0 ? (
+            <PanelActionButton
+              pressed={psmDrawerOpen}
+              onClick={() =>
+                setPsmDrawerOpen((v) => {
+                  const next = !v;
+                  if (next) setDrawerOpen(false);
+                  return next;
+                })
+              }
+            >
+              PSMs ({psms.length})
             </PanelActionButton>
           ) : null}
         </>
@@ -520,11 +668,13 @@ export function App() {
           <PanelHeader
             title="Total ion chromatogram"
             subtitle={
-              selectedFeature
-                ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}`
-                : featuresFile
-                  ? `${features.length} features from ${featuresFile} — click a marker or a row`
-                  : "Instrument TIC · click to load a scan"
+              xicLabel
+                ? `XIC (orange, absolute abundance): ${xicLabel}`
+                : selectedFeature
+                  ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}`
+                  : featuresFile
+                    ? `${features.length} features from ${featuresFile} — click a marker or a row`
+                    : "MS1 TIC · click to load a scan"
             }
             actions={
               <>
@@ -553,7 +703,15 @@ export function App() {
         ) : load.status === "error" ? (
           <StatusBanner tone="error">Failed: {load.message}</StatusBanner>
         ) : ticPoints.length === 0 ? (
-          <StatusBanner tone="muted">No dataset — use “Open file…” to load a .raw or mzML.</StatusBanner>
+          indexing ? (
+            <StatusBanner tone="info">
+              Building peak index — the MS1 chromatogram will appear when it’s ready…
+            </StatusBanner>
+          ) : (
+            <StatusBanner tone="muted">
+              No dataset — use “Open file…” to load a .raw or mzML.
+            </StatusBanner>
+          )
         ) : (
           <TicPlot
             traces={ticTraces}
@@ -638,6 +796,14 @@ export function App() {
             setLadder(null);
             setFocusCharge(null);
           }}
+        />
+      ) : psmDrawerOpen && psms.length > 0 ? (
+        <PsmDrawer
+          psms={psms}
+          links={psmLinks}
+          selected={selectedPsm}
+          onSelect={(i) => void selectPsm(i)}
+          onClose={() => setPsmDrawerOpen(false)}
         />
       ) : drawerOpen && features.length > 0 ? (
         <FeatureDrawer
@@ -912,6 +1078,181 @@ function FeatureDrawer({
   );
 }
 
+// Format a q-value compactly: exponential for the very small, fixed otherwise.
+function formatQ(q: number): string {
+  if (!(q >= 0)) return "—";
+  if (q === 0) return "0";
+  return q < 0.001 ? q.toExponential(1) : q.toFixed(4);
+}
+
+type PsmSortKey = "sequence" | "mass" | "mz" | "charge" | "rt" | "score" | "qValue";
+
+// A right-side drawer listing PSMs with sortable columns and sequence / q-value filters.
+// Rows carry their link status to a detected feature; click a row to extract its XIC.
+function PsmDrawer({
+  psms,
+  links,
+  selected,
+  onSelect,
+  onClose
+}: {
+  psms: readonly Psm[];
+  links: readonly PsmLink[];
+  selected: number | null;
+  onSelect: (index: number) => void;
+  onClose: () => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [maxQ, setMaxQ] = useState("");
+  const [sortKey, setSortKey] = useState<PsmSortKey>("qValue");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  // Filtered + sorted view over PSM indices, so onSelect gets the original index.
+  const rows = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const qMaxRaw = maxQ.trim();
+    const qMax = qMaxRaw === "" ? null : Number(qMaxRaw);
+    const idx = psms
+      .map((_, i) => i)
+      .filter((i) => {
+        const p = psms[i];
+        if (q && !p.fullSequence.toLowerCase().includes(q)) return false;
+        if (qMax !== null && !Number.isNaN(qMax) && p.qValue > qMax) return false;
+        return true;
+      });
+    const keyVal = (p: Psm): number | string => {
+      switch (sortKey) {
+        case "sequence":
+          return p.fullSequence;
+        case "mass":
+          return p.monoisotopicMass;
+        case "mz":
+          return p.precursorMz;
+        case "charge":
+          return p.precursorCharge;
+        case "rt":
+          return p.ms2RetentionTime;
+        case "score":
+          return p.score;
+        case "qValue":
+          return p.qValue;
+      }
+    };
+    idx.sort((a, b) => {
+      const va = keyVal(psms[a]);
+      const vb = keyVal(psms[b]);
+      const cmp =
+        typeof va === "string" ? va.localeCompare(vb as string) : va - (vb as number);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return idx;
+  }, [psms, filter, maxQ, sortKey, sortDir]);
+
+  const shown = rows.slice(0, DRAWER_CAP);
+  const toggleSort = (k: PsmSortKey) => {
+    if (k === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(k);
+      // Sequence + q-value read best ascending; the rest default to descending.
+      setSortDir(k === "sequence" || k === "qValue" ? "asc" : "desc");
+    }
+  };
+  const arrow = (k: PsmSortKey) => (k === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+
+  return (
+    <div style={psmDrawerStyle}>
+      <div style={drawerHeaderStyle}>
+        <strong>
+          PSMs{" "}
+          {rows.length !== psms.length ? `(${rows.length} of ${psms.length})` : `(${psms.length})`}
+        </strong>
+        <button onClick={onClose} style={drawerCloseStyle} type="button">
+          ✕
+        </button>
+      </div>
+      <div style={psmFilterRowStyle}>
+        <input
+          type="text"
+          placeholder="Filter sequence…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          style={psmInputStyle}
+        />
+        <input
+          type="text"
+          inputMode="decimal"
+          placeholder="max q"
+          value={maxQ}
+          onChange={(e) => setMaxQ(e.target.value)}
+          style={{ ...psmInputStyle, width: 64, flex: "0 0 auto" }}
+        />
+      </div>
+      <div style={drawerBodyStyle}>
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thSortStyle} onClick={() => toggleSort("sequence")}>
+                Sequence{arrow("sequence")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("mass")}>
+                Mass{arrow("mass")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("mz")}>
+                m/z{arrow("mz")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("charge")}>
+                z{arrow("charge")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("rt")}>
+                RT{arrow("rt")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("score")}>
+                Score{arrow("score")}
+              </th>
+              <th style={thSortRightStyle} onClick={() => toggleSort("qValue")}>
+                q{arrow("qValue")}
+              </th>
+              <th style={thStyle}>Feat.</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((i) => {
+              const p = psms[i];
+              const linked = links[i]?.featureIndex != null;
+              return (
+                <tr
+                  key={i}
+                  onClick={() => onSelect(i)}
+                  style={i === selected ? rowSelectedStyle : rowStyle}
+                >
+                  <td style={tdSeqStyle} title={p.fullSequence}>
+                    {p.fullSequence}
+                  </td>
+                  <td style={tdStyleRight}>{p.monoisotopicMass.toFixed(2)}</td>
+                  <td style={tdStyleRight}>{p.precursorMz.toFixed(3)}</td>
+                  <td style={tdStyleRight}>{p.precursorCharge}</td>
+                  <td style={tdStyleRight}>
+                    {p.ms2RetentionTime >= 0 ? p.ms2RetentionTime.toFixed(2) : "—"}
+                  </td>
+                  <td style={tdStyleRight}>{p.score.toFixed(2)}</td>
+                  <td style={tdStyleRight}>{formatQ(p.qValue)}</td>
+                  <td
+                    style={{ ...tdStyle, textAlign: "center", color: linked ? "#1e7e34" : "#b9c2cf" }}
+                    title={linked ? "linked to a detected feature" : "no matching feature"}
+                  >
+                    {linked ? "●" : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const drawerStyle: React.CSSProperties = {
   position: "fixed",
   top: 0,
@@ -958,6 +1299,38 @@ const rowStyle: React.CSSProperties = { cursor: "pointer", borderBottom: "1px so
 const rowSelectedStyle: React.CSSProperties = { ...rowStyle, background: "#fdecd6" };
 const tdStyle: React.CSSProperties = { padding: "4px 8px", whiteSpace: "nowrap" };
 const tdStyleRight: React.CSSProperties = { ...tdStyle, textAlign: "right" };
+
+// ---- PSM drawer styles (header + filter row + scrollable table)
+const psmDrawerStyle: React.CSSProperties = {
+  ...drawerStyle,
+  gridTemplateRows: "auto auto 1fr"
+};
+const psmFilterRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  padding: "6px 10px",
+  borderBottom: "1px solid #e3e9f2"
+};
+const psmInputStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  fontSize: "0.72rem",
+  padding: "3px 6px",
+  border: "1px solid #cdd8e8",
+  borderRadius: 4
+};
+const thSortStyle: React.CSSProperties = { ...thStyle, cursor: "pointer", userSelect: "none" };
+const thSortRightStyle: React.CSSProperties = {
+  ...thStyleRight,
+  cursor: "pointer",
+  userSelect: "none"
+};
+const tdSeqStyle: React.CSSProperties = {
+  ...tdStyle,
+  maxWidth: 148,
+  overflow: "hidden",
+  textOverflow: "ellipsis"
+};
 
 // ---- walkthrough drawer styles
 const ladderHintStyle: React.CSSProperties = {

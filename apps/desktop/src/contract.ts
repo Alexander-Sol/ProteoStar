@@ -89,6 +89,9 @@ export interface ViewerError {
     | "SCAN_OUT_OF_RANGE"
     | "EMPTY_INDEX"
     | "THERMO_RUNTIME_MISSING"
+    | "PSM_READ"
+    | "FEATURE_READ"
+    | "FEATURE_PARSE"
     | "INTERNAL";
   message: string;
 }
@@ -116,6 +119,36 @@ export interface Feature {
   summedIntensity: number;
   crossChargeSupport: number;
   numMembers: number;
+}
+
+// ---------------------------------------------------------------------- PSMs
+// A MetaMorpheus PSM (one `.psmtsv` row), returned by the `load_psms` command.
+// Independent of any open dataset; linked to a detected feature client-side.
+
+export interface Psm {
+  fullSequence: string;
+  monoisotopicMass: number;
+  precursorCharge: number;
+  /** Theoretical precursor m/z (mass + charge) — the XIC fallback for an unlinked PSM. */
+  precursorMz: number;
+  /** MS2 retention time (min); -1 when the psmtsv omits it. */
+  ms2RetentionTime: number;
+  /** One-based MS2 scan number; -1 when the psmtsv omits it. Used to pull the identified spectrum. */
+  ms2ScanNumber: number;
+  qValue: number;
+  score: number;
+  fileName: string;
+  isDecoy: boolean;
+}
+
+// The result of joining one PSM to the detected-feature list (mass + RT + charge).
+export interface PsmLink {
+  /** Index into the `features` array, or null when the PSM matched no feature. */
+  featureIndex: number | null;
+  /** |Δmass| in ppm against the linked feature, or null when unlinked. */
+  massPpmError: number | null;
+  /** MS2 RT − feature apex RT (min), or null when unlinked or RT is unavailable. */
+  rtDelta: number | null;
 }
 
 // ---------------------------------------------------------- ladder walkthrough
@@ -191,6 +224,11 @@ export interface DatasetProvider {
   /** On-demand MS1 spectrum nearest a retention time; works before the peak index is built. */
   getSpectrumAtRt(
     retentionTime: number,
+    opts?: { mzRange?: NumericRange; maxPeaks?: number }
+  ): Promise<Spectrum>;
+  /** On-demand MSn spectrum by one-based scan number (a PSM's `Scan Number`); no peak index needed. */
+  getMs2Spectrum(
+    scanNumber: number,
     opts?: { mzRange?: NumericRange; maxPeaks?: number }
   ): Promise<Spectrum>;
   getMs2ForPrecursor(mz: number, ms1ScanIndex: number): Promise<readonly ScanSummary[]>;

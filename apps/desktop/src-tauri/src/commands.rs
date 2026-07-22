@@ -462,28 +462,29 @@ pub async fn get_tic_trace(
     let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
     let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
-    if !d.tic_rt.is_empty() {
-        // Served from the native instrument TIC read on the fast path — available immediately,
-        // before the peak index exists. The `scanIndex` here is the TIC point's ordinal, not an
-        // MS1 scan index (the native TIC spans all MS levels); TIC clicks navigate by RT, which
-        // `get_nearest_scan` resolves to a real scan once indexing is done.
-        for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
-            if in_rt_window(t, rt_min, rt_max) {
-                rt.push(t as f32);
-                intensity.push(inten);
-                scan_index.push(i as u32);
-            }
-        }
-    } else if let Some(idx) = d.indexed.lock().ok().and_then(|g| {
+    let indexed = d.indexed.lock().ok().and_then(|g| {
         g.as_ref().map(|i| (i.scans.clone(), i.tic.clone()))
-    }) {
-        // No native TIC (e.g. an mzML without a TIC chromatogram): fall back to the per-scan
-        // summed-centroid TIC once the index is built. Here `scanIndex` *is* the MS1 scan index.
-        let (scans, tic) = idx;
+    });
+    if let Some((scans, tic)) = indexed {
+        // Preferred once the index is built: the per-scan summed-centroid **MS1-only** TIC. The
+        // native instrument TIC (fast path below) interleaves MS2 points, which reads as a jagged
+        // saw-tooth; summing only MS1 scans gives the smooth, continuous chromatogram. Here
+        // `scanIndex` *is* the MS1 scan index.
         for (i, s) in scans.iter().enumerate() {
             if in_rt_window(s.retention_time, rt_min, rt_max) {
                 rt.push(s.retention_time as f32);
                 intensity.push(tic[i]);
+                scan_index.push(i as u32);
+            }
+        }
+    } else if !d.tic_rt.is_empty() {
+        // Pre-index fast path: the native instrument TIC read on open (all MS levels), so the
+        // viewer can paint *something* in ~1-2 s. The frontend re-fetches once indexing lands,
+        // swapping in the MS1-only trace above. `scanIndex` here is the TIC point's ordinal.
+        for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
+            if in_rt_window(t, rt_min, rt_max) {
+                rt.push(t as f32);
+                intensity.push(inten);
                 scan_index.push(i as u32);
             }
         }
@@ -560,7 +561,8 @@ fn build_spectrum_response(
     metadata.insert("scanIndex".into(), scan_index.to_string());
     metadata.insert("oneBasedScanNumber".into(), s.one_based_scan_number.max(0).to_string());
     metadata.insert("retentionTime".into(), s.retention_time.to_string());
-    metadata.insert("msLevel".into(), "1".to_string());
+    // Real MS level (1 for the MS1 reads; 2+ for an MS2 scan pulled by scan number).
+    metadata.insert("msLevel".into(), s.msn_order.max(1).to_string());
 
     let bytes = arrow_out::build_spectrum(mz, intensity, metadata)
         .map_err(|e| ViewerError::internal(e.to_string()))?;
@@ -617,6 +619,42 @@ pub async fn get_spectrum_at_rt(
     // No MS1 ordinal exists pre-index; report the file spectrum index (one_based − 1).
     let file_index = (s.one_based_scan_number as i64 - 1).max(-1);
     build_spectrum_response(&s, file_index, mz_min, mz_max, max_peaks)
+}
+
+/// Fetch a specific MS2 (or MSn) spectrum by its **one-based scan number** — the `Scan Number`
+/// a MetaMorpheus PSM carries. Read on demand from the kept-open reader by file index
+/// (`scan_number - 1`), so it needs no peak index (which is MS1-only anyway). This is how a
+/// selected PSM shows its identified fragment spectrum.
+#[tauri::command]
+pub async fn get_ms2_spectrum(
+    handle: u64,
+    scan_number: i32,
+    mz_min: Option<f64>,
+    mz_max: Option<f64>,
+    max_peaks: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Response, ViewerError> {
+    if scan_number < 1 {
+        return Err(ViewerError::new("SCAN_OUT_OF_RANGE", "scan number must be >= 1"));
+    }
+    let reader = {
+        let datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
+        d.reader.clone()
+    };
+    // Read off the async runtime: a single-scan `.raw` read crosses into the .NET runtime.
+    let scan = tauri::async_runtime::spawn_blocking(move || {
+        let mut r = reader.lock().map_err(|e| e.to_string())?;
+        Ok::<Option<Scan>, String>(r.scan_by_one_based_number(scan_number))
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("MS2 read task failed: {e}")))?
+    .map_err(ViewerError::internal)?;
+
+    let Some(s) = scan else {
+        return Err(ViewerError::new("NO_SCAN", format!("no scan with number {scan_number}")));
+    };
+    build_spectrum_response(&s, scan_number as i64, mz_min, mz_max, max_peaks)
 }
 
 #[tauri::command]
@@ -749,6 +787,72 @@ fn parse_resolved_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
 /// Neutral monoisotopic mass → m/z at a given charge.
 pub fn mass_to_mz(mass: f64, charge: i32) -> f64 {
     (mass + charge as f64 * PROTON_MASS) / charge.max(1) as f64
+}
+
+// ------------------------------------------------------------------------ PSMs
+
+/// One MetaMorpheus PSM (`.psmtsv` row), reduced to the fields the selector, the
+/// feature link, the XIC extraction, and the MS2 spectrum pull actually use. Ten-column
+/// read cap: the reader (`psm_tsv::Identification`) now resolves ten columns; we surface
+/// nine of them — dropping the redundant base sequence (the full sequence is what we
+/// display and filter on) — plus the derived theoretical precursor `mz`. Linking to a
+/// detected feature is done client-side (mass + RT + charge join) where the feature list lives.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Psm {
+    /// Full (modified) sequence — the display + filter key.
+    pub full_sequence: String,
+    /// Peptide monoisotopic (neutral) mass in daltons.
+    pub monoisotopic_mass: f64,
+    /// Precursor charge state.
+    pub precursor_charge: i32,
+    /// Theoretical precursor m/z derived from mass + charge — the XIC fallback when the
+    /// PSM links to no detected feature.
+    pub precursor_mz: f64,
+    /// MS2 retention time (minutes); `-1.0` when the psmtsv omits it.
+    pub ms2_retention_time: f64,
+    /// One-based MS2 scan number; `-1` when the psmtsv omits it. Used to pull the exact
+    /// identified MS2 spectrum for display when the PSM is selected.
+    pub ms2_scan_number: i32,
+    /// PSM q-value.
+    pub q_value: f64,
+    /// PSM score.
+    pub score: f64,
+    /// Source spectra-file name (extension stripped), for filtering to the open run.
+    pub file_name: String,
+    /// Decoy flag (the `Decoy/Contaminant/Target` cell contained a `D`).
+    pub is_decoy: bool,
+}
+
+/// Parse a MetaMorpheus `.psmtsv` into [`Psm`] rows. Reads the file via the parity-tested
+/// `psm_tsv` reader and computes each row's theoretical precursor m/z. Independent of any
+/// open dataset — PSMs are overlaid on the raw data like features.
+#[tauri::command]
+pub async fn load_psms(path: String) -> Result<Vec<Psm>, ViewerError> {
+    let ids = flashlfq_core::psm_tsv::read_identifications(&path)
+        .map_err(|e| ViewerError::new("PSM_READ", format!("{path}: {e}")))?;
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let precursor_mz = if id.precursor_charge_state > 0 {
+                mass_to_mz(id.monoisotopic_mass, id.precursor_charge_state)
+            } else {
+                0.0
+            };
+            Psm {
+                full_sequence: id.modified_sequence,
+                monoisotopic_mass: id.monoisotopic_mass,
+                precursor_charge: id.precursor_charge_state,
+                precursor_mz,
+                ms2_retention_time: id.ms2_retention_time_in_minutes,
+                ms2_scan_number: id.ms2_scan_number,
+                q_value: id.q_value,
+                score: id.score,
+                file_name: id.file_name,
+                is_decoy: id.is_decoy,
+            }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------- in-app detection

@@ -85,6 +85,16 @@ export async function openDataset(
         })
       ),
 
+    getMs2Spectrum: async (scanNumber, o = {}) =>
+      decodeSpectrum(
+        await arrow("get_ms2_spectrum", {
+          scanNumber,
+          mzMin: o.mzRange?.min,
+          mzMax: o.mzRange?.max,
+          maxPeaks: o.maxPeaks
+        })
+      ),
+
     getMs2ForPrecursor: (mz, ms1ScanIndex) =>
       invoke("get_ms2_for_precursor", { handle, mz, ms1ScanIndex })
   };

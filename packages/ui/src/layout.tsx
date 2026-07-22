@@ -94,48 +94,44 @@ export function PanelActionButton({
 const shellStyle: CSSProperties = {
   height: "100vh",
   overflow: "hidden",
-  padding: "8px clamp(8px, 1.5vw, 16px)",
+  padding: "4px clamp(8px, 1.5vw, 16px) 6px",
   display: "grid",
   gridTemplateRows: "auto 1fr",
-  gap: 6
+  gap: 4
 };
 
 const headerStyle: CSSProperties = {
   display: "flex",
-  alignItems: "flex-start",
+  alignItems: "center",
   justifyContent: "space-between",
-  gap: 16,
+  gap: 12,
   flexWrap: "wrap"
 };
 
+// The eyebrow is folded inline before the title to keep the header to a single tight line.
 const eyebrowStyle: CSSProperties = {
-  margin: 0,
-  fontSize: "0.65rem",
-  textTransform: "uppercase",
-  letterSpacing: "0.12em",
-  color: "#4b6486",
-  fontWeight: 700
+  display: "none"
 };
 
 const titleStyle: CSSProperties = {
-  margin: "2px 0 0",
-  fontSize: "clamp(0.95rem, 1.5vw, 1.2rem)",
-  lineHeight: 1.05,
+  margin: 0,
+  fontSize: "clamp(0.85rem, 1.1vw, 1rem)",
+  lineHeight: 1.1,
   color: "#13253d"
 };
 
 const subtitleStyle: CSSProperties = {
-  margin: "3px 0 0",
-  fontSize: "0.75rem",
-  lineHeight: 1.4,
-  maxWidth: 560,
+  margin: 0,
+  fontSize: "0.66rem",
+  lineHeight: 1.25,
+  maxWidth: 620,
   color: "#506279"
 };
 
 const toolbarStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 12,
+  gap: 8,
   flexWrap: "wrap"
 };
 
@@ -214,8 +210,8 @@ function buttonStyle(pressed: boolean): CSSProperties {
     backgroundColor: pressed ? "#eef0ff" : "#f9fbfe",
     color: pressed ? "#3730a3" : "#30445f",
     borderRadius: 999,
-    padding: "0.55rem 0.9rem",
-    fontSize: "0.9rem",
+    padding: "0.25rem 0.7rem",
+    fontSize: "0.76rem",
     fontWeight: 600,
     cursor: "pointer"
   };

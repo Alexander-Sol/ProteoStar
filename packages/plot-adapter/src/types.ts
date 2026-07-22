@@ -26,6 +26,12 @@ export interface TicPlotTrace {
   points: readonly TicPlotPoint[];
   selectedScanIndex: number | null;
   color: string;
+  /** When any trace sets this, the y-axis auto-range is driven by those traces alone (others
+   *  keep their true absolute height but are free to clip out of view). A summed-XIC overlay
+   *  sets it so the plot zooms to the XIC's abundance while the much taller TIC runs off the top. */
+  yScale?: boolean;
+  /** Hover-series name for this trace (defaults to the plot's `yTitle`). */
+  label?: string;
 }
 
 export interface SpectrumPlotTrace {
@@ -79,6 +85,8 @@ export interface TicPlotProps {
   featureRug?: readonly FeatureMarker[];
   /** Shaded RT band(s) — typically the selected feature's elution extent (optional). */
   regions?: readonly RtRegion[];
+  /** y-axis label + hover series name (default "TIC"). Set to "XIC" for chromatogram reuse. */
+  yTitle?: string;
   onEvent(event: TicPlotEvent): void;
 }
 
