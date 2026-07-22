@@ -87,6 +87,11 @@ export interface TicPlotProps {
   regions?: readonly RtRegion[];
   /** y-axis label + hover series name (default "TIC"). Set to "XIC" for chromatogram reuse. */
   yTitle?: string;
+  /** Plotly `uirevision`. While this value is unchanged, the user's interactive zoom/pan is
+   *  preserved across re-renders (so e.g. clicking a point to load a spectrum doesn't snap the
+   *  view back to the prop range). Change it to intentionally re-apply the range props (reframe).
+   *  Leave undefined to keep the legacy behaviour (every render re-applies the range). */
+  uirevision?: string | number;
   onEvent(event: TicPlotEvent): void;
 }
 
@@ -96,5 +101,8 @@ export interface SpectrumPlotProps {
   rangeSelectionEnabled: boolean;
   /** Predicted isotope-peak m/z lines overlaid on the spectrum (optional). */
   envelope?: readonly EnvelopeLine[];
+  /** Plotly `uirevision`: while unchanged, the user's interactive zoom/pan is preserved across
+   *  re-renders (e.g. stepping scans with the arrow keys). Change it to re-apply the range props. */
+  uirevision?: string | number;
   onEvent(event: SpectrumPlotEvent): void;
 }

@@ -87,13 +87,34 @@ export function App() {
   const [selectedPsm, setSelectedPsm] = useState<number | null>(null);
   const [psmDrawerOpen, setPsmDrawerOpen] = useState(false);
 
-  // Per-isotope XIC traces for the selected PSM (index 0 = monoisotopic), extracted over the
-  // whole run. Summed into one envelope trace overlaid on the TIC (secondary y-axis).
+  // XICs of the selected PSM's most-abundant isotopologues, extracted over the whole run and
+  // overlaid on the TIC. `xicMode` toggles between one summed-envelope trace and one trace per
+  // isotopologue; `xicIndices` are the isotope indices of `xic`'s traces (for labelling).
   const [xic, setXic] = useState<XicPoint[][]>([]);
+  const [xicIndices, setXicIndices] = useState<number[]>([]);
+  const [xicMode, setXicMode] = useState<"sum" | "isotopes">("sum");
   const [xicLabel, setXicLabel] = useState<string | null>(null);
 
   const [ticViewport, setTicViewport] = useState<PlotViewport>(createDefaultViewport());
   const [spectrumViewport, setSpectrumViewport] = useState<PlotViewport>(createDefaultViewport());
+
+  // Plotly `uirevision` for the TIC: bumped only when we intentionally reframe (new file, feature
+  // or PSM selection, reset-zoom), so the user's interactive zoom survives ordinary re-renders
+  // (e.g. clicking an XIC point to load a spectrum) instead of snapping back to the prop range.
+  const [ticUiRev, setTicUiRev] = useState(0);
+  const reframeTic = useCallback((vp: PlotViewport) => {
+    setTicViewport(vp);
+    setTicUiRev((r) => r + 1);
+  }, []);
+
+  // Same idea for the spectrum: bumped only on an intentional reframe (feature / PSM selection,
+  // walkthrough comb framing, reset-zoom), so the user's zoom stays put while stepping scans with
+  // the arrow keys or loading a scan by clicking the TIC/XIC — neither of which reframes.
+  const [spectrumUiRev, setSpectrumUiRev] = useState(0);
+  const reframeSpectrum = useCallback((vp: PlotViewport) => {
+    setSpectrumViewport(vp);
+    setSpectrumUiRev((r) => r + 1);
+  }, []);
 
   const [ticPinned, setTicPinned] = useState(false);
   const [spectrumPinned, setSpectrumPinned] = useState(false);
@@ -121,7 +142,7 @@ export function App() {
     setSpectrum(null);
     setScanSummaries([]);
     setSelected(null);
-    setTicViewport(createDefaultViewport());
+    reframeTic(createDefaultViewport());
     try {
       const { handle: h, provider: p } = await openDataset(picked, (progress) => {
         setLoad({ status: "loading", message: `${progress.phase}…` });
@@ -142,7 +163,7 @@ export function App() {
     } catch (err) {
       setLoad({ status: "error", message: errMessage(err) });
     }
-  }, []);
+  }, [reframeTic]);
 
   const handleOpenFile = useCallback(async () => {
     const picked = await openFileDialog({
@@ -316,11 +337,11 @@ export function App() {
       setSelected(index);
 
       const pad = Math.max(0.2, (f.rtEnd - f.rtStart) * 0.6);
-      setTicViewport({ xMin: f.rtStart - pad, xMax: f.rtEnd + pad });
+      reframeTic({ xMin: f.rtStart - pad, xMax: f.rtEnd + pad });
 
       const z = f.primaryCharge || f.chargeStates[0] || 1;
       const grid = isotopeGrid(f.monoisotopicMass, z, 12);
-      setSpectrumViewport({ xMin: grid[0] - 1.5, xMax: grid[grid.length - 1] + 1.5 });
+      reframeSpectrum({ xMin: grid[0] - 1.5, xMax: grid[grid.length - 1] + 1.5 });
 
       // On-demand read by RT — available immediately (no wait on the peak index).
       if (provider && !spectrumPinned) {
@@ -331,7 +352,7 @@ export function App() {
         }
       }
     },
-    [features, provider, spectrumPinned]
+    [features, provider, spectrumPinned, reframeTic, reframeSpectrum]
   );
 
   // ------------------------------------------------------------- select a PSM
@@ -353,7 +374,7 @@ export function App() {
       const charge = feature ? feature.primaryCharge || psm.precursorCharge : psm.precursorCharge;
 
       // Full-RT view so the summed XIC is visible over the entire chromatogram.
-      setTicViewport(createDefaultViewport());
+      reframeTic(createDefaultViewport());
       setXicLabel(
         `${psm.fullSequence} · z${charge} · ${mass.toFixed(2)} Da` +
           (feature ? "" : " · no feature (theoretical m/z)")
@@ -362,7 +383,12 @@ export function App() {
       // XIC over the entire RT range (no rtRange) so it spans the whole TIC.
       if (provider && charge > 0 && mass > 0) {
         try {
-          setXic(await fetchIsotopeXics(provider, mass, charge, { numIsotopes: 3, maxPoints: 4000 }));
+          const iso = await fetchIsotopeXics(provider, mass, charge, {
+            numIsotopes: 3,
+            maxPoints: 4000
+          });
+          setXic(iso.traces);
+          setXicIndices(iso.indices);
         } catch (err) {
           setLoad({ status: "error", message: errMessage(err) });
         }
@@ -370,7 +396,7 @@ export function App() {
       // Identified MS2 spectrum by its Scan Number; fall back to the MS1 at the PSM's RT when
       // the psmtsv gave no scan number.
       if (provider && !spectrumPinned) {
-        setSpectrumViewport(createDefaultViewport()); // full m/z range for the fragment spectrum
+        reframeSpectrum(createDefaultViewport()); // full m/z range for the fragment spectrum
         try {
           if (psm.ms2ScanNumber > 0) {
             setSpectrum(await provider.getMs2Spectrum(psm.ms2ScanNumber));
@@ -382,7 +408,7 @@ export function App() {
         }
       }
     },
-    [psms, psmLinks, features, provider, spectrumPinned]
+    [psms, psmLinks, features, provider, spectrumPinned, reframeTic, reframeSpectrum]
   );
 
   // Click the TIC background → nearest scan's spectrum (unless the spectrum is pinned).
@@ -471,7 +497,7 @@ export function App() {
         setLadderBusy(false);
       }
     },
-    [handle, spectrum, spectrumPinned]
+    [handle, spectrum, spectrumPinned, reframeSpectrum]
   );
 
   // Click a spectrum peak (walkthrough only) → make it the seed at the current zSeed (frame it).
@@ -504,15 +530,16 @@ export function App() {
       const lo = Math.min(...mzs);
       const hi = Math.max(...mzs);
       const pad = Math.max(0.5, (hi - lo) * 0.12);
-      setSpectrumViewport({ xMin: lo - pad, xMax: hi + pad });
+      reframeSpectrum({ xMin: lo - pad, xMax: hi + pad });
     },
-    [ladder, spectrumPinned]
+    [ladder, spectrumPinned, reframeSpectrum]
   );
 
   // ----------------------------------------------------------------- overlays
-  // TIC plus, when a PSM is selected, its summed isotope XIC drawn on the *same absolute* axis
-  // (true abundance, not normalised). The XIC opts into `yScale`, so the y-axis zooms to the
-  // XIC's height and the much taller TIC runs off the top of the view.
+  // TIC plus, when a PSM is selected, its isotope XICs drawn on the *same absolute* axis (true
+  // abundance, not normalised). `xicMode` toggles between one summed-envelope trace and one trace
+  // per isotopologue. Every XIC trace opts into `yScale`, so the y-axis zooms to the XIC height and
+  // the much taller TIC runs off the top of the view.
   const ticTraces = useMemo<TicPlotTrace[]>(() => {
     const traces: TicPlotTrace[] = [
       {
@@ -523,17 +550,30 @@ export function App() {
       }
     ];
     if (xic.length > 0) {
-      traces.push({
-        slotIndex: 0,
-        points: sumXics(xic),
-        selectedScanIndex: null,
-        color: SELECTED_COLOR,
-        yScale: true,
-        label: "XIC"
-      });
+      if (xicMode === "sum") {
+        traces.push({
+          slotIndex: 0,
+          points: sumXics(xic),
+          selectedScanIndex: null,
+          color: SELECTED_COLOR,
+          yScale: true,
+          label: "XIC (Σ isotopes)"
+        });
+      } else {
+        xic.forEach((points, k) => {
+          traces.push({
+            slotIndex: 0,
+            points,
+            selectedScanIndex: null,
+            color: chargeColor(k + 1),
+            yScale: true,
+            label: `M+${xicIndices[k] ?? k}`
+          });
+        });
+      }
     }
     return traces;
-  }, [ticPoints, spectrum, xic]);
+  }, [ticPoints, spectrum, xic, xicIndices, xicMode]);
 
   const featureRug = useMemo<FeatureMarker[]>(
     () =>
@@ -691,7 +731,7 @@ export function App() {
             title="Total ion chromatogram"
             subtitle={
               xicLabel
-                ? `XIC (orange, absolute abundance): ${xicLabel}`
+                ? `${xicMode === "sum" ? "XIC Σ isotopes" : `XIC isotopologues M+${xicIndices.join(", M+")}`} (absolute abundance): ${xicLabel}`
                 : selectedFeature
                   ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}`
                   : featuresFile
@@ -700,8 +740,24 @@ export function App() {
             }
             actions={
               <>
-                {ticViewport.xMin !== null ? (
-                  <PanelActionButton onClick={() => setTicViewport(createDefaultViewport())}>
+                {xic.length > 0 ? (
+                  <>
+                    <PanelActionButton
+                      pressed={xicMode === "sum"}
+                      onClick={() => setXicMode("sum")}
+                    >
+                      XIC: Σ
+                    </PanelActionButton>
+                    <PanelActionButton
+                      pressed={xicMode === "isotopes"}
+                      onClick={() => setXicMode("isotopes")}
+                    >
+                      XIC: isotopes
+                    </PanelActionButton>
+                  </>
+                ) : null}
+                {ticPoints.length > 0 ? (
+                  <PanelActionButton onClick={() => reframeTic(createDefaultViewport())}>
                     Reset zoom
                   </PanelActionButton>
                 ) : null}
@@ -740,6 +796,7 @@ export function App() {
             viewport={ticViewport}
             featureRug={featureRug}
             regions={regions}
+            uirevision={ticUiRev}
             rangeSelectionEnabled={false}
             onEvent={(e) => {
               if (e.type === "area-click") void handleAreaClick(e.retentionTime);
@@ -769,8 +826,8 @@ export function App() {
             }
             actions={
               <>
-                {spectrumViewport.xMin !== null ? (
-                  <PanelActionButton onClick={() => setSpectrumViewport(createDefaultViewport())}>
+                {spectrumTraces.length > 0 ? (
+                  <PanelActionButton onClick={() => reframeSpectrum(createDefaultViewport())}>
                     Reset zoom
                   </PanelActionButton>
                 ) : null}
@@ -796,6 +853,7 @@ export function App() {
             traces={spectrumTraces}
             viewport={spectrumViewport}
             envelope={spectrumEnvelope}
+            uirevision={spectrumUiRev}
             rangeSelectionEnabled={false}
             onEvent={(e) => {
               if (e.type === "peak-click") handlePeakClick(e.peak.mz);

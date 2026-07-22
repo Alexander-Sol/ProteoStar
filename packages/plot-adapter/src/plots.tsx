@@ -61,6 +61,9 @@ export function TicPlot(props: TicPlotProps): ReactElement {
       gridcolor: "#dfe7f2",
       zeroline: false
     },
+    // Preserve interactive zoom/pan across re-renders while this is stable; the caller bumps it
+    // to intentionally re-apply the range props (reframe). Undefined → legacy re-apply-every-render.
+    uirevision: props.uirevision,
     shapes: buildRegionShapes(regions),
     showlegend: false,
     hovermode: "closest"
@@ -250,6 +253,9 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       gridcolor: "#dfe7f2",
       zeroline: false
     },
+    // Preserve interactive zoom/pan across re-renders (e.g. arrow-key scan stepping) while stable;
+    // the caller bumps it to intentionally re-apply the range props (reframe).
+    uirevision: props.uirevision,
     shapes: buildEnvelopeShapes(envelope),
     showlegend: false,
     hovermode: "closest",

@@ -93,7 +93,7 @@ export function linkPsms(
 }
 
 export interface IsotopeXicOptions {
-  /** How many isotope peaks to trace (mono, +1, …). Default 3. */
+  /** How many (most abundant) isotope peaks to trace. Default 3. */
   numIsotopes?: number;
   /** Half-width of each isotope's m/z extraction window, in ppm. Default 15. */
   halfWindowPpm?: number;
@@ -101,30 +101,75 @@ export interface IsotopeXicOptions {
   maxPoints?: number;
 }
 
+/** One species' isotope XICs plus the isotope indices they correspond to (for labelling). */
+export interface IsotopeXics {
+  /** Isotope indices traced, ascending (0 = monoisotopic). e.g. `[0,1,2]` for a small peptide,
+   *  `[6,7,8]` for a large proteoform whose envelope apex sits well above the monoisotope. */
+  indices: number[];
+  /** One XIC per entry in `indices`, aligned by position (all share the same scan set). */
+  traces: XicPoint[][];
+}
+
 /**
- * Extract one XIC per isotope for a species at (`mass`, `charge`). Each isotope's m/z comes
- * from the averagine ladder and is summed over a ±`halfWindowPpm` window per scan via the
- * existing `getRangeXic` path. Returns one `XicPoint[]` per isotope, index 0 = monoisotopic.
- * All traces share the same scan set (same RT window + decimation), so they align by index —
- * the summed-envelope view just adds them position-wise.
+ * Approximate relative isotopologue abundances for a neutral `mass`, as a Poisson distribution in
+ * the number of heavy isotopes. ¹³C dominates a peptide/protein envelope: averagine has ≈4.9384 C
+ * per ~111.05 Da residue and ¹³C occurs at ≈1.07%, giving a Poisson mean λ ≈ mass · 4.76e-4. Good
+ * enough to pick *which* isotopologues are the tallest (the only use here); it ignores N/O/S/H
+ * heavy isotopes, which only slightly broaden the real envelope. Values are unnormalised.
+ */
+export function isotopeAbundances(mass: number, count: number): number[] {
+  const lambda = Math.max(0, mass * 4.757e-4);
+  const out = new Array<number>(count);
+  let term = Math.exp(-lambda); // Poisson pmf at k = 0
+  for (let k = 0; k < count; k++) {
+    out[k] = term;
+    term = (term * lambda) / (k + 1); // pmf(k+1) = pmf(k) · λ/(k+1)
+  }
+  return out;
+}
+
+/** Indices of the `n` most abundant isotopologues for `mass` (see [`isotopeAbundances`]), returned
+ *  in ascending index order. For a small peptide this is `[0,…,n-1]`; for a large proteoform it is
+ *  the `n` peaks straddling the envelope apex (which sits above the monoisotope). */
+export function topIsotopeIndices(mass: number, n: number): number[] {
+  const lambda = Math.max(0, mass * 4.757e-4);
+  const count = Math.max(n, Math.ceil(lambda) + 4); // search a window that covers the apex
+  return isotopeAbundances(mass, count)
+    .map((a, i) => [a, i] as const)
+    .sort((x, y) => y[0] - x[0])
+    .slice(0, n)
+    .map(([, i]) => i)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * Extract one XIC for each of the `numIsotopes` most abundant isotopologues of a species at
+ * (`mass`, `charge`). Each isotope's m/z comes from the averagine ladder ([`isotopeGrid`]) and is
+ * summed over a ±`halfWindowPpm` window per scan via the existing `getRangeXic` path. Returns the
+ * traced isotope indices and one `XicPoint[]` per index (aligned by position; all share the same
+ * scan set, so the summed-envelope view just adds them position-wise).
  */
 export async function fetchIsotopeXics(
   provider: DatasetProvider,
   mass: number,
   charge: number,
   opts: IsotopeXicOptions = {}
-): Promise<XicPoint[][]> {
+): Promise<IsotopeXics> {
   const num = opts.numIsotopes ?? 3;
   const halfPpm = opts.halfWindowPpm ?? 15;
-  const grid = isotopeGrid(mass, charge, num);
-  return Promise.all(
-    grid.map((mz) => {
+  const indices = topIsotopeIndices(mass, num);
+  const maxIdx = indices.length > 0 ? indices[indices.length - 1] : 0;
+  const grid = isotopeGrid(mass, charge, maxIdx + 1);
+  const traces = await Promise.all(
+    indices.map((k) => {
+      const mz = grid[k];
       const half = (mz * halfPpm) / 1e6;
       return provider
         .getRangeXic(mz - half, mz + half, { rtRange: opts.rtRange, maxPoints: opts.maxPoints })
         .then((pts) => [...pts]);
     })
   );
+  return { indices, traces };
 }
 
 /** Sum aligned per-isotope XICs into a single envelope trace (position-wise; all share scans). */
