@@ -203,6 +203,23 @@ export async function clickButtonByText(page: TauriPage, substr: string): Promis
   );
 }
 
+/** Click the spectrum panel's own "Reset zoom" button (the TIC panel has one too — target the one
+ *  in the same panel <section> as the m/z spectrum plot). Throws if it isn't present. */
+export async function clickSpectrumResetZoom(page: TauriPage): Promise<void> {
+  await ev(
+    page,
+    `${FIND_GD("m/z")}
+     if (!gd) throw new Error('spectrum plot not found');
+     var sec = gd.closest('section');
+     if (!sec) throw new Error('spectrum panel <section> not found');
+     var btn = Array.prototype.slice.call(sec.querySelectorAll('button'))
+       .find(function(b){ return (b.textContent || '').indexOf('Reset zoom') >= 0; });
+     if (!btn) throw new Error('spectrum Reset zoom button not found');
+     btn.click();
+     return true;`,
+  );
+}
+
 /** Seed the walkthrough charge-ladder by firing a peak-click at m/z `mz` on the spectrum (the same
  *  event a user's click produces). Only has an effect while the walkthrough is on. */
 export async function seedLadderAt(page: TauriPage, mz: number, intensity: number): Promise<void> {

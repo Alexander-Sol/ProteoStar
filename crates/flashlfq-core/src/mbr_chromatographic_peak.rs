@@ -157,6 +157,7 @@ mod tests {
             modified_sequence: modified.to_string(),
             monoisotopic_mass: 799.36,
             ms2_retention_time_in_minutes: -1.0,
+            ms2_scan_number: -1,
             precursor_charge_state: 2,
             score: 10.0,
             q_value: 0.001,

@@ -66,6 +66,9 @@ pub struct Identification {
     pub monoisotopic_mass: f64,
     /// MS2 retention time in minutes (`Ms2RetentionTimeInMinutes`); `-1.0` when absent/blank.
     pub ms2_retention_time_in_minutes: f64,
+    /// One-based MS2 scan number (`Scan Number`); `-1` when the column is absent/unparseable.
+    /// Not read by FlashLFQ itself — kept so a viewer can pull the exact identified MS2 scan.
+    pub ms2_scan_number: i32,
     /// Precursor charge state (`PrecursorChargeState`).
     pub precursor_charge_state: i32,
     /// PSM score (`PsmScore`).
@@ -118,6 +121,7 @@ impl std::error::Error for PsmTsvError {}
 struct HeaderMap {
     file_name: usize,
     scan_retention_time: Option<usize>,
+    scan_number: Option<usize>,
     precursor_charge: usize,
     base_sequence: usize,
     full_sequence: usize,
@@ -146,6 +150,7 @@ impl HeaderMap {
         Ok(HeaderMap {
             file_name: required("File Name")?,
             scan_retention_time: index_of("Scan Retention Time"),
+            scan_number: index_of("Scan Number"),
             precursor_charge: required("Precursor Charge")?,
             base_sequence: required("Base Sequence")?,
             full_sequence: required("Full Sequence")?,
@@ -320,6 +325,11 @@ pub fn read_identifications_from_str(text: &str) -> Result<Vec<Identification>, 
             }
             None => -1.0,
         };
+        // Scan Number is a plain integer; parse via f64 to tolerate a trailing ".0".
+        let ms2_scan_number = match map.scan_number {
+            Some(idx) => cell(&record, idx).parse::<f64>().map(|f| f as i32).unwrap_or(-1),
+            None => -1,
+        };
 
         out.push(Identification {
             file_name: file_name_without_extension(cell(&record, map.file_name)),
@@ -327,6 +337,7 @@ pub fn read_identifications_from_str(text: &str) -> Result<Vec<Identification>, 
             modified_sequence: cell(&record, map.full_sequence).to_string(),
             monoisotopic_mass: parse_monoisotopic_mass(cell(&record, map.monoisotopic_mass)),
             ms2_retention_time_in_minutes: ms2_rt,
+            ms2_scan_number,
             precursor_charge_state: parse_charge(cell(&record, map.precursor_charge), row)?,
             score,
             q_value,
@@ -388,9 +399,9 @@ mod tests {
     #[test]
     fn small_inline_psmtsv_parses() {
         // Minimal psmtsv with the FlashLFQ layout (no `Accession`, has `Peptide Monoisotopic Mass`).
-        let text = "File Name\tScan Retention Time\tPrecursor Charge\tBase Sequence\tFull Sequence\tPeptide Monoisotopic Mass\tScore\tDecoy/Contaminant/Target\tQValue\n\
-                    run1.mzML\t79.12\t3.00000\tPEPTIDE\tPEP[mod]TIDE\t799.35996\t23.287\tT\t0.01\n\
-                    run2\t81.25\t2.00000\tAA(silac)CC\tAACC\t1000.0|2000.0\t10.0\tD\t0.0\n";
+        let text = "File Name\tScan Number\tScan Retention Time\tPrecursor Charge\tBase Sequence\tFull Sequence\tPeptide Monoisotopic Mass\tScore\tDecoy/Contaminant/Target\tQValue\n\
+                    run1.mzML\t1611\t79.12\t3.00000\tPEPTIDE\tPEP[mod]TIDE\t799.35996\t23.287\tT\t0.01\n\
+                    run2\t\t81.25\t2.00000\tAA(silac)CC\tAACC\t1000.0|2000.0\t10.0\tD\t0.0\n";
         let ids = read_identifications_from_str(text).expect("parses");
         assert_eq!(ids.len(), 2);
 
@@ -400,6 +411,7 @@ mod tests {
         assert_eq!(a.modified_sequence, "PEP[mod]TIDE");
         assert_eq!(a.monoisotopic_mass, 799.35996);
         assert_eq!(a.ms2_retention_time_in_minutes, 79.12);
+        assert_eq!(a.ms2_scan_number, 1611);
         assert_eq!(a.precursor_charge_state, 3);
         assert_eq!(a.score, 23.287);
         assert_eq!(a.q_value, 0.01);
@@ -409,6 +421,7 @@ mod tests {
         assert_eq!(b.file_name, "run2");
         assert_eq!(b.base_sequence, "AACC"); // (silac) removed
         assert_eq!(b.monoisotopic_mass, 1000.0); // first |-token
+        assert_eq!(b.ms2_scan_number, -1); // blank Scan Number cell → -1
         assert_eq!(b.precursor_charge_state, 2);
         assert!(b.is_decoy); // DCT contains 'D'
     }
@@ -444,6 +457,7 @@ mod tests {
             "AHQLVMEGYNWC[Common Fixed:Carbamidomethyl on C]HDR"
         );
         assert_eq!(first.precursor_charge_state, 3);
+        assert_eq!(first.ms2_scan_number, 21);
         assert!((first.monoisotopic_mass - 1914.82537).abs() < 1e-9);
         assert!((first.ms2_retention_time_in_minutes - 79.12191).abs() < 1e-9);
         assert!((first.score - 23.287).abs() < 1e-9);

@@ -21,8 +21,10 @@ fn main() {
             commands::get_range_xic,
             commands::get_spectrum,
             commands::get_spectrum_at_rt,
+            commands::get_ms2_spectrum,
             commands::get_ms2_for_precursor,
             commands::load_features,
+            commands::load_psms,
             commands::run_feature_detection,
             commands::score_seed_ladder,
         ]);

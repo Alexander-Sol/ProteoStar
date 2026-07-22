@@ -34,6 +34,12 @@ export interface TicPlotTrace {
   points: readonly TicPlotPoint[];
   selectedScanIndex: number | null;
   color: string;
+  /** When any trace sets this, the y-axis auto-range is driven by those traces alone (others
+   *  keep their true absolute height but are free to clip out of view). A summed-XIC overlay
+   *  sets it so the plot zooms to the XIC's abundance while the much taller TIC runs off the top. */
+  yScale?: boolean;
+  /** Hover-series name for this trace (defaults to the plot's `yTitle`). */
+  label?: string;
 }
 
 export interface SpectrumPlotTrace {
@@ -97,6 +103,13 @@ export interface TicPlotProps {
   featureRug?: readonly FeatureMarker[];
   /** Shaded RT band(s) — typically the selected feature's elution extent (optional). */
   regions?: readonly RtRegion[];
+  /** y-axis label + hover series name (default "TIC"). Set to "XIC" for chromatogram reuse. */
+  yTitle?: string;
+  /** Plotly `uirevision`. While this value is unchanged, the user's interactive zoom/pan is
+   *  preserved across re-renders (so e.g. clicking a point to load a spectrum doesn't snap the
+   *  view back to the prop range). Change it to intentionally re-apply the range props (reframe).
+   *  Leave undefined to keep the legacy behaviour (every render re-applies the range). */
+  uirevision?: string | number;
   onEvent(event: TicPlotEvent): void;
 }
 
@@ -108,5 +121,8 @@ export interface SpectrumPlotProps {
   envelope?: readonly EnvelopeLine[];
   /** Text labels on prominent peaks (m/z + inferred charge for MS1). Optional. */
   annotations?: readonly PeakAnnotation[];
+  /** Plotly `uirevision`: while unchanged, the user's interactive zoom/pan is preserved across
+   *  re-renders (e.g. stepping scans with the arrow keys). Change it to re-apply the range props. */
+  uirevision?: string | number;
   onEvent(event: SpectrumPlotEvent): void;
 }

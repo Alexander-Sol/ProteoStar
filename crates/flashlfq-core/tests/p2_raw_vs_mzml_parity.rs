@@ -43,6 +43,7 @@ fn id_for(file_name: &str, rt: f64) -> Identification {
         modified_sequence: PEPTIDE.to_string(),
         monoisotopic_mass: 1350.65681,
         ms2_retention_time_in_minutes: rt,
+        ms2_scan_number: -1,
         precursor_charge_state: 2,
         score: 0.0,
         q_value: 0.0,

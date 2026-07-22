@@ -94,9 +94,10 @@ export function estimateCharge(
   return bestScore >= 2 ? bestZ : null;
 }
 
-/** Label text for a peak: `647.65 · z2`, or just the m/z when charge is unknown. */
+/** Label text for a peak: the m/z with the charge on a second line beneath it (`647.65<br>z2`),
+ *  or just the m/z when charge is unknown. `<br>` is Plotly's line break in annotation text. */
 export function peakLabelText(mz: number, charge: number | null): string {
-  return charge ? `${mz.toFixed(2)} · z${charge}` : mz.toFixed(2);
+  return charge ? `${mz.toFixed(2)}<br>z${charge}` : mz.toFixed(2);
 }
 
 /**

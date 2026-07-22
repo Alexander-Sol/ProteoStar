@@ -14,6 +14,7 @@ import {
   readSpectrumXRange,
   readSpectrumScan,
   clickButtonByText,
+  clickSpectrumResetZoom,
   seedLadderAt,
   readDrawerWidth,
   dragDrawerResizeTo,
@@ -47,15 +48,44 @@ async function poll(fn: () => Promise<boolean>, timeoutMs: number, label: string
   throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
 }
 
+/** Read the TIC apex, retrying across the brief remount the re-optimized TIC does just after load
+ *  (the plot can momentarily vanish between two webview round-trips). */
+async function readTicApexStable(page: TauriPage) {
+  let lastErr: unknown;
+  for (let i = 0; i < 20; i++) {
+    try {
+      return await readTicApex(page);
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw lastErr;
+}
+
+/** Open the yeast dataset and load the apex MS1 scan, retrying the click→wait as a unit — the
+ *  re-optimized TIC re-mounts shortly after load, which can swallow the click so no spectrum loads. */
+async function openApexSpectrum(page: TauriPage): Promise<void> {
+  await openDatasetByPath(page, dataPath(YEAST));
+  await waitForTic(page);
+  for (let i = 0; i < 8; i++) {
+    const apex = await readTicApexStable(page);
+    await clickTicAtRt(page, apex.apexRt);
+    try {
+      await waitForSpectrum(page, 6000);
+      return;
+    } catch {
+      // TIC remounted / click lost — re-read apex and click again.
+    }
+  }
+  throw new Error("spectrum did not load after retrying the TIC apex click");
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.beforeEach(async ({ tauriPage }) => {
   test.setTimeout(120_000);
-  await openDatasetByPath(tauriPage, dataPath(YEAST));
-  await waitForTic(tauriPage);
-  const apex = await readTicApex(tauriPage);
-  await clickTicAtRt(tauriPage, apex.apexRt);
-  await waitForSpectrum(tauriPage);
+  await openApexSpectrum(tauriPage);
   await ensureWalkthroughOff(tauriPage);
 });
 
@@ -83,10 +113,10 @@ test("Task 2 — the MS1 spectrum's prominent peaks carry m/z (and charge) label
   console.log(`[annotations] ${JSON.stringify(labels)}`);
   // Top-N prominent peaks are labeled.
   expect(labels.length).toBeGreaterThanOrEqual(1);
-  // Every label starts with an m/z value (e.g. "356.19" or "356.19 · z1").
+  // Every label starts with an m/z value (e.g. "356.19" or "356.19<br>z1").
   for (const t of labels) expect(t).toMatch(/^\d+\.\d{2}/);
-  // At least one peak's charge was inferred from its isotope spacing ("· z2").
-  expect(labels.some((t) => /·\s*z\d/.test(t))).toBe(true);
+  // At least one peak's charge was inferred; it sits on a second line ("356.19<br>z1").
+  expect(labels.some((t) => /<br>z\d/.test(t))).toBe(true);
 });
 
 // ------------------------------------------------------------------- Task 3: resizable drawer
@@ -167,8 +197,9 @@ test("Task 4 — stepping scans holds the spectrum y-range fixed; Reset zoom ref
   expect(Math.abs((y1 as number[])[0] - (y0 as number[])[0])).toBeLessThan(1e-3 * ((y0 as number[])[1] || 1) + 1e-6);
   expect(Math.abs((y1 as number[])[1] - (y0 as number[])[1])).toBeLessThan(1e-3 * ((y0 as number[])[1] || 1) + 1e-6);
 
-  // Reset zoom refits: the x-viewport widens back out (persisted zoom cleared).
-  await clickButtonByText(tauriPage, "Reset zoom");
+  // Reset zoom refits: the x-viewport widens back out (persisted zoom cleared). Target the spectrum
+  // panel's own reset — the TIC panel has a "Reset zoom" too.
+  await clickSpectrumResetZoom(tauriPage);
   await poll(
     async () => {
       const r = await readSpectrumXRange(tauriPage);

@@ -49,7 +49,7 @@ describe("computePeakLabels", () => {
     const mono2 = labels.find((l) => Math.abs(l.mz - 500) < 1e-6);
     const mono1 = labels.find((l) => Math.abs(l.mz - 800) < 1e-6);
     expect(mono2?.charge).toBe(2);
-    expect(mono2?.text).toBe("500.00 · z2");
+    expect(mono2?.text).toBe("500.00<br>z2");
     expect(mono1?.charge).toBe(1);
   });
 
@@ -71,7 +71,7 @@ describe("computePeakLabels", () => {
 
 describe("peakLabelText", () => {
   it("includes charge when known and omits it otherwise", () => {
-    expect(peakLabelText(647.653, 2)).toBe("647.65 · z2");
+    expect(peakLabelText(647.653, 2)).toBe("647.65<br>z2");
     expect(peakLabelText(647.653, null)).toBe("647.65");
   });
 });
