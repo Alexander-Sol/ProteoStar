@@ -256,9 +256,6 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     return [bar, hit];
   });
 
-  const xRange = toPlotlyRange(viewport);
-  const yRange = resolveSpectrumYRange(viewport, allPeaks);
-
   const layout: Partial<Layout> = {
     autosize: true,
     margin: { l: 56, r: 18, t: 20, b: 44 },
@@ -268,10 +265,10 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     font: { color: "#24364d", family: "Inter, Arial, sans-serif" },
     xaxis: {
       title: { text: "m/z" },
-      range: xRange,
-      // Explicit autorange so "Reset zoom" (viewport → null) re-fits even under `uirevision` — once an
-      // explicit range sets autorange:false, a later undefined range alone won't flip it back on.
-      autorange: xRange ? false : true,
+      // No explicit `autorange`: supplying it every render fights `uirevision`, which is what keeps a
+      // user's manual zoom fixed across scan steps. A reframe bumps uirevision and re-fits from
+      // `range: undefined` on its own.
+      range: toPlotlyRange(viewport),
       gridcolor: "#dfe7f2",
       zeroline: false
     },
@@ -279,8 +276,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       title: { text: "Intensity" },
       // Honor a persisted y-range when present (holds envelope height stable across scan steps),
       // else auto-fit to the visible x-window.
-      range: yRange,
-      autorange: yRange ? false : true,
+      range: resolveSpectrumYRange(viewport, allPeaks),
       gridcolor: "#dfe7f2",
       zeroline: false
     },
