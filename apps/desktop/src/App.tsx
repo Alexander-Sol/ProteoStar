@@ -127,14 +127,15 @@ export function App() {
         setLoad({ status: "loading", message: `${progress.phase}…` });
       });
       const meta = await p.getMetadata();
+      // The fast-path TIC is now the smooth MS1-only trace read from per-scan metadata (no peak
+      // decode, no index), so paint it immediately — no jagged preview, and no waiting on the
+      // full index. Empty only for files without per-scan TIC metadata, which fill in from the
+      // index via `markReady` (below); the panel shows a "building index" note until then.
+      const tic = await p.getTicTrace({ maxPoints: 4000 });
       setHandle(h);
       setProvider(p);
       setMetadata(meta);
-      // Deliberately do NOT paint the fast-path native TIC: on a DDA/mzML file it interleaves
-      // MS2 points (jagged saw-tooth). Wait for the smooth MS1-only trace the index yields —
-      // `markReady` (below) paints it the moment indexing finishes, so there's no jagged
-      // preview and no mid-session swap. Until then the panel shows a "building index" note.
-      setTicPoints([]);
+      setTicPoints(tic);
       // ms1ScanCount is 0 until the background index lands; the effect below flips this off.
       setIndexing(meta.ms1ScanCount === 0);
       setLoad({ status: "ready" });
@@ -183,9 +184,9 @@ export function App() {
       setIndexing(false);
       try {
         setMetadata(await provider.getMetadata());
-        // Paint the TIC now that the index exists: `get_tic_trace` serves the smooth
-        // MS1-only per-scan trace (the fast-path native TIC was deliberately not painted, to
-        // avoid the jagged MS1+MS2 preview and a jarring swap). This is the only TIC the user sees.
+        // Re-fetch the TIC. For files with per-scan TIC metadata this returns the same smooth
+        // MS1-only trace already painted on open (no visible change). For files *without* it, the
+        // fast-path trace was empty and only now fills in from the freshly-built MS1 index.
         setTicPoints(await provider.getTicTrace({ maxPoints: 4000 }));
         // MS1 scan summaries power arrow-key scan stepping (available post-index).
         setScanSummaries(await provider.getScanSummaries());
@@ -1125,6 +1126,7 @@ function PsmDrawer({
 }) {
   const [filter, setFilter] = useState("");
   const [maxQ, setMaxQ] = useState("");
+  const [minScore, setMinScore] = useState("");
   const [sortKey, setSortKey] = useState<PsmSortKey>("qValue");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
@@ -1133,12 +1135,15 @@ function PsmDrawer({
     const q = filter.trim().toLowerCase();
     const qMaxRaw = maxQ.trim();
     const qMax = qMaxRaw === "" ? null : Number(qMaxRaw);
+    const scoreMinRaw = minScore.trim();
+    const scoreMin = scoreMinRaw === "" ? null : Number(scoreMinRaw);
     const idx = psms
       .map((_, i) => i)
       .filter((i) => {
         const p = psms[i];
         if (q && !p.fullSequence.toLowerCase().includes(q)) return false;
         if (qMax !== null && !Number.isNaN(qMax) && p.qValue > qMax) return false;
+        if (scoreMin !== null && !Number.isNaN(scoreMin) && p.score < scoreMin) return false;
         return true;
       });
     const keyVal = (p: Psm): number | string => {
@@ -1167,7 +1172,7 @@ function PsmDrawer({
       return sortDir === "asc" ? cmp : -cmp;
     });
     return idx;
-  }, [psms, filter, maxQ, sortKey, sortDir]);
+  }, [psms, filter, maxQ, minScore, sortKey, sortDir]);
 
   const shown = rows.slice(0, DRAWER_CAP);
   const toggleSort = (k: PsmSortKey) => {
@@ -1207,6 +1212,14 @@ function PsmDrawer({
           value={maxQ}
           onChange={(e) => setMaxQ(e.target.value)}
           style={{ ...psmInputStyle, width: 64, flex: "0 0 auto" }}
+        />
+        <input
+          type="text"
+          inputMode="decimal"
+          placeholder="min score"
+          value={minScore}
+          onChange={(e) => setMinScore(e.target.value)}
+          style={{ ...psmInputStyle, width: 72, flex: "0 0 auto" }}
         />
       </div>
       <div style={drawerBodyStyle}>

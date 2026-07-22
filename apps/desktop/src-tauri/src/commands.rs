@@ -20,7 +20,8 @@ use flashlfq_core::feature_refinement::{
     self, refine_feature_multi, resolve_consensus_by_apex, RefinedFeature, ResolvedFeature,
 };
 use flashlfq_core::peak_indexing::{
-    read_ms1_scans, PeakIndexingEngine, PeakSource, RandomAccessMs1Reader, Scan,
+    read_ms1_scans, read_ms1_tic_metadata, PeakIndexingEngine, PeakSource, RandomAccessMs1Reader,
+    Scan,
 };
 use flashlfq_core::spectral_averaging::SpectralAveragingParameters;
 use flashlfq_core::trace_kernel::{
@@ -132,17 +133,23 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-/// Fast pass: open the file for on-demand reads and pull its native instrument TIC chromatogram
-/// from that same reader (no peak decode, no index — so the file is opened only once). An empty
-/// TIC pair means the file exposes no native TIC (e.g. an mzML without a TIC chromatogram) — the
-/// served TIC then fills in from the background index instead. Runs on a blocking thread (`.raw`
-/// pulls a .NET runtime).
+/// Fast pass: open the file for on-demand reads and build a **smooth MS1-only TIC** without the
+/// full peak index. The displayed TIC is read from per-scan `total ion current` metadata
+/// ([`read_ms1_tic_metadata`] — no peak decode, no index), so it appears quickly and is MS1-only
+/// (not the jagged native TIC, which interleaves MS2). Falls back to the native instrument TIC
+/// when the file exposes no per-scan TIC metadata; an empty pair then means the served TIC fills
+/// in from the background index instead. Runs on a blocking thread (`.raw` pulls a .NET runtime).
 fn open_fast(path: &str) -> Result<(RandomAccessMs1Reader, Vec<f64>, Vec<f32>), ViewerError> {
     let mut reader =
         RandomAccessMs1Reader::open(path).map_err(|e| ViewerError::new("READ_ERROR", e.to_string()))?;
-    let (rt, intensity) = match reader.tic() {
-        Some(tic) => (tic.retention_times, tic.intensities),
-        None => (Vec::new(), Vec::new()),
+    let (rt, intensity) = match read_ms1_tic_metadata(path) {
+        Ok(tic) if !tic.retention_times.is_empty() => (tic.retention_times, tic.intensities),
+        // No per-scan TIC metadata: fall back to the native instrument TIC (may be jagged), or an
+        // empty pair (served TIC then comes from the background MS1 index once it lands).
+        _ => match reader.tic() {
+            Some(tic) => (tic.retention_times, tic.intensities),
+            None => (Vec::new(), Vec::new()),
+        },
     };
     Ok((reader, rt, intensity))
 }
@@ -462,29 +469,31 @@ pub async fn get_tic_trace(
     let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
     let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
-    let indexed = d.indexed.lock().ok().and_then(|g| {
-        g.as_ref().map(|i| (i.scans.clone(), i.tic.clone()))
-    });
-    if let Some((scans, tic)) = indexed {
-        // Preferred once the index is built: the per-scan summed-centroid **MS1-only** TIC. The
-        // native instrument TIC (fast path below) interleaves MS2 points, which reads as a jagged
-        // saw-tooth; summing only MS1 scans gives the smooth, continuous chromatogram. Here
-        // `scanIndex` *is* the MS1 scan index.
-        for (i, s) in scans.iter().enumerate() {
-            if in_rt_window(s.retention_time, rt_min, rt_max) {
-                rt.push(s.retention_time as f32);
-                intensity.push(tic[i]);
-                scan_index.push(i as u32);
-            }
-        }
-    } else if !d.tic_rt.is_empty() {
-        // Pre-index fast path: the native instrument TIC read on open (all MS levels), so the
-        // viewer can paint *something* in ~1-2 s. The frontend re-fetches once indexing lands,
-        // swapping in the MS1-only trace above. `scanIndex` here is the TIC point's ordinal.
+    if !d.tic_rt.is_empty() {
+        // Preferred: the smooth **MS1-only** TIC read from per-scan `total ion current` metadata on
+        // the fast path (`read_ms1_tic_metadata`) — available immediately, no peak index needed,
+        // and MS1-only (so it doesn't need to wait on the full index and isn't the jagged native
+        // TIC). `scanIndex` here is the TIC point's ordinal, not an MS1 scan index; TIC clicks
+        // navigate by RT, which `get_nearest_scan` resolves to a real scan once indexing is done.
         for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
             if in_rt_window(t, rt_min, rt_max) {
                 rt.push(t as f32);
                 intensity.push(inten);
+                scan_index.push(i as u32);
+            }
+        }
+    } else if let Some((scans, tic)) = d
+        .indexed
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|i| (i.scans.clone(), i.tic.clone())))
+    {
+        // Fallback (file exposed no per-scan TIC metadata): the per-scan summed-centroid MS1 TIC,
+        // available only once the index is built. Here `scanIndex` *is* the MS1 scan index.
+        for (i, s) in scans.iter().enumerate() {
+            if in_rt_window(s.retention_time, rt_min, rt_max) {
+                rt.push(s.retention_time as f32);
+                intensity.push(tic[i]);
                 scan_index.push(i as u32);
             }
         }

@@ -1248,6 +1248,63 @@ pub fn read_tic_chromatogram<P: Into<PathBuf> + Clone>(
     }
 }
 
+/// A smooth **MS1-only** TIC read from per-scan *metadata* — the `total ion current` cvParam
+/// (`MS:1000285`) each spectrum carries — with **no peak decode and no peak index**. This is the
+/// cheap middle ground between the native instrument TIC (one call, but interleaves MS2 → jagged)
+/// and the full [`read_ms1_scans`] + index build (smooth, but decodes every peak): it iterates the
+/// file at [`DetailLevel::MetadataOnly`] (binary arrays skipped) and keeps each MS1 scan's reported
+/// TIC. Fast enough to run on the open path so the smooth chromatogram appears without waiting for
+/// indexing.
+///
+/// Returns an **empty** chromatogram (not an error) when the file doesn't expose per-MS1-scan TIC
+/// metadata — the first MS1 scan missing the cvParam aborts the pass — so the caller can fall back
+/// to the native TIC or the indexed MS1 TIC. RTs are in minutes, parallel to intensities.
+pub fn read_ms1_tic_metadata<P: Into<PathBuf> + Clone>(
+    path: P,
+) -> std::io::Result<TicChromatogram> {
+    let path: PathBuf = path.into();
+    let is_thermo_raw = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("raw"))
+        .unwrap_or(false);
+    if is_thermo_raw {
+        let reader = ThermoRawReader::new_with_detail_level_and_centroiding(
+            path,
+            DetailLevel::MetadataOnly,
+            false,
+        )?;
+        Ok(collect_ms1_tic(reader))
+    } else {
+        let mut reader = MZReader::open_path(path)?;
+        reader.set_detail_level(DetailLevel::MetadataOnly);
+        Ok(collect_ms1_tic(reader))
+    }
+}
+
+/// Collects the MS1-only TIC from a metadata-level spectrum iterator (see [`read_ms1_tic_metadata`]).
+/// Bails to an empty result the moment an MS1 scan is missing the `total ion current` cvParam, so a
+/// partial/unreliable trace never reaches the display.
+fn collect_ms1_tic<I: Iterator<Item = Spectrum>>(reader: I) -> TicChromatogram {
+    let mut retention_times = Vec::new();
+    let mut intensities = Vec::new();
+    for spectrum in reader {
+        if spectrum.ms_level() != 1 {
+            continue;
+        }
+        match spectrum
+            .get_param_by_accession("MS:1000285")
+            .and_then(|p| p.to_f32().ok())
+        {
+            Some(tic) => {
+                retention_times.push(spectrum.start_time());
+                intensities.push(tic);
+            }
+            None => return TicChromatogram { retention_times: Vec::new(), intensities: Vec::new() },
+        }
+    }
+    TicChromatogram { retention_times, intensities }
+}
+
 /// Extracts MS1 scans from any spectrum iterator (mzML or Thermo). Shared by both branches of
 /// [`read_ms1_scans`]; see its docs for the centroiding and ordering rationale.
 fn collect_ms1_scans<I: Iterator<Item = Spectrum>>(reader: I) -> Vec<Scan> {
