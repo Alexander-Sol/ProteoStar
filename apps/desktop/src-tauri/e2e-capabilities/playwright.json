@@ -1,0 +1,6 @@
+{
+  "identifier": "playwright-e2e",
+  "description": "E2E testing only. Lets tauri-plugin-playwright invoke its pw_result IPC across all windows so Playwright can read results back. Registered at runtime from main.rs under the `e2e-testing` feature — NOT placed in capabilities/ so normal (non-e2e) builds never try to resolve the playwright:default permission.",
+  "windows": ["main", "*"],
+  "permissions": ["playwright:default"]
+}

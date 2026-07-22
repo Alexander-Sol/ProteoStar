@@ -1,0 +1,8 @@
+.report/
+.artifacts/
+test-results/
+playwright-report/
+.app.log
+.app.err.log
+.app.pid
+e2e/

@@ -1,0 +1,9 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "types": ["node", "@playwright/test"],
+    "noEmit": true
+  },
+  "include": ["."]
+}

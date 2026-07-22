@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "tauri": "tauri",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e:app": "tauri dev --features e2e-testing",
+    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "e2e:browser": "playwright test --config e2e/playwright.config.ts --project=browser",
+    "e2e:tauri": "playwright test --config e2e/playwright.config.ts --project=tauri"
   },
   "dependencies": {
     "@msbrowser/plot-adapter": "workspace:*",
@@ -19,6 +23,8 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@srsholmes/tauri-playwright": "^0.4.1",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",

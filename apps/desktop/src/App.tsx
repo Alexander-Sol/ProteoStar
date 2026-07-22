@@ -98,13 +98,9 @@ export function App() {
   const [ladderBusy, setLadderBusy] = useState(false);
 
   // ------------------------------------------------------------ open raw/mzML
-  const handleOpenFile = useCallback(async () => {
-    const picked = await openFileDialog({
-      multiple: false,
-      filters: [{ name: "Mass spec", extensions: ["raw", "mzML", "mzml", "mzMLb", "mgf"] }]
-    });
-    if (typeof picked !== "string") return;
-
+  // Open a dataset by path — the shared core of both the "Open file…" button and
+  // the E2E hook below.
+  const openPath = useCallback(async (picked: string) => {
     setLoad({ status: "loading", message: "Opening…" });
     setSpectrum(null);
     setScanSummaries([]);
@@ -127,6 +123,31 @@ export function App() {
       setLoad({ status: "error", message: errMessage(err) });
     }
   }, []);
+
+  const handleOpenFile = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "Mass spec", extensions: ["raw", "mzML", "mzml", "mzMLb", "mgf"] }]
+    });
+    if (typeof picked !== "string") return;
+    await openPath(picked);
+  }, [openPath]);
+
+  // E2E hook: open a dataset by path, skipping the native file dialog (which
+  // Playwright can't automate). Exposed only when the app is driven by the
+  // tauri-plugin-playwright control server — which sets `window.__PW_ACTIVE__`
+  // via its init script — so it is completely inert in normal/production runs.
+  useEffect(() => {
+    const w = window as typeof window & {
+      __PW_ACTIVE__?: boolean;
+      __msviewerOpenPath?: (p: string) => void;
+    };
+    if (!w.__PW_ACTIVE__) return;
+    w.__msviewerOpenPath = (p: string) => void openPath(p);
+    return () => {
+      delete w.__msviewerOpenPath;
+    };
+  }, [openPath]);
 
   // Flip `indexing` off once the background peak index is ready (spectra / XIC / detection
   // light up). We poll `getMetadata()` rather than wait on a Tauri event: the backend sets
