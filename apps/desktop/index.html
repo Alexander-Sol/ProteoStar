@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MsViewer</title>
+    <style>
+      /* The app shell is a fixed 100vh grid; a default body margin would push it past the
+         viewport and force a small page scroll (cutting off the bottom of the spectrum plot).
+         Zero the margin and clip #root so the whole UI fits with no scroll. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      #root {
+        height: 100vh;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

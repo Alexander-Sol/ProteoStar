@@ -8,15 +8,16 @@ import type {
   EnvelopeLine,
   FeatureMarker,
   NumericRange,
+  PeakAnnotation,
   PlotViewport,
   RtRegion,
   SlotIndex,
   SpectrumPlotProps,
-  SpectrumPlotTrace,
   TicPlotPoint,
   TicPlotProps,
   TicPlotTrace
 } from "./types";
+import { resolveSpectrumYRange } from "./viewport";
 
 interface PlotPointEvent {
   points?: Array<{ customdata?: unknown }>;
@@ -201,8 +202,27 @@ function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Par
   }));
 }
 
+/** Text labels above prominent peaks (m/z + inferred charge). Drawn arrow-less, anchored at the
+ *  peak apex; rotated vertical so adjacent labels don't collide in a dense spectrum. */
+function buildPeakAnnotations(
+  annotations: readonly PeakAnnotation[] | undefined
+): Partial<Layout>["annotations"] {
+  if (!annotations || annotations.length === 0) return [];
+  return annotations.map((a) => ({
+    x: a.mz,
+    y: a.intensity,
+    text: a.text,
+    showarrow: false,
+    xanchor: "left" as const,
+    yanchor: "bottom" as const,
+    textangle: "-90",
+    font: { size: 10, color: "#24364d", family: "Inter, Arial, sans-serif" }
+  }));
+}
+
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
-  const { traces, viewport, rangeSelectionEnabled, envelope, onEvent } = props;
+  const { traces, viewport, rangeSelectionEnabled, envelope, annotations, onEvent } = props;
+  const allPeaks = traces.flatMap((t) => t.peaks);
 
   const data: PlotData[] = traces.flatMap((trace) => {
     // The 0.001-m/z-wide bars are the visual, but far too thin to hover or click. Overlay an
@@ -244,11 +264,14 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     },
     yaxis: {
       title: { text: "Intensity" },
-      range: visibleSpectrumYRange(traces, viewport),
+      // Honor a persisted y-range when present (holds envelope height stable across scan steps),
+      // else auto-fit to the visible x-window.
+      range: resolveSpectrumYRange(viewport, allPeaks),
       gridcolor: "#dfe7f2",
       zeroline: false
     },
     shapes: buildEnvelopeShapes(envelope),
+    annotations: buildPeakAnnotations(annotations),
     showlegend: false,
     hovermode: "closest",
     barmode: "overlay"
@@ -311,22 +334,6 @@ function visibleYRange(
   );
   if (points.length === 0) return undefined;
   const maxY = Math.max(...points.map((p) => p.intensity));
-  return [0, maxY * 1.05];
-}
-
-/** Compute the y-axis range from peaks visible within the current x viewport. */
-function visibleSpectrumYRange(
-  traces: readonly SpectrumPlotTrace[],
-  viewport: PlotViewport
-): [number, number] | undefined {
-  const { xMin, xMax } = viewport;
-  const peaks = traces.flatMap((t) =>
-    xMin !== null && xMax !== null
-      ? t.peaks.filter((p) => p.mz >= xMin && p.mz <= xMax)
-      : t.peaks
-  );
-  if (peaks.length === 0) return undefined;
-  const maxY = Math.max(...peaks.map((p) => p.intensity));
   return [0, maxY * 1.05];
 }
 

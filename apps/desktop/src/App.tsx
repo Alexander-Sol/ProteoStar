@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
-import { TicPlot, SpectrumPlot, createDefaultViewport } from "@msbrowser/plot-adapter";
+import {
+  TicPlot,
+  SpectrumPlot,
+  createDefaultViewport,
+  fitSpectrumYRange,
+  hasPersistedY
+} from "@msbrowser/plot-adapter";
 import type {
   TicPlotTrace,
   SpectrumPlotTrace,
   FeatureMarker,
+  PeakAnnotation,
   RtRegion,
   EnvelopeLine,
   PlotViewport
@@ -21,6 +28,7 @@ import {
 
 import { openDataset } from "./tauri-dataset-provider";
 import { loadFeatures, runFeatureDetection, isotopeGrid } from "./features";
+import { computePeakLabels } from "./annotate";
 import { scoreSeedLadder } from "./walkthrough";
 import type {
   DatasetMetadata,
@@ -53,6 +61,15 @@ const DRAWER_CAP = 800;
 // detector's default ppm tolerance so the overlay's notion of a hit agrees with detection.
 const DETECT_PPM = 10;
 
+// Right-side drawer sizing (features / walkthrough / future PSM panel). User-resizable via the drag
+// handle on the drawer's left edge; the width clamps to [MIN, MAX].
+const DEFAULT_DRAWER_WIDTH = 360;
+const MIN_DRAWER_WIDTH = 280;
+const MAX_DRAWER_WIDTH = 760;
+const DRAWER_INSET_GAP = 12;
+const clampDrawerWidth = (w: number): number =>
+  Math.max(MIN_DRAWER_WIDTH, Math.min(MAX_DRAWER_WIDTH, w));
+
 type LoadState =
   | { status: "idle" }
   | { status: "loading"; message: string }
@@ -81,6 +98,9 @@ export function App() {
 
   const [ticPinned, setTicPinned] = useState(false);
   const [spectrumPinned, setSpectrumPinned] = useState(false);
+
+  // User-resizable width (px) of the right-side drawer (features / walkthrough / future PSM panel).
+  const [drawerWidth, setDrawerWidth] = useState(DEFAULT_DRAWER_WIDTH);
 
   // True between open (fast TIC shown) and the background peak index landing. While set,
   // spectra / range-XIC / detection aren't available yet (backend returns INDEXING).
@@ -283,6 +303,9 @@ export function App() {
   const handleAreaClick = useCallback(
     async (rt: number) => {
       if (!provider || spectrumPinned) return;
+      // Clicking a new RT is a fresh selection — drop any frozen y-range so the new scan auto-fits
+      // (arrow-stepping keeps the frozen range; picking a new scan re-frames it).
+      setSpectrumViewport((v) => ({ ...v, yMin: null, yMax: null }));
       try {
         // On-demand read by RT — works during indexing (no peak index needed).
         setSpectrum(await provider.getSpectrumAtRt(rt));
@@ -300,6 +323,15 @@ export function App() {
   const stepScan = useCallback(
     async (delta: number) => {
       if (!provider || indexing || !spectrum || scanSummaries.length === 0) return;
+      // When zoomed into an envelope, freeze the y-range on the first step so the envelope height
+      // stays stable across scans. Otherwise each scan auto-refits y to its own tallest visible peak
+      // and the envelope of interest shrinks as a taller neighbor peak enters view. Only while
+      // x-zoomed — at full-spectrum view the natural per-scan autoscale is kept.
+      const xZoomed = spectrumViewport.xMin !== null && spectrumViewport.xMax !== null;
+      if (xZoomed && !hasPersistedY(spectrumViewport)) {
+        const fit = fitSpectrumYRange(spectrum.peaks, spectrumViewport.xMin, spectrumViewport.xMax);
+        if (fit) setSpectrumViewport((v) => ({ ...v, yMin: fit[0], yMax: fit[1] }));
+      }
       const rt = spectrum.retentionTime;
       let pos = 0;
       let best = Infinity;
@@ -318,7 +350,7 @@ export function App() {
         setLoad({ status: "error", message: errMessage(err) });
       }
     },
-    [provider, indexing, spectrum, scanSummaries]
+    [provider, indexing, spectrum, scanSummaries, spectrumViewport]
   );
 
   // ← / → step to the previous / next MS1 scan, holding the zoom constant.
@@ -480,13 +512,25 @@ export function App() {
     [spectrum]
   );
 
+  // MS1 peak labels: annotate the most prominent peaks in the current x-window with m/z + inferred
+  // charge. Only for MS1 spectra, and suppressed during the walkthrough (its comb overlay already
+  // annotates the ladder, so peak labels would just clutter it).
+  const spectrumAnnotations = useMemo<PeakAnnotation[]>(() => {
+    if (!spectrum || spectrum.msLevel !== 1 || walkthrough) return [];
+    return computePeakLabels(spectrum.peaks, {
+      xMin: spectrumViewport.xMin,
+      xMax: spectrumViewport.xMax,
+      maxLabels: 6
+    });
+  }, [spectrum, spectrumViewport, walkthrough]);
+
   const selectedFeature = selected === null ? null : features[selected] ?? null;
 
   return (
     <ViewerShell
       title="MsViewer — feature finder"
       subtitle="Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
-      rightInset={drawerVisible ? 372 : 0}
+      rightInset={drawerVisible ? drawerWidth + DRAWER_INSET_GAP : 0}
       toolbar={
         <>
           {metadata ? (
@@ -637,6 +681,7 @@ export function App() {
             traces={spectrumTraces}
             viewport={spectrumViewport}
             envelope={spectrumEnvelope}
+            annotations={spectrumAnnotations}
             rangeSelectionEnabled={false}
             onEvent={(e) => {
               if (e.type === "peak-click") handlePeakClick(e.peak.mz);
@@ -652,6 +697,8 @@ export function App() {
           maxCharge={LADDER_MAX_CHARGE}
           focusCharge={focusCharge}
           busy={ladderBusy}
+          width={drawerWidth}
+          onResize={setDrawerWidth}
           onZSeed={handleZSeed}
           onFocusCharge={focusChargeView}
           onClose={() => {
@@ -664,11 +711,56 @@ export function App() {
         <FeatureDrawer
           features={features}
           selected={selected}
+          width={drawerWidth}
+          onResize={setDrawerWidth}
           onSelect={(i) => void selectFeature(i)}
           onClose={() => setDrawerOpen(false)}
         />
       ) : null}
     </ViewerShell>
+  );
+}
+
+// A right-side overlay drawer with a draggable left-edge handle, so the user can resize it. The
+// features / walkthrough drawers (and the future PSM panel) render their content inside this frame.
+// Dragging updates the width via `onResize`; the parent keeps `ViewerShell`'s `rightInset` in sync so
+// the plots reflow to the new width.
+function ResizableDrawer({
+  width,
+  onResize,
+  children
+}: {
+  width: number;
+  onResize: (width: number) => void;
+  children: React.ReactNode;
+}) {
+  const startDrag = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      // Drawer is right-anchored, so width = viewport width − pointer x.
+      const onMove = (ev: PointerEvent) =>
+        onResize(clampDrawerWidth(window.innerWidth - ev.clientX));
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [onResize]
+  );
+  return (
+    <div style={{ ...drawerStyle, width }} data-testid="drawer">
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        title="Drag to resize"
+        onPointerDown={startDrag}
+        style={drawerResizeHandleStyle}
+        data-testid="drawer-resize"
+      />
+      {children}
+    </div>
   );
 }
 
@@ -682,6 +774,8 @@ function LadderDrawer({
   maxCharge,
   focusCharge,
   busy,
+  width,
+  onResize,
   onZSeed,
   onFocusCharge,
   onClose
@@ -691,13 +785,15 @@ function LadderDrawer({
   maxCharge: number;
   focusCharge: number | null;
   busy: boolean;
+  width: number;
+  onResize: (width: number) => void;
   onZSeed: (z: number) => void;
   onFocusCharge: (z: number | null) => void;
   onClose: () => void;
 }) {
   const chargeButtons = Array.from({ length: maxCharge }, (_, i) => i + 1);
   return (
-    <div style={drawerStyle}>
+    <ResizableDrawer width={width} onResize={onResize}>
       <div style={drawerHeaderStyle}>
         <strong>Charge-ladder walkthrough</strong>
         <button onClick={onClose} style={drawerCloseStyle} type="button">
@@ -815,7 +911,7 @@ function LadderDrawer({
           </>
         )}
       </div>
-    </div>
+    </ResizableDrawer>
   );
 }
 
@@ -879,17 +975,21 @@ function hasPeakNear(sortedMz: readonly number[], mz: number, ppm: number): bool
 function FeatureDrawer({
   features,
   selected,
+  width,
+  onResize,
   onSelect,
   onClose
 }: {
   features: readonly Feature[];
   selected: number | null;
+  width: number;
+  onResize: (width: number) => void;
   onSelect: (index: number) => void;
   onClose: () => void;
 }) {
   const shown = features.slice(0, DRAWER_CAP);
   return (
-    <div style={drawerStyle}>
+    <ResizableDrawer width={width} onResize={onResize}>
       <div style={drawerHeaderStyle}>
         <strong>
           Features{" "}
@@ -929,7 +1029,7 @@ function FeatureDrawer({
           </tbody>
         </table>
       </div>
-    </div>
+    </ResizableDrawer>
   );
 }
 
@@ -938,13 +1038,25 @@ const drawerStyle: React.CSSProperties = {
   top: 0,
   right: 0,
   height: "100vh",
-  width: 360,
+  // `width` is supplied by ResizableDrawer (user-resizable); this default is a fallback only.
+  width: DEFAULT_DRAWER_WIDTH,
   backgroundColor: "#ffffff",
   borderLeft: "1.5px solid #000",
   boxShadow: "-4px 0 16px rgba(0,0,0,0.12)",
   display: "grid",
   gridTemplateRows: "auto 1fr",
   zIndex: 1000
+};
+// Thin draggable strip on the drawer's left edge (straddling the border) for resizing.
+const drawerResizeHandleStyle: React.CSSProperties = {
+  position: "absolute",
+  left: -3,
+  top: 0,
+  width: 7,
+  height: "100%",
+  cursor: "col-resize",
+  zIndex: 1001,
+  touchAction: "none"
 };
 const drawerHeaderStyle: React.CSSProperties = {
   display: "flex",

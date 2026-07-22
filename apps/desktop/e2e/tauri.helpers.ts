@@ -121,3 +121,135 @@ export function readSpectrumBasePeak(page: TauriPage): Promise<Peak> {
      return { mz: tr.x[xi], intensity: ym, peaks: tr.x.length };`,
   );
 }
+
+// ----------------------------------------------------------------------------
+// Task-verification helpers (no-scroll layout, MS1 peak labels, resizable
+// drawer, persisted spectrum y-zoom). All read/drive the real webview DOM.
+
+/** Page-overflow + spectrum-visibility metrics (Task 1: no-scroll layout). */
+export interface Overflow {
+  scrollHeight: number;
+  innerHeight: number;
+  /** Bottom edge (px from top) of the spectrum plot's x-axis title; -1 if not found. */
+  spectrumAxisBottom: number;
+}
+
+export function readOverflow(page: TauriPage): Promise<Overflow> {
+  // Measure the spectrum graph div's bottom edge (its bottom margin holds the x-axis title). The div
+  // is guaranteed present once `waitForSpectrum` returns, unlike the SVG title <text>, which paints a
+  // beat later and can read as missing right after a remount.
+  return ev<Overflow>(
+    page,
+    `${FIND_GD("m/z")}
+     var axisBottom = gd ? gd.getBoundingClientRect().bottom : -1;
+     return {
+       scrollHeight: document.documentElement.scrollHeight,
+       innerHeight: window.innerHeight,
+       spectrumAxisBottom: axisBottom
+     };`,
+  );
+}
+
+/** The text of every annotation on the spectrum plot (Task 2: m/z + charge labels). */
+export function readSpectrumAnnotations(page: TauriPage): Promise<string[]> {
+  return ev<string[]>(
+    page,
+    `${FIND_GD("m/z")}
+     if (!gd) throw new Error('spectrum plot not found');
+     return ((gd.layout && gd.layout.annotations) || []).map(function(a){ return a.text; });`,
+  );
+}
+
+/** The spectrum plot's current y-axis range (Task 4: persisted y-zoom). */
+export function readSpectrumYRange(page: TauriPage): Promise<[number, number] | null> {
+  return ev<[number, number] | null>(
+    page,
+    `${FIND_GD("m/z")}
+     if (!gd) throw new Error('spectrum plot not found');
+     var r = gd.layout && gd.layout.yaxis && gd.layout.yaxis.range;
+     return r ? [r[0], r[1]] : null;`,
+  );
+}
+
+/** The spectrum plot's current x-axis range (used to detect an applied x-zoom). */
+export function readSpectrumXRange(page: TauriPage): Promise<[number, number] | null> {
+  return ev<[number, number] | null>(
+    page,
+    `${FIND_GD("m/z")}
+     if (!gd) throw new Error('spectrum plot not found');
+     var r = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
+     return r ? [r[0], r[1]] : null;`,
+  );
+}
+
+/** The 1-based scan number currently shown in the spectrum panel header, or -1. */
+export function readSpectrumScan(page: TauriPage): Promise<number> {
+  return ev<number>(
+    page,
+    `var m = (document.body.textContent || '').match(/Scan\\s+(\\d+)/);
+     return m ? parseInt(m[1], 10) : -1;`,
+  );
+}
+
+/** Click a button whose visible text contains `substr`. Throws if none is found. */
+export async function clickButtonByText(page: TauriPage, substr: string): Promise<void> {
+  await ev(
+    page,
+    `var btn = Array.prototype.slice.call(document.querySelectorAll('button'))
+       .find(function(b){ return (b.textContent || '').indexOf(${JSON.stringify(substr)}) >= 0; });
+     if (!btn) throw new Error('button not found: ' + ${JSON.stringify(substr)});
+     btn.click();
+     return true;`,
+  );
+}
+
+/** Seed the walkthrough charge-ladder by firing a peak-click at m/z `mz` on the spectrum (the same
+ *  event a user's click produces). Only has an effect while the walkthrough is on. */
+export async function seedLadderAt(page: TauriPage, mz: number, intensity: number): Promise<void> {
+  await ev(
+    page,
+    `${FIND_GD("m/z")}
+     if (!gd) throw new Error('spectrum plot not found');
+     gd.emit('plotly_click', { points: [{ customdata: { mz: ${mz}, intensity: ${intensity} } }] });
+     return true;`,
+  );
+}
+
+/** Current width (px) of the right-side drawer, or null when no drawer is open. */
+export function readDrawerWidth(page: TauriPage): Promise<number | null> {
+  return ev<number | null>(
+    page,
+    `var d = document.querySelector('[data-testid=drawer]');
+     return d ? d.getBoundingClientRect().width : null;`,
+  );
+}
+
+/** Drag the drawer's resize handle so the pointer ends at viewport x = `toClientX`. The drawer is
+ *  right-anchored, so the resulting width ≈ innerWidth − toClientX (clamped to [280, 760]). */
+export async function dragDrawerResizeTo(page: TauriPage, toClientX: number): Promise<void> {
+  await ev(
+    page,
+    `var h = document.querySelector('[data-testid=drawer-resize]');
+     if (!h) throw new Error('drawer resize handle not found');
+     var rect = h.getBoundingClientRect();
+     var y = rect.top + rect.height / 2;
+     h.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: rect.left + 2, clientY: y }));
+     window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: ${toClientX}, clientY: y }));
+     window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: ${toClientX}, clientY: y }));
+     return true;`,
+  );
+}
+
+/** Press ArrowRight/ArrowLeft on the window to step to the next/previous MS1 scan. */
+export async function pressArrow(page: TauriPage, dir: "ArrowRight" | "ArrowLeft"): Promise<void> {
+  await ev(
+    page,
+    `window.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(dir)}, bubbles: true }));
+     return true;`,
+  );
+}
+
+/** Whether the toolbar still reports indexing in progress ("MS1 scans … indexing…"). */
+export function isIndexing(page: TauriPage): Promise<boolean> {
+  return ev<boolean>(page, `return (document.body.textContent || '').indexOf('indexing…') >= 0;`);
+}

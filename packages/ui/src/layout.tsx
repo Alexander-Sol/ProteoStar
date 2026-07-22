@@ -93,10 +93,13 @@ export function PanelActionButton({
 
 const shellStyle: CSSProperties = {
   height: "100vh",
+  boxSizing: "border-box",
   overflow: "hidden",
   padding: "8px clamp(8px, 1.5vw, 16px)",
   display: "grid",
-  gridTemplateRows: "auto 1fr",
+  // `minmax(0, 1fr)` (not `1fr`) so the content row can shrink below its children's min-content size —
+  // otherwise a tall Plotly min-height pushes the grid past 100vh and the spectrum bottom is clipped.
+  gridTemplateRows: "auto minmax(0, 1fr)",
   gap: 6
 };
 
@@ -141,7 +144,8 @@ const toolbarStyle: CSSProperties = {
 
 const contentStyle: CSSProperties = {
   display: "grid",
-  gridTemplateRows: "1fr 1fr",
+  // Two equal, independently-shrinkable rows so both plots stay fully within the viewport.
+  gridTemplateRows: "minmax(0, 1fr) minmax(0, 1fr)",
   gap: 0,
   minHeight: 0,
   overflow: "hidden"
@@ -149,7 +153,7 @@ const contentStyle: CSSProperties = {
 
 const panelStyle: CSSProperties = {
   display: "grid",
-  gridTemplateRows: "auto 1fr",
+  gridTemplateRows: "auto minmax(0, 1fr)",
   backgroundColor: "rgba(255,255,255,0.94)",
   border: "1.5px solid #000",
   overflow: "hidden",

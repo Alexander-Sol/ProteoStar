@@ -3,6 +3,14 @@ export type SlotIndex = 0 | 1;
 export interface PlotViewport {
   xMin: number | null;
   xMax: number | null;
+  /**
+   * Optional persisted y-axis bounds. When both are set the plot honors them instead of auto-fitting
+   * the y-axis to the visible peaks — this is what holds an isotope envelope at a stable height while
+   * stepping through neighboring scans (otherwise the y-axis refits per scan and the envelope shrinks
+   * as a taller peak enters view). `null`/absent means "auto-fit y to the visible x-window".
+   */
+  yMin?: number | null;
+  yMax?: number | null;
 }
 
 export interface NumericRange {
@@ -50,6 +58,16 @@ export interface RtRegion {
   color: string;
 }
 
+// A text label anchored at a spectrum peak (m/z + inferred charge for prominent MS1 peaks).
+export interface PeakAnnotation {
+  /** m/z of the peak the label points at (x position). */
+  mz: number;
+  /** Peak intensity (y position the label sits above). */
+  intensity: number;
+  /** Label text, e.g. `647.65 · z2`. */
+  text: string;
+}
+
 // A predicted isotope-peak m/z line drawn over a spectrum.
 export interface EnvelopeLine {
   mz: number;
@@ -88,5 +106,7 @@ export interface SpectrumPlotProps {
   rangeSelectionEnabled: boolean;
   /** Predicted isotope-peak m/z lines overlaid on the spectrum (optional). */
   envelope?: readonly EnvelopeLine[];
+  /** Text labels on prominent peaks (m/z + inferred charge for MS1). Optional. */
+  annotations?: readonly PeakAnnotation[];
   onEvent(event: SpectrumPlotEvent): void;
 }
