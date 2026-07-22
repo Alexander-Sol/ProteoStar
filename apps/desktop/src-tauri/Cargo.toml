@@ -11,6 +11,15 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# End-to-end GUI testing. Compiles the tauri-plugin-playwright control server
+# into the app so Playwright can drive the real webview (see e2e/README.md).
+# Kept off by default so release builds never ship the testing server; enable
+# with `--features e2e-testing` (or `tauri dev --features e2e-testing`).
+# `tauri/dynamic-acl` is needed so main.rs can register the playwright capability
+# at runtime instead of in the always-compiled capabilities/ dir.
+e2e-testing = ["dep:tauri-plugin-playwright", "tauri/dynamic-acl"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
@@ -21,3 +30,6 @@ arrow = { workspace = true }
 flashlfq-core = { path = "../../../crates/flashlfq-core" }
 # Native file-open dialog (real .raw/mzML path → open_dataset).
 tauri-plugin-dialog = "2"
+# E2E control server for Playwright — only linked under the `e2e-testing` feature.
+# On Windows the plugin listens on TCP 127.0.0.1:6274; on unix, a socket.
+tauri-plugin-playwright = { version = "0.4", optional = true }
