@@ -1001,10 +1001,10 @@ export function App() {
           ) : null}
           {features.length > 0 ? (
             <PanelActionButton
-              pressed={showScanFeatures}
+              pressed={!showScanFeatures}
               onClick={() => setShowScanFeatures((v) => !v)}
             >
-              Features in scan
+              Selected only
             </PanelActionButton>
           ) : null}
         </>
