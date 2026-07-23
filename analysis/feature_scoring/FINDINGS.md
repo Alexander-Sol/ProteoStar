@@ -57,6 +57,23 @@ regime; PPM Spread ties it only down to ~70% retained then falls off.
    don't test additivity. This is the decoy-calibrated multivariate-scoring question and is
    the productive direction for a scoring system — single new columns are not.
 
+## CORRECTION (2026-07-22) — "low intensity = junk" is NOT established
+
+Earlier phrasing in this doc ("the junk is the low-intensity tail", "target junk is a low-intensity
+feature") overstated the case. The `within_band.py` test shows:
+- PSM-matched (real) features are 69–76% in the top intensity quintile; the lowest quintile holds
+  almost none. But the PSM reference is **abundance-biased** (an ID needs MS2-level signal), so it is
+  blind to genuine low-abundance features. Intensity's dominance on PSM recall is therefore partly a
+  *reference artifact*, not proof that low-intensity features are noise.
+- Envelope fit (decon) separates real from unmatched with **AUC 0.82 in the HIGH-intensity band** —
+  so there is substantial junk even among abundant features, and fit catches it. => intensity **and**
+  fit together should beat intensity alone (a 2-D gate never actually tested). Persistence separates
+  real in the lowest band (Q1 AUC 0.62); other shape scores are ~0.5 (inconclusive — tiny labeled
+  counts + real-unidentified contamination, NOT evidence shape fails there).
+
+Implication for the SVM below: a useful model must **keep intensity and add fit/persistence**, not
+discard intensity as the decoy-only training did.
+
 ## Semi-supervised SVM rescore (2026-07-22) — decoys as negatives DON'T beat intensity
 
 Tried feature-level Percolator (`svm_rescore.py`): NEGATIVES = decoy-model detections (spacing =
