@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 import {
@@ -84,6 +84,9 @@ const DECOY_INDEX_BASE = 10_000_000;
 // responsive. The strongest features are always the ones kept.
 const RUG_CAP = 8000;
 const DRAWER_CAP = 800;
+// The feature drawer paginates this many rows per page (so every feature is reachable via the pager,
+// and the page can auto-follow a selection made by clicking a peak / rug marker).
+const DRAWER_PAGE = 30;
 
 // m/z tolerance for marking a comb tooth "detected" against the displayed scan's peaks. Matches the
 // detector's default ppm tolerance so the overlay's notion of a hit agrees with detection.
@@ -640,13 +643,26 @@ export function App() {
     [handle, spectrum, spectrumPinned, reframeSpectrum]
   );
 
-  // Click a spectrum peak (walkthrough only) → make it the seed at the current zSeed (frame it).
+  // Click a spectrum peak: in walkthrough, make it the ladder seed at the current zSeed (frame it);
+  // otherwise select the feature that owns the peak — highlighting its row in the list and
+  // emphasising it on the plots — WITHOUT reframing, so you stay on the scan you're inspecting.
   const handlePeakClick = useCallback(
     (mz: number) => {
-      if (!walkthrough || indexing) return;
-      void computeLadder(mz, zSeed, true);
+      if (indexing) return;
+      if (walkthrough) {
+        void computeLadder(mz, zSeed, true);
+        return;
+      }
+      if (!spectrum || spectrum.msLevel !== 1 || features.length === 0) return;
+      const idx = findFeatureAtPeak(features, spectrum.retentionTime, mz, DETECT_PPM);
+      if (idx === null) return;
+      setSelected(idx);
+      setSelectedDecoy(null);
+      setDrawerOpen(true); // surface the list so the highlighted row is visible
+      setDecoyDrawerOpen(false);
+      setPsmDrawerOpen(false);
     },
-    [walkthrough, indexing, zSeed, computeLadder]
+    [walkthrough, indexing, zSeed, computeLadder, spectrum, features]
   );
 
   // Change the anchoring charge; re-score the current seed and zoom in on the new charge's comb.
@@ -814,7 +830,10 @@ export function App() {
     }
     if (selected !== null) {
       const f = features[selected];
-      return f ? matchedPeakHighlights(f, peaks, chargeColor, 12) : [];
+      // One colour for the whole feature (not per-charge) — its stable m/z-ranked colour, so it
+      // matches how the same feature looks in the scan view.
+      const color = featureColorByIndex[selected] ?? SCAN_FEATURE_COLORS[0];
+      return f ? matchedPeakHighlights(f, peaks, () => color, 12) : [];
     }
     if (selectedDecoy !== null) {
       const f = decoys[selectedDecoy];
@@ -1438,6 +1457,33 @@ function nearestPeak(
   return lo < n && peaks[lo].mz <= mz + tol ? peaks[lo] : null;
 }
 
+// The feature that owns a clicked peak in the current scan: among features eluting at `rt`, the one
+// whose predicted isotope comb has a tooth closest (in ppm, within tolerance) to `mz`. Returns its
+// index in `features`, or null. Lets a peak click select/highlight its feature.
+function findFeatureAtPeak(
+  features: readonly Feature[],
+  rt: number,
+  mz: number,
+  ppm: number
+): number | null {
+  let best: number | null = null;
+  let bestErr = ppm;
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    if (!featureElutesAt(f, rt)) continue;
+    for (const z of f.chargeStates) {
+      for (const tooth of isotopeGrid(f.monoisotopicMass, z, 12)) {
+        const err = (Math.abs(tooth - mz) / mz) * 1e6;
+        if (err <= bestErr) {
+          bestErr = err;
+          best = i;
+        }
+      }
+    }
+  }
+  return best;
+}
+
 // Feature-membership highlights: for each predicted isotope tooth that matches an observed peak
 // (within DETECT_PPM), a marker at that peak's true (m/z, intensity), coloured by `colorFor(charge)`.
 // Predicted-but-absent teeth produce nothing — the overlay marks only real peaks.
@@ -1456,7 +1502,31 @@ function matchedPeakHighlights(
   });
 }
 
-// A right-side drawer listing resolved features; click a row to select.
+// Sortable columns of the feature drawer.
+type FeatureSortKey =
+  | "mass" | "z" | "mz" | "rt" | "intensity"
+  | "decon" | "minDecon" | "maxIso" | "ppm" | "corrAll" | "corr5" | "corr3";
+
+// Numeric sort value for a feature under `key`; NaN for a missing score (sorted last either way).
+function featureSortValue(f: Feature, key: FeatureSortKey): number {
+  switch (key) {
+    case "mass": return f.monoisotopicMass;
+    case "z": return f.primaryCharge;
+    case "mz": return f.detectedMz;
+    case "rt": return f.rtApex;
+    case "intensity": return f.summedIntensity;
+    case "decon": return f.deconScore ?? NaN;
+    case "minDecon": return f.minDeconScore ?? NaN;
+    case "maxIso": return f.maxNumIsotopes ?? NaN;
+    case "ppm": return f.ppmSpread ?? NaN;
+    case "corrAll": return f.isoCorrAll ?? NaN;
+    case "corr5": return f.isoCorrTop5 ?? NaN;
+    case "corr3": return f.isoCorrTop3 ?? NaN;
+  }
+}
+
+// A right-side drawer listing resolved features; click a row to select. Sortable by any column and
+// paginated; the page auto-follows the current selection.
 function FeatureDrawer({
   features,
   selected,
@@ -1474,70 +1544,206 @@ function FeatureDrawer({
   onClose: () => void;
   title?: string;
 }) {
-  const shown = features.slice(0, DRAWER_CAP);
-  // Only render the seven score columns when the loaded TSV carried them (the table scrolls
-  // horizontally when it does — see drawerBodyStyle). Unscored files keep the compact layout.
-  const scored = shown.some(hasScores);
+  const [sortKey, setSortKey] = useState<FeatureSortKey>("intensity");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Indices into `features`, sorted by the chosen column (missing scores last). We sort INDICES (not
+  // the rows) so onSelect / data-row / `selected` stay in the parent's feature-index space.
+  const sortedIndices = useMemo(() => {
+    const idx = features.map((_, i) => i);
+    const dir = sortDir === "asc" ? 1 : -1;
+    idx.sort((a, b) => {
+      const va = featureSortValue(features[a], sortKey);
+      const vb = featureSortValue(features[b], sortKey);
+      const na = Number.isNaN(va);
+      const nb = Number.isNaN(vb);
+      if (na && nb) return 0;
+      if (na) return 1;
+      if (nb) return -1;
+      return va === vb ? 0 : va < vb ? -dir : dir;
+    });
+    return idx;
+  }, [features, sortKey, sortDir]);
+  const positionOf = useMemo(() => {
+    const m = new Map<number, number>();
+    sortedIndices.forEach((gi, p) => m.set(gi, p));
+    return m;
+  }, [sortedIndices]);
+
+  // Rows per page auto-fit the drawer height (measure effect below), in steps of 5. Any feature is
+  // still reachable via the pager, which can auto-follow a selection made elsewhere (peak / rug click).
+  const [pageSize, setPageSize] = useState(DRAWER_PAGE);
+  const pageCount = Math.max(1, Math.ceil(features.length / pageSize));
+  const [page, setPage] = useState(0);
+  const clampedPage = Math.min(page, pageCount - 1);
+  const start = clampedPage * pageSize;
+  const shown = sortedIndices.slice(start, start + pageSize);
+  // Score columns show only when the loaded TSV carried them; stable across pages.
+  const scored = features.some(hasScores);
+
+  // Reset to the first page on a new feature set or a re-sort. Declared BEFORE the follow effect so
+  // that when something is selected, the follow effect's page wins.
+  useEffect(() => {
+    setPage(0);
+  }, [features, sortKey, sortDir]);
+  // Jump to the page holding the selection — a peak / rug click (or a re-sort / resize) can move it.
+  useEffect(() => {
+    if (selected === null) return;
+    const p = positionOf.get(selected);
+    if (p !== undefined) setPage(Math.floor(p / pageSize));
+  }, [selected, positionOf, pageSize]);
+  // Snap the highlighted row into view once its page has rendered.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (selected === null) return;
+    bodyRef.current
+      ?.querySelector(`tr[data-row="${selected}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selected, clampedPage]);
+  // Auto-fit rows-per-page to the drawer's height, in steps of 5 (re-measured on resize).
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const measure = () => {
+      const row = body.querySelector("tbody tr");
+      const head = body.querySelector("thead");
+      const rowH = row ? row.getBoundingClientRect().height : 0;
+      const headH = head ? head.getBoundingClientRect().height : 0;
+      const avail = body.clientHeight - headH;
+      if (rowH <= 0 || avail <= 0) return;
+      const fit = Math.max(5, Math.floor(avail / rowH / 5) * 5);
+      setPageSize((prev) => (prev === fit ? prev : fit));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(body);
+    return () => ro.disconnect();
+  }, []);
+
+  // A clickable, sort-toggling column header (▲/▼ marks the active sort).
+  const sortTh = (key: FeatureSortKey, label: string, right = false) => (
+    <th
+      style={{ ...(right ? thStyleRight : thStyle), cursor: "pointer", userSelect: "none" }}
+      onClick={() => {
+        if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        else {
+          setSortKey(key);
+          setSortDir("desc");
+        }
+      }}
+      title={`Sort by ${label}`}
+    >
+      {label}
+      {sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
+
+  const first = features.length === 0 ? 0 : start + 1;
+  const last = Math.min(start + pageSize, features.length);
   return (
     <ResizableDrawer width={width} onResize={onResize}>
       <div style={drawerHeaderStyle}>
         <strong>
-          {title}{" "}
-          {features.length > DRAWER_CAP
-            ? `(top ${DRAWER_CAP} of ${features.length})`
-            : `(${features.length})`}
+          {title} ({features.length.toLocaleString()})
         </strong>
         <button onClick={onClose} style={drawerCloseStyle} type="button">
           ✕
         </button>
       </div>
-      <div style={drawerBodyStyle}>
+      {features.length > pageSize ? (
+        <div style={drawerPagerStyle}>
+          <button
+            style={pagerBtnStyle}
+            disabled={clampedPage === 0}
+            onClick={() => setPage(0)}
+            type="button"
+            title="First page"
+          >
+            ⏮
+          </button>
+          <button
+            style={pagerBtnStyle}
+            disabled={clampedPage === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            type="button"
+            title="Previous page"
+          >
+            ◀
+          </button>
+          <span style={pagerLabelStyle}>
+            {first.toLocaleString()}–{last.toLocaleString()} of {features.length.toLocaleString()}
+          </span>
+          <button
+            style={pagerBtnStyle}
+            disabled={clampedPage >= pageCount - 1}
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            type="button"
+            title="Next page"
+          >
+            ▶
+          </button>
+          <button
+            style={pagerBtnStyle}
+            disabled={clampedPage >= pageCount - 1}
+            onClick={() => setPage(pageCount - 1)}
+            type="button"
+            title="Last page"
+          >
+            ⏭
+          </button>
+        </div>
+      ) : null}
+      <div style={drawerBodyStyle} ref={bodyRef}>
         <table style={tableStyle}>
           <thead>
             <tr>
-              <th style={thStyle}>Mono mass</th>
-              <th style={thStyle}>z</th>
-              <th style={thStyle}>m/z</th>
-              <th style={thStyle}>RT</th>
-              <th style={thStyleRight}>Intensity</th>
+              {sortTh("mass", "Mono mass")}
+              {sortTh("z", "z")}
+              {sortTh("mz", "m/z")}
+              {sortTh("rt", "RT")}
+              {sortTh("intensity", "Intensity", true)}
               {scored ? (
                 <>
-                  <th style={thStyleRight}>Decon</th>
-                  <th style={thStyleRight}>MinDec</th>
-                  <th style={thStyleRight}>MaxIso</th>
-                  <th style={thStyleRight}>PPM</th>
-                  <th style={thStyleRight}>Corr(all)</th>
-                  <th style={thStyleRight}>Corr5</th>
-                  <th style={thStyleRight}>Corr3</th>
+                  {sortTh("decon", "Decon", true)}
+                  {sortTh("minDecon", "MinDec", true)}
+                  {sortTh("maxIso", "MaxIso", true)}
+                  {sortTh("ppm", "PPM", true)}
+                  {sortTh("corrAll", "Corr(all)", true)}
+                  {sortTh("corr5", "Corr5", true)}
+                  {sortTh("corr3", "Corr3", true)}
                 </>
               ) : null}
             </tr>
           </thead>
           <tbody>
-            {shown.map((f, i) => (
-              <tr
-                key={i}
-                onClick={() => onSelect(i)}
-                style={i === selected ? rowSelectedStyle : rowStyle}
-              >
-                <td style={tdStyle}>{f.monoisotopicMass.toFixed(2)}</td>
-                <td style={tdStyle}>{f.chargeStates.join(",")}</td>
-                <td style={tdStyle}>{f.detectedMz.toFixed(3)}</td>
-                <td style={tdStyle}>{f.rtApex.toFixed(2)}</td>
-                <td style={tdStyleRight}>{f.summedIntensity.toExponential(1)}</td>
-                {scored ? (
-                  <>
-                    <td style={tdStyleRight}>{fmtScore(f.deconScore)}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.minDeconScore)}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.maxNumIsotopes, { digits: 0 })}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.ppmSpread, { sentinel: 999, digits: 1 })}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.isoCorrAll, { sentinel: -2 })}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.isoCorrTop5, { sentinel: -2 })}</td>
-                    <td style={tdStyleRight}>{fmtScore(f.isoCorrTop3, { sentinel: -2 })}</td>
-                  </>
-                ) : null}
-              </tr>
-            ))}
+            {shown.map((gi) => {
+              const f = features[gi];
+              return (
+                <tr
+                  key={gi}
+                  data-row={gi}
+                  onClick={() => onSelect(gi)}
+                  style={gi === selected ? rowSelectedStyle : rowStyle}
+                >
+                  <td style={tdStyle}>{f.monoisotopicMass.toFixed(2)}</td>
+                  <td style={tdStyle}>{f.chargeStates.join(",")}</td>
+                  <td style={tdStyle}>{f.detectedMz.toFixed(3)}</td>
+                  <td style={tdStyle}>{f.rtApex.toFixed(2)}</td>
+                  <td style={tdStyleRight}>{f.summedIntensity.toExponential(1)}</td>
+                  {scored ? (
+                    <>
+                      <td style={tdStyleRight}>{fmtScore(f.deconScore)}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.minDeconScore)}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.maxNumIsotopes, { digits: 0 })}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.ppmSpread, { sentinel: 999, digits: 1 })}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.isoCorrAll, { sentinel: -2 })}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.isoCorrTop5, { sentinel: -2 })}</td>
+                      <td style={tdStyleRight}>{fmtScore(f.isoCorrTop3, { sentinel: -2 })}</td>
+                    </>
+                  ) : null}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1780,8 +1986,8 @@ const drawerStyle: React.CSSProperties = {
   backgroundColor: "#ffffff",
   borderLeft: "1.5px solid #000",
   boxShadow: "-4px 0 16px rgba(0,0,0,0.12)",
-  display: "grid",
-  gridTemplateRows: "auto 1fr",
+  display: "flex",
+  flexDirection: "column",
   zIndex: 1000
 };
 // Thin draggable strip on the drawer's left edge (straddling the border) for resizing.
@@ -1809,7 +2015,27 @@ const drawerCloseStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: "0.9rem"
 };
-const drawerBodyStyle: React.CSSProperties = { overflow: "auto", minHeight: 0 };
+const drawerPagerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  padding: "4px 8px",
+  borderBottom: "1px solid #d5deeb",
+  fontSize: "0.78rem",
+  color: "#3a4a60"
+};
+const pagerBtnStyle: React.CSSProperties = {
+  border: "1px solid #cbd6e5",
+  background: "#f4f7fb",
+  borderRadius: 4,
+  cursor: "pointer",
+  padding: "1px 7px",
+  lineHeight: 1.4,
+  fontSize: "0.8rem"
+};
+const pagerLabelStyle: React.CSSProperties = { minWidth: 132, textAlign: "center" };
+const drawerBodyStyle: React.CSSProperties = { overflow: "auto", minHeight: 0, flex: 1 };
 const tableStyle: React.CSSProperties = {
   width: "100%",
   borderCollapse: "collapse",
