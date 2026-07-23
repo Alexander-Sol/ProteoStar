@@ -74,8 +74,9 @@ top quintile (Q5 0.73–0.80). So its apparent power is largely an intensity pro
 
 **Additivity (supervised, 10-min, best case):** adds only +0.1 to +0.5 pp on top of the full model
 (10% retained: full 92.1% → full+isocorr 92.6%). Decon already captures most co-elution info (a good
-envelope fit implies co-elution), so IsoCorr is largely redundant. On the big files (per-quintile
-~0.5) the additive value is negligible.
+envelope fit implies co-elution), so IsoCorr is largely redundant. On the 2-hr it adds essentially
+nothing (full 85.1% → full+isocorr 85.2% at 10% retained; +0.0 pp over intensity alone), confirming
+the per-quintile ~0.5.
 
 **Conclusion:** physically motivated and a fine intensity-correlated quality score (Top3 best variant),
 but it hits the same wall as every other shape feature — no real-vs-junk signal at fixed intensity on
