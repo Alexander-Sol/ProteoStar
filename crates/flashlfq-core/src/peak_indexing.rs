@@ -1256,9 +1256,16 @@ pub fn read_tic_chromatogram<P: Into<PathBuf> + Clone>(
 /// TIC. Fast enough to run on the open path so the smooth chromatogram appears without waiting for
 /// indexing.
 ///
-/// Returns an **empty** chromatogram (not an error) when the file doesn't expose per-MS1-scan TIC
-/// metadata — the first MS1 scan missing the cvParam aborts the pass — so the caller can fall back
-/// to the native TIC or the indexed MS1 TIC. RTs are in minutes, parallel to intensities.
+/// Returns an **empty** chromatogram (not an error) when the file doesn't expose a usable
+/// per-MS1-scan TIC metadata — so the caller can fall back to the native TIC or the indexed MS1
+/// TIC. RTs are in minutes, parallel to intensities.
+///
+/// Thermo `.raw` is deliberately **not** attempted here: mzdata's `ThermoRawReader` recomputes each
+/// spectrum's summary via `update_summaries()` from the *loaded* peaks, and at
+/// [`DetailLevel::MetadataOnly`] no peaks are loaded, so it overwrites the `total ion current`
+/// cvParam with `0` for every scan — a flat, all-zero TIC. There is no cheap per-scan MS1 TIC in the
+/// Thermo metadata (the reader exposes only the whole-file native TIC chromatogram), so we return
+/// empty and let the caller use the native TIC until the indexed MS1 TIC is built.
 pub fn read_ms1_tic_metadata<P: Into<PathBuf> + Clone>(
     path: P,
 ) -> std::io::Result<TicChromatogram> {
@@ -1268,17 +1275,12 @@ pub fn read_ms1_tic_metadata<P: Into<PathBuf> + Clone>(
         .map(|e| e.eq_ignore_ascii_case("raw"))
         .unwrap_or(false);
     if is_thermo_raw {
-        let reader = ThermoRawReader::new_with_detail_level_and_centroiding(
-            path,
-            DetailLevel::MetadataOnly,
-            false,
-        )?;
-        Ok(collect_ms1_tic(reader))
-    } else {
-        let mut reader = MZReader::open_path(path)?;
-        reader.set_detail_level(DetailLevel::MetadataOnly);
-        Ok(collect_ms1_tic(reader))
+        // See the doc comment: metadata-level Thermo reads yield a zeroed TIC. Bail to empty.
+        return Ok(TicChromatogram { retention_times: Vec::new(), intensities: Vec::new() });
     }
+    let mut reader = MZReader::open_path(path)?;
+    reader.set_detail_level(DetailLevel::MetadataOnly);
+    Ok(collect_ms1_tic(reader))
 }
 
 /// Collects the MS1-only TIC from a metadata-level spectrum iterator (see [`read_ms1_tic_metadata`]).

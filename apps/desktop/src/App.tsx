@@ -211,10 +211,11 @@ export function App() {
         setLoad({ status: "loading", message: `${progress.phase}…` });
       });
       const meta = await p.getMetadata();
-      // The fast-path TIC is now the smooth MS1-only trace read from per-scan metadata (no peak
-      // decode, no index), so paint it immediately — no jagged preview, and no waiting on the
-      // full index. Empty only for files without per-scan TIC metadata, which fill in from the
-      // index via `markReady` (below); the panel shows a "building index" note until then.
+      // Paint the fast-path TIC immediately (no peak decode, no index). For mzML it's the smooth
+      // MS1-only trace from per-scan metadata — final, no later swap. For Thermo `.raw` it's the
+      // provisional native full TIC (all MS levels), which `markReady` (below) swaps for the smooth
+      // MS1 trace once the index lands. Empty only for files exposing neither, which fill in from
+      // the index via `markReady`; the panel shows a "building index" note until then.
       const tic = await p.getTicTrace({ maxPoints: 4000 });
       setHandle(h);
       setProvider(p);
@@ -268,9 +269,10 @@ export function App() {
       setIndexing(false);
       try {
         setMetadata(await provider.getMetadata());
-        // Re-fetch the TIC. For files with per-scan TIC metadata this returns the same smooth
-        // MS1-only trace already painted on open (no visible change). For files *without* it, the
-        // fast-path trace was empty and only now fills in from the freshly-built MS1 index.
+        // Re-fetch the TIC. For mzML (per-scan MS1 TIC metadata) this returns the same smooth
+        // MS1-only trace already painted on open (no visible change). For Thermo `.raw` the fast
+        // path only had the native full TIC (or nothing); this swaps in the smooth MS1-only trace
+        // from the freshly-built index.
         setTicPoints(await provider.getTicTrace({ maxPoints: 4000 }));
         // MS1 scan summaries power arrow-key scan stepping (available post-index).
         setScanSummaries(await provider.getScanSummaries());
@@ -1150,8 +1152,28 @@ export function App() {
             uirevision={spectrumUiRev}
             rangeSelectionEnabled={false}
             onEvent={(e) => {
-              if (e.type === "peak-click") handlePeakClick(e.peak.mz);
-              else if (e.type === "xrange-change") setSpectrumXView(e.range);
+              if (e.type === "peak-click") {
+                handlePeakClick(e.peak.mz);
+              } else if (e.type === "xrange-change") {
+                const range = e.range;
+                if (range === null) {
+                  // Double-click autorange reset: clear the persisted x-zoom and re-fit cleanly
+                  // (bumps uiRev so Plotly re-applies the full range).
+                  reframeSpectrum(createDefaultViewport());
+                } else {
+                  // Capture the user's interactive zoom/pan into the viewport — the single source of
+                  // truth that drives the `range` prop — WITHOUT bumping uiRev. This is what makes a
+                  // manual zoom survive a re-render (new-spectrum select, scan step): the range prop
+                  // re-applies it deterministically instead of relying on Plotly's `uirevision`
+                  // preserving internal state across data changes (which it does not reliably do).
+                  setSpectrumXView(range);
+                  setSpectrumViewport((v) =>
+                    v.xMin === range.min && v.xMax === range.max
+                      ? v
+                      : { ...v, xMin: range.min, xMax: range.max }
+                  );
+                }
+              }
             }}
           />
         )}

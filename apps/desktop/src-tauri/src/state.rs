@@ -33,10 +33,15 @@ pub struct OpenDataset {
     /// Provisional at open (file name/format + RT range from the TIC); refined to
     /// exact RT/m-z ranges and the real MS1 scan count once indexing completes.
     pub metadata: Arc<Mutex<DatasetMetadata>>,
-    /// Native instrument-TIC retention times (minutes), available immediately.
+    /// Fast-path TIC retention times (minutes), available immediately at open.
     pub tic_rt: Vec<f64>,
-    /// Native instrument-TIC intensities, parallel to `tic_rt`.
+    /// Fast-path TIC intensities, parallel to `tic_rt`.
     pub tic_intensity: Vec<f32>,
+    /// True when the fast-path TIC is the smooth **MS1-only** trace read from per-scan metadata
+    /// (mzML) — it should be served throughout, never superseded. False when it's the provisional
+    /// **native** full TIC (all MS levels — the Thermo `.raw` fallback, since mzdata cannot supply a
+    /// per-scan MS1 TIC at metadata level); that one is only shown until the indexed MS1 TIC lands.
+    pub tic_is_ms1: bool,
     /// The file kept open for on-demand single-scan reads, so spectra can be shown by RT
     /// before the full index exists. Behind a `Mutex` (the reader needs `&mut self` per read)
     /// and an `Arc` so a command can clone it, drop the state lock, and read off-thread.

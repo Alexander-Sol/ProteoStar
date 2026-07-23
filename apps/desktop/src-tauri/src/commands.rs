@@ -133,25 +133,40 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-/// Fast pass: open the file for on-demand reads and build a **smooth MS1-only TIC** without the
-/// full peak index. The displayed TIC is read from per-scan `total ion current` metadata
-/// ([`read_ms1_tic_metadata`] — no peak decode, no index), so it appears quickly and is MS1-only
-/// (not the jagged native TIC, which interleaves MS2). Falls back to the native instrument TIC
-/// when the file exposes no per-scan TIC metadata; an empty pair then means the served TIC fills
-/// in from the background index instead. Runs on a blocking thread (`.raw` pulls a .NET runtime).
-fn open_fast(path: &str) -> Result<(RandomAccessMs1Reader, Vec<f64>, Vec<f32>), ViewerError> {
+/// The TIC produced by the fast pass, plus whether it is the smooth MS1-only trace or the
+/// provisional native full TIC — see [`OpenDataset::tic_is_ms1`].
+struct FastTic {
+    rt: Vec<f64>,
+    intensity: Vec<f32>,
+    is_ms1: bool,
+}
+
+/// Fast pass: open the file for on-demand reads and build a TIC without the full peak index. For
+/// mzML this is a **smooth MS1-only TIC** read from per-scan `total ion current` metadata
+/// ([`read_ms1_tic_metadata`] — no peak decode, no index): quick and not the jagged native TIC,
+/// which interleaves MS2. For Thermo `.raw` (where mzdata can't supply a per-scan MS1 TIC at
+/// metadata level) it falls back to the **native** instrument TIC — the whole-file chromatogram,
+/// shown as-is until the background index yields the smooth MS1 trace. An empty pair means the
+/// served TIC fills in from the index instead. Runs on a blocking thread (`.raw` pulls a .NET
+/// runtime).
+fn open_fast(path: &str) -> Result<(RandomAccessMs1Reader, FastTic), ViewerError> {
     let mut reader =
         RandomAccessMs1Reader::open(path).map_err(|e| ViewerError::new("READ_ERROR", e.to_string()))?;
-    let (rt, intensity) = match read_ms1_tic_metadata(path) {
-        Ok(tic) if !tic.retention_times.is_empty() => (tic.retention_times, tic.intensities),
-        // No per-scan TIC metadata: fall back to the native instrument TIC (may be jagged), or an
-        // empty pair (served TIC then comes from the background MS1 index once it lands).
+    let tic = match read_ms1_tic_metadata(path) {
+        Ok(tic) if !tic.retention_times.is_empty() => {
+            FastTic { rt: tic.retention_times, intensity: tic.intensities, is_ms1: true }
+        }
+        // No per-scan MS1 TIC metadata (e.g. Thermo `.raw`): fall back to the native instrument TIC
+        // (all MS levels — provisional, superseded by the indexed MS1 TIC), or an empty pair (served
+        // TIC then comes from the background MS1 index once it lands).
         _ => match reader.tic() {
-            Some(tic) => (tic.retention_times, tic.intensities),
-            None => (Vec::new(), Vec::new()),
+            Some(tic) => {
+                FastTic { rt: tic.retention_times, intensity: tic.intensities, is_ms1: false }
+            }
+            None => FastTic { rt: Vec::new(), intensity: Vec::new(), is_ms1: false },
         },
     };
-    Ok((reader, rt, intensity))
+    Ok((reader, tic))
 }
 
 /// Background pass: read every MS1 scan, build the peak index, and compute the per-scan
@@ -313,17 +328,18 @@ pub async fn open_dataset(
     // Phase 1 — fast: open the reader + native TIC only, so the viewer can paint the TIC and
     // serve spectra by RT immediately (no peak decode / index build yet).
     let path_for_open = path.clone();
-    let (reader, tic_rt, tic_intensity) =
+    let (reader, fast_tic) =
         tauri::async_runtime::spawn_blocking(move || open_fast(&path_for_open))
             .await
             .map_err(|e| ViewerError::internal(format!("open task failed: {e}")))??;
 
-    let metadata = provisional_metadata(&path, &tic_rt);
+    let metadata = provisional_metadata(&path, &fast_tic.rt);
     let handle = state.next.fetch_add(1, Ordering::SeqCst) + 1;
     let dataset = OpenDataset {
         metadata: Arc::new(std::sync::Mutex::new(metadata.clone())),
-        tic_rt,
-        tic_intensity,
+        tic_rt: fast_tic.rt,
+        tic_intensity: fast_tic.intensity,
+        tic_is_ms1: fast_tic.is_ms1,
         reader: Arc::new(std::sync::Mutex::new(reader)),
         indexed: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -469,31 +485,36 @@ pub async fn get_tic_trace(
     let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
 
     let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
-    if !d.tic_rt.is_empty() {
-        // Preferred: the smooth **MS1-only** TIC read from per-scan `total ion current` metadata on
-        // the fast path (`read_ms1_tic_metadata`) — available immediately, no peak index needed,
-        // and MS1-only (so it doesn't need to wait on the full index and isn't the jagged native
-        // TIC). `scanIndex` here is the TIC point's ordinal, not an MS1 scan index; TIC clicks
-        // navigate by RT, which `get_nearest_scan` resolves to a real scan once indexing is done.
-        for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
-            if in_rt_window(t, rt_min, rt_max) {
-                rt.push(t as f32);
-                intensity.push(inten);
-                scan_index.push(i as u32);
-            }
-        }
-    } else if let Some((scans, tic)) = d
-        .indexed
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|i| (i.scans.clone(), i.tic.clone())))
-    {
-        // Fallback (file exposed no per-scan TIC metadata): the per-scan summed-centroid MS1 TIC,
-        // available only once the index is built. Here `scanIndex` *is* the MS1 scan index.
+
+    // The goal is always the smooth **MS1-only** TIC. mzML gets it immediately on the fast path
+    // (`tic_is_ms1`), so serve that directly and never swap. Thermo `.raw` gets only the provisional
+    // native full TIC on the fast path (all MS levels), so we prefer the indexed summed-centroid MS1
+    // TIC once the background index has built it, and show the native TIC only until then.
+    let indexed = if d.tic_is_ms1 {
+        None
+    } else {
+        d.indexed
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|i| (i.scans.clone(), i.tic.clone())))
+    };
+    if let Some((scans, tic)) = indexed {
+        // The per-scan summed-centroid MS1 TIC. Here `scanIndex` *is* the MS1 scan index.
         for (i, s) in scans.iter().enumerate() {
             if in_rt_window(s.retention_time, rt_min, rt_max) {
                 rt.push(s.retention_time as f32);
                 intensity.push(tic[i]);
+                scan_index.push(i as u32);
+            }
+        }
+    } else if !d.tic_rt.is_empty() {
+        // The fast-path TIC: mzML's smooth MS1-only metadata trace, or `.raw`'s provisional native
+        // TIC before indexing. `scanIndex` here is the TIC point's ordinal, not an MS1 scan index;
+        // TIC clicks navigate by RT, which `get_nearest_scan` resolves to a real scan post-index.
+        for (i, (&t, &inten)) in d.tic_rt.iter().zip(d.tic_intensity.iter()).enumerate() {
+            if in_rt_window(t, rt_min, rt_max) {
+                rt.push(t as f32);
+                intensity.push(inten);
                 scan_index.push(i as u32);
             }
         }
