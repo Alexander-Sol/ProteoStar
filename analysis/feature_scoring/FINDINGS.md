@@ -57,6 +57,38 @@ regime; PPM Spread ties it only down to ~70% retained then falls off.
    don't test additivity. This is the decoy-calibrated multivariate-scoring question and is
    the productive direction for a scoring system — single new columns are not.
 
+## intensity x fit 2-D gate (2026-07-22) — BEATS intensity alone
+
+`combo_gate.py`: supervised logistic regression, label = PSM-match, evaluated out-of-fold (fair
+generalization test), nested feature sets. Unlike the decoy-SVM, the model KEEPS intensity
+(standardized weight ~+1.0) and ADDS envelope fit on top (ppm-spread ~-1.0, decon ~+0.4). Result —
+recall at retained top-fraction, `int` = intensity baseline:
+
+10-min (rt ±0.5), baseline 98.2%:
+
+| retained | intensity | int+decon | full |
+|---------:|----------:|----------:|-----:|
+| 30% | 96.2% | 96.8% | **97.1%** |
+| 25% | 94.6% | 96.2% | **96.8%** |
+| 20% | 93.5% | 95.9% | **96.0%** |
+| 15% | 90.8% | 94.6% | **95.1%** |
+| 10% | 84.7% | 91.7% | **92.1%** |
+
+65-min (rt ±1.0), baseline 95.6%: smaller but consistent, e.g. 40% retained 92.6% → 93.2%,
+30% 91.5% → 92.0%, 10% 86.0% → 86.9%.
+
+**This is the combination the single-score curves and the decoy-SVM both missed.** `int+decon`
+captures most of the gain (a shippable 2-feature gate); the full model adds a little more on the
+10-min. Biggest wins are in the aggressive-cut regime (10–25% retained) — exactly where we want to
+push feature count down toward comparable-tool levels.
+
+**Caveats:** (1) supervised on the abundance-biased PSM label, so this measures "retains identified
+peptides better" and is a *floor* on value — low-abundance rescue is still unmeasured. (2) A shipped
+detector can't use PSM labels at runtime — needs either fixed trained coefficients (coefficients are
+stable across folds, so plausible) or the noise-faithful decoy to supply negatives label-free. That
+decoy is now doubly motivated: it would let this same model train without PSM labels AND probe the
+low-abundance regime the PSM metric can't see.
+
 ## CORRECTION (2026-07-22) — "low intensity = junk" is NOT established
 
 Earlier phrasing in this doc ("the junk is the low-intensity tail", "target junk is a low-intensity
