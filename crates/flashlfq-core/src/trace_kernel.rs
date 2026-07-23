@@ -280,6 +280,15 @@ pub struct TraceKernelParameters {
     /// evidence is pointed at the actual bottleneck (mono off-by-one). `0` disables the search (mono
     /// stays at the averagine anchor). Ignored unless [`Self::multicharge_enabled`].
     pub multicharge_mono_kmax: i32,
+    /// **Noise-decoy m/z shift** — fraction of the per-charge ¹³C spacing to rigidly offset the WHOLE
+    /// comb (anchor tooth included) off the seed, so every tooth samples the noise *between* real
+    /// isotope peaks. `0.0` (default) = the physical comb anchored on the seed (real detector). A
+    /// non-zero value (e.g. `0.5` = half-tooth) turns detection into a faithful noise null: the anchor
+    /// no longer sits on the intense seed peak, so decoy features get the LOW intensity / poor fit of
+    /// real junk (unlike the [`CombWeightModel`]/[`LatticeMode`] decoys, whose anchor stays on the seed
+    /// and inherit its normal intensity). Applied in [`score_hypothesis`]; the claim gather follows the
+    /// shifted mono, so the whole feature is self-consistent.
+    pub decoy_mz_shift_frac: f64,
 }
 
 impl Default for TraceKernelParameters {
@@ -319,6 +328,7 @@ impl Default for TraceKernelParameters {
             multicharge_enabled: false,
             min_charge_states: 2,
             multicharge_mono_kmax: 3,
+            decoy_mz_shift_frac: 0.0,
         }
     }
 }
@@ -816,7 +826,11 @@ fn score_hypothesis(
     }
     let i_star = most_abundant_index(&weights);
     let offsets = tooth_offsets(charge, weights.len(), params.lattice_mode);
-    let mono_mz = seed_mz - offsets[i_star];
+    // Noise-decoy shift: rigidly offset the whole comb off the seed by a fraction of the per-charge
+    // spacing (0.0 = physical comb on the seed). A non-zero shift moves the anchor off the intense seed
+    // peak so every tooth samples noise between real isotopes — the faithful low-intensity junk null.
+    let mono_mz = seed_mz - offsets[i_star]
+        + params.decoy_mz_shift_frac * (C13_MINUS_C12 / charge.max(1) as f64);
 
     let mut peaks: Vec<IndexedMassSpectralPeak> = Vec::new();
     let mut observed_isotopes: HashSet<usize> = HashSet::new();

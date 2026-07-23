@@ -89,6 +89,41 @@ stable across folds, so plausible) or the noise-faithful decoy to supply negativ
 decoy is now doubly motivated: it would let this same model train without PSM labels AND probe the
 low-abundance regime the PSM metric can't see.
 
+## Option A: noise-faithful decoy + within-band semi-supervised (2026-07-22) — MATCHES the supervised ceiling, label-free
+
+Built a **noise-faithful decoy** (`NOISE_DECOY_SHIFT=<frac>`, detector): rigidly offsets the WHOLE
+real-averagine comb off the seed by `frac × (¹³C/z)` so every tooth (anchor included) samples noise —
+unlike the old decoys whose anchor stayed on the intense seed. Verified faithful: within every
+intensity band the decoy has worse fit than targets (Q5 decon 0.388 vs 0.547, ppm 1.95 vs 1.33).
+
+`within_band_svm.py` — label-free rescoring: negatives = noise decoy; positives = per-band top-q
+targets by apex cosine, re-selected each iteration by out-of-fold model score (semi-supervised);
+train a SHAPE-only model (per-band labels keep intensity out of it), then rank by
+`composite = z(log_intensity) + λ·z(shape)`. PSM GT used for EVAL ONLY.
+
+10-min, recall at retained fraction (λ=0.5, seed-q=0.5), vs intensity and the PSM-supervised ceiling:
+
+| retained | intensity | within-band (label-free) | combo_gate (PSM-supervised) |
+|---------:|----------:|-------------------------:|----------------------------:|
+| 25% | 94.6% | 96.8% | 96.8% |
+| 20% | 93.5% | 95.7% | 96.0% |
+| 15% | 90.8% | 94.4% | 95.1% |
+| 10% | 84.7% | **91.9%** | 92.1% |
+
+**The label-free method recovers essentially the entire supervised gain** (10% retained: 91.9% vs
+supervised 92.1% vs intensity 84.7%). λ≈0.5 (intensity primary, shape secondary) is the sweet spot;
+higher λ over-weights shape and regresses. Shape alone still loses to intensity — the win is the blend.
+
+**Seed fraction — counterintuitive:** top-10% positives (the "confident minority" instinct) does
+WORSE than top-50% (10% retained: 88.3% vs 91.9%). Because the negatives are clean decoys (not
+unlabeled targets), positive *purity* matters less than positive *quantity* — more labeled positives =
+more signal, and the decoy supplies the clean contrast. So Percolator's confident-minority seeding
+doesn't transfer here; a permissive per-band seed is better.
+
+Caveat unchanged: eval is abundance-biased PSM recall, so low-abundance rescue is still unmeasured —
+but the decoy now provides label-free negatives at every intensity, which is the machinery a
+decoy-FDR (not recall) evaluation of the low bands would need.
+
 ## CORRECTION (2026-07-22) — "low intensity = junk" is NOT established
 
 Earlier phrasing in this doc ("the junk is the low-intensity tail", "target junk is a low-intensity

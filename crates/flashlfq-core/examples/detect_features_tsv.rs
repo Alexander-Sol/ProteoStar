@@ -402,6 +402,16 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1000.0);
+    // Noise-decoy m/z shift (NOISE_DECOY_SHIFT=<frac>, default 0 = real detector). A non-zero fraction
+    // (e.g. 0.5 = half-tooth) rigidly offsets the whole comb off the seed so every tooth samples noise
+    // between real isotopes — generates a faithful LOW-intensity junk null for target-decoy training.
+    let decoy_mz_shift_frac = std::env::var("NOISE_DECOY_SHIFT")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if decoy_mz_shift_frac != 0.0 {
+        eprintln!("NOISE_DECOY_SHIFT: comb shifted {decoy_mz_shift_frac} x (¹³C/z) off the seed — noise-decoy pass");
+    }
     // Score model (Change B): SCORE_MODEL=normalized selects the noise-floor-truncated normalised
     // correlation (default raw sum). NOISE_PCT is the percentile of peak intensity used as η (default 5).
     let score_model = match std::env::var("SCORE_MODEL").as_deref() {
@@ -563,6 +573,7 @@ fn main() {
         multicharge_enabled: multicharge,
         min_charge_states,
         multicharge_mono_kmax,
+        decoy_mz_shift_frac,
         ..TraceKernelParameters::default()
     };
     if multicharge {
