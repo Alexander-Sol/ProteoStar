@@ -48,17 +48,20 @@ import type {
 
 const SLOT_COLOR = "#2f6fb0";
 const SELECTED_COLOR = "#e8830c";
-// Feature-rug + envelope colours keyed by charge state.
+// Charge-keyed colours for the charge-centric views only: the walkthrough ladder comb + its drawer
+// swatches, and the per-isotope XIC traces. Features themselves are coloured by FEATURE_COLORS —
+// a feature's colour must not depend on which plot it is drawn in.
 const CHARGE_COLORS = [
   "#2f6fb0", "#c0392b", "#27ae60", "#8e44ad",
   "#d35400", "#16a085", "#b7950b", "#c2185b"
 ];
 
-// "All features in this scan" overlay palette. Each feature's colour is assigned by its rank in
-// GLOBAL m/z order (see `featureColorByIndex`), so a feature keeps the same colour across scans
-// (the top priority) while features near each other in m/z still tend to differ. 8 distinct hues
-// keep adjacent-in-m/z clashes rare.
-const SCAN_FEATURE_COLORS = [
+// THE feature palette — the single source of colour for a feature everywhere it is drawn: the TIC
+// rug, the spectrum overlay, and the drawer swatch. Each feature's colour is assigned by its rank in
+// GLOBAL m/z order (see `featureColorByIndex`), so a feature keeps the same colour across scans and
+// across plots (the top priority) while features near each other in m/z still tend to differ. 8
+// distinct hues keep adjacent-in-m/z clashes rare.
+const FEATURE_COLORS = [
   "#2f6fb0", "#c0392b", "#27ae60", "#8e44ad",
   "#d35400", "#16a085", "#c2185b", "#b7950b"
 ];
@@ -738,11 +741,34 @@ export function App() {
     return traces;
   }, [ticPoints, spectrum, xic, xicIndices, xicMode]);
 
+  // THE per-feature colour, indexed by position in `features`: cycle the palette in GLOBAL m/z
+  // order, so a feature keeps one colour across scans AND across plots (the eluting SET changes
+  // scan-to-scan, but a feature's m/z rank doesn't — consistent colour is the priority) while
+  // features near each other in m/z still tend to differ. Consumed by the TIC rug, the spectrum
+  // overlay, and the drawer swatch; the selected feature overrides to SELECTED_COLOR in all three.
+  // Declared before `featureRug` because that memo reads it during render.
+  const featureColorByIndex = useMemo<string[]>(() => {
+    const order = features.map((f, i) => ({ i, mz: f.detectedMz }));
+    order.sort((a, b) => a.mz - b.mz);
+    const colors = new Array<string>(features.length);
+    order.forEach((o, rank) => {
+      colors[o.i] = FEATURE_COLORS[rank % FEATURE_COLORS.length];
+    });
+    return colors;
+  }, [features]);
+  const featureColor = useCallback(
+    (i: number): string => featureColorByIndex[i] ?? FEATURE_COLORS[0],
+    [featureColorByIndex]
+  );
+  // Decoys are deliberately one flat muted colour everywhere (rug, spectrum, drawer swatch) so the
+  // real features' hues stay meaningful — this keeps the drawer honest about that.
+  const decoyColor = useCallback((): string => DECOY_COLOR, []);
+
   const featureRug = useMemo<FeatureMarker[]>(() => {
     const targets = features.slice(0, RUG_CAP).map((f, i) => ({
       featureIndex: i,
       retentionTime: f.rtApex,
-      color: i === selected ? SELECTED_COLOR : chargeColor(f.primaryCharge),
+      color: i === selected ? SELECTED_COLOR : featureColor(i),
       label: `m/z ${f.detectedMz.toFixed(3)} · z${f.primaryCharge} · ${f.monoisotopicMass.toFixed(1)} Da · RT ${f.rtApex.toFixed(2)}`
     }));
     const decoyMarkers = decoys.slice(0, RUG_CAP).map((f, i) => ({
@@ -753,7 +779,7 @@ export function App() {
     }));
     // Decoys first so target markers draw on top of them within the single rug trace.
     return [...decoyMarkers, ...targets];
-  }, [features, decoys, selected, selectedDecoy]);
+  }, [features, decoys, selected, selectedDecoy, featureColor]);
 
   const regions = useMemo<RtRegion[]>(() => {
     if (selected !== null) {
@@ -766,20 +792,6 @@ export function App() {
     }
     return [];
   }, [features, decoys, selected, selectedDecoy]);
-
-  // Stable per-feature colour for the scan overlay: cycle the palette in GLOBAL m/z order, so a
-  // feature keeps its colour across scans (the eluting SET changes scan-to-scan, but a feature's
-  // m/z rank doesn't — consistent colour is the priority) while features near each other in m/z
-  // still tend to differ. Indexed by position in `features`.
-  const featureColorByIndex = useMemo<string[]>(() => {
-    const order = features.map((f, i) => ({ i, mz: f.detectedMz }));
-    order.sort((a, b) => a.mz - b.mz);
-    const colors = new Array<string>(features.length);
-    order.forEach((o, rank) => {
-      colors[o.i] = SCAN_FEATURE_COLORS[rank % SCAN_FEATURE_COLORS.length];
-    });
-    return colors;
-  }, [features]);
 
   // Sorted m/z of the currently displayed scan's peaks — the lookup for the "detected" comb marker.
   const spectrumMz = useMemo(
@@ -843,17 +855,15 @@ export function App() {
         if (f) items.push({ f, gi: selected });
       }
       return items.flatMap(({ f, gi }) => {
-        const color =
-          gi === selected ? SELECTED_COLOR : featureColorByIndex[gi] ?? SCAN_FEATURE_COLORS[0];
+        const color = gi === selected ? SELECTED_COLOR : featureColor(gi);
         return matchedPeakHighlights(f, peaks, () => color, 6);
       });
     }
     if (selected !== null) {
       const f = features[selected];
-      // One colour for the whole feature (not per-charge) — its stable m/z-ranked colour, so it
-      // matches how the same feature looks in the scan view.
-      const color = featureColorByIndex[selected] ?? SCAN_FEATURE_COLORS[0];
-      return f ? matchedPeakHighlights(f, peaks, () => color, 12) : [];
+      // The selection is SELECTED_COLOR here for the same reason it is on the rug and in the drawer:
+      // one feature, one colour, in every view it appears in.
+      return f ? matchedPeakHighlights(f, peaks, () => SELECTED_COLOR, 12) : [];
     }
     if (selectedDecoy !== null) {
       const f = decoys[selectedDecoy];
@@ -870,7 +880,7 @@ export function App() {
     selectedDecoy,
     features,
     decoys,
-    featureColorByIndex
+    featureColor
   ]);
 
   // Full-height comb lines are now ONLY the walkthrough charge-ladder (a predicted-position
@@ -1212,6 +1222,7 @@ export function App() {
           onResize={setDrawerWidth}
           onSelect={(i) => void selectFeature(i)}
           onClose={() => setDrawerOpen(false)}
+          colorOf={featureColor}
         />
       ) : decoyDrawerOpen && decoys.length > 0 ? (
         <FeatureDrawer
@@ -1221,6 +1232,7 @@ export function App() {
           onResize={setDrawerWidth}
           onSelect={(i) => void selectDecoy(i)}
           onClose={() => setDecoyDrawerOpen(false)}
+          colorOf={decoyColor}
           title="Decoys"
         />
       ) : null}
@@ -1587,6 +1599,7 @@ function FeatureDrawer({
   onResize,
   onSelect,
   onClose,
+  colorOf,
   title = "Features"
 }: {
   features: readonly Feature[];
@@ -1595,6 +1608,9 @@ function FeatureDrawer({
   onResize: (width: number) => void;
   onSelect: (index: number) => void;
   onClose: () => void;
+  // The row's swatch colour, by index into `features` — the SAME lookup the rug and the spectrum
+  // overlay use, so the drawer reads as a legend for the plots rather than a second scheme.
+  colorOf: (index: number) => string;
   title?: string;
 }) {
   const [sortKey, setSortKey] = useState<FeatureSortKey>("intensity");
@@ -1803,6 +1819,7 @@ function FeatureDrawer({
         <table style={tableStyle}>
           <thead>
             <tr>
+              <th style={{ ...thStyle, width: 18, paddingRight: 0 }} title="Plot colour" />
               {sortTh("mass", "Mono mass")}
               {sortTh("z", "z")}
               {sortTh("mz", "m/z")}
@@ -1831,6 +1848,17 @@ function FeatureDrawer({
                   onClick={() => onSelect(gi)}
                   style={gi === selected ? rowSelectedStyle : rowStyle}
                 >
+                  <td style={{ ...tdStyle, paddingRight: 0 }}>
+                    <span
+                      style={{
+                        color: gi === selected ? SELECTED_COLOR : colorOf(gi),
+                        fontSize: 13,
+                        lineHeight: 1
+                      }}
+                    >
+                      ■
+                    </span>
+                  </td>
                   <td style={tdStyle}>{f.monoisotopicMass.toFixed(2)}</td>
                   <td style={tdStyle}>{f.chargeStates.join(",")}</td>
                   <td style={tdStyle}>{f.detectedMz.toFixed(3)}</td>

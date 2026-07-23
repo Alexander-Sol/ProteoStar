@@ -160,9 +160,9 @@ function buildFeatureRugData(markers: readonly FeatureMarker[]): PlotData {
     })) as unknown as PlotData["customdata"],
     marker: {
       symbol: "triangle-up",
-      size: 9,
+      size: 11,
       color: markers.map((m) => m.color),
-      line: { width: 0.5, color: "#1b2a3d" }
+      line: { width: 0.8, color: "#1b2a3d" }
     },
     hovertemplate: "%{customdata.label}<extra></extra>"
   } as unknown as PlotData;
@@ -209,22 +209,50 @@ function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Par
 }
 
 // m/z half-width of a feature-highlight rectangle — a touch wider than the 0.001 peak bar so the
-// colour shows around each peak. Fixed in data units, so it's most visible at inspection zoom.
-const HIGHLIGHT_WIDTH = 0.06;
+// colour shows around each peak. Plotly bar widths are in DATA units, so a fixed width collapses to
+// a sub-pixel sliver once the view spans hundreds of m/z — the highlights effectively vanish when
+// zoomed out. Scale the width with the visible m/z span instead, so a highlight keeps a roughly
+// constant on-screen thickness at any zoom, with a floor that governs at inspection zoom (where a
+// span-proportional width would be thinner than the peak itself).
+const HIGHLIGHT_MIN_WIDTH = 0.09;
+// ~0.5% of the visible span ≈ 5 px on a 1000-px-wide plot. Below a ~18 m/z span the floor wins.
+const HIGHLIGHT_SPAN_FRACTION = 0.005;
+
+/** The m/z span currently on screen: the explicit viewport when set, else the full peak extent
+ *  (what an autoranged axis will fit to). 0 when neither is available. */
+function visibleMzSpan(
+  viewport: { xMin: number | null; xMax: number | null },
+  peaks: readonly { mz: number }[]
+): number {
+  const { xMin, xMax } = viewport;
+  if (xMin !== null && xMin !== undefined && xMax !== null && xMax !== undefined && xMax > xMin) {
+    return xMax - xMin;
+  }
+  if (peaks.length === 0) return 0;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const p of peaks) {
+    if (p.mz < lo) lo = p.mz;
+    if (p.mz > hi) hi = p.mz;
+  }
+  return hi > lo ? hi - lo : 0;
+}
 
 /** Feature-membership highlights: a semi-transparent colored rectangle behind each matched peak (at
  *  the peak's true m/z, as tall as the peak), coloured by the owning feature — drawn behind the peaks
  *  so the real peak stays visible on top. One `bar` trace (cheap even for many features). The peak
  *  `{mz, intensity}` rides in customdata so a click still resolves to a peak (e.g. a walkthrough seed). */
 function buildHighlightTrace(
-  highlights: readonly SpectrumPeakHighlight[] | undefined
+  highlights: readonly SpectrumPeakHighlight[] | undefined,
+  viewport: { xMin: number | null; xMax: number | null },
+  peaks: readonly { mz: number }[]
 ): PlotData {
   const hs = highlights ?? [];
   return {
     type: "bar",
     x: hs.map((h) => h.mz),
     y: hs.map((h) => h.intensity),
-    width: HIGHLIGHT_WIDTH,
+    width: Math.max(HIGHLIGHT_MIN_WIDTH, visibleMzSpan(viewport, peaks) * HIGHLIGHT_SPAN_FRACTION),
     marker: { color: hs.map((h) => h.color), line: { width: 0 } },
     opacity: 0.5,
     customdata: hs.map((h) => ({
@@ -287,7 +315,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   // Highlight trace FIRST so the colored backing rectangles render BEHIND the peaks. Always present
   // (empty when there's nothing to mark) so the trace COUNT stays constant across scan steps — a
   // varying count disrupts Plotly's `uirevision`, which holds the user's zoom fixed while stepping.
-  const data: PlotData[] = [buildHighlightTrace(highlights), ...peakTraces];
+  const data: PlotData[] = [buildHighlightTrace(highlights, viewport, allPeaks), ...peakTraces];
 
   const layout: Partial<Layout> = {
     autosize: true,
