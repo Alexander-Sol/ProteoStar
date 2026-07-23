@@ -9,7 +9,7 @@
 //! Usage:
 //!   cargo run --release --example detect_features_tsv -- <spectra_file> <out.tsv> [reference.tsv]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
@@ -256,6 +256,135 @@ fn open_out(path: &str) -> Option<BufWriter<File>> {
     }
 }
 
+/// Isotope-tooth index of an observed peak relative to a feature's monoisotopic comb: the nearest
+/// integer number of `¹³C/z` steps from `mono_mz`. Used to bin a feature's claimed peaks into teeth.
+#[inline]
+fn tooth_index(mz: f64, mono_mz: f64, spacing: f64) -> i32 {
+    ((mz - mono_mz) / spacing).round() as i32
+}
+
+/// Apply post-detection filtering criteria (experiment, gated by env in `main`):
+///   1. the most-abundant isotope tooth must be observed in ≥ 2 distinct scans;
+///   2. ≥ 2 distinct isotope teeth must co-occur in at least one scan;
+///   3. if the most-abundant tooth is absent for ≥ 2 successive scans, cut the feature at that gap,
+///      keeping the contiguous scan run that contains the apex.
+/// Criterion 3 runs first (it can shrink the feature), then 1 & 2 gate the survivor. Returns `None`
+/// when the feature fails to qualify, dropping it.
+fn filter_detected_feature(f: DetectedFeature) -> Option<DetectedFeature> {
+    use std::collections::{HashMap, HashSet};
+    if f.peaks.is_empty() {
+        return None;
+    }
+    let spacing = C13_MINUS_C12 / f.charge.abs().max(1) as f64;
+    let tooth = |p: &IndexedMassSpectralPeak| tooth_index(p.m() as f64, f.mono_mz, spacing);
+
+    // Most-abundant tooth = the one with the greatest summed intensity across all claimed scans.
+    let mut tooth_intensity: HashMap<i32, f64> = HashMap::new();
+    for p in &f.peaks {
+        *tooth_intensity.entry(tooth(p)).or_insert(0.0) += p.intensity as f64;
+    }
+    let top_tooth = *tooth_intensity
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(k, _)| k)
+        .unwrap();
+
+    // Scans in which the most-abundant tooth is observed, ascending & deduped.
+    let mut top_scans: Vec<i32> = f
+        .peaks
+        .iter()
+        .filter(|p| tooth(p) == top_tooth)
+        .map(|p| p.zero_based_scan_index)
+        .collect();
+    top_scans.sort_unstable();
+    top_scans.dedup();
+    if top_scans.is_empty() {
+        return None;
+    }
+
+    // Criterion 3 — split the top-tooth presence into runs, breaking at any gap of ≥ 2 missing scans.
+    let mut runs: Vec<(i32, i32)> = Vec::new();
+    let (mut lo, mut prev) = (top_scans[0], top_scans[0]);
+    for &s in &top_scans[1..] {
+        if s - prev - 1 >= 2 {
+            runs.push((lo, prev));
+            lo = s;
+        }
+        prev = s;
+    }
+    runs.push((lo, prev));
+    // Keep the run containing the apex scan; if the apex isn't on the top tooth, keep the widest run.
+    let (keep_lo, keep_hi) = runs
+        .iter()
+        .find(|&&(a, b)| f.apex_scan_index >= a && f.apex_scan_index <= b)
+        .copied()
+        .unwrap_or_else(|| *runs.iter().max_by_key(|&&(a, b)| b - a).unwrap());
+
+    let kept_peaks: Vec<IndexedMassSpectralPeak> = f
+        .peaks
+        .iter()
+        .filter(|p| p.zero_based_scan_index >= keep_lo && p.zero_based_scan_index <= keep_hi)
+        .cloned()
+        .collect();
+    if kept_peaks.is_empty() {
+        return None;
+    }
+
+    // Criterion 1 — most-abundant tooth observed in ≥ 2 distinct scans (within the retained run).
+    let top_scan_set: HashSet<i32> = kept_peaks
+        .iter()
+        .filter(|p| tooth(p) == top_tooth)
+        .map(|p| p.zero_based_scan_index)
+        .collect();
+    if top_scan_set.len() < 2 {
+        return None;
+    }
+
+    // Criterion 2 — ≥ 2 distinct teeth co-occur in at least one scan.
+    let mut per_scan_teeth: HashMap<i32, HashSet<i32>> = HashMap::new();
+    for p in &kept_peaks {
+        per_scan_teeth
+            .entry(p.zero_based_scan_index)
+            .or_default()
+            .insert(tooth(p));
+    }
+    if !per_scan_teeth.values().any(|t| t.len() >= 2) {
+        return None;
+    }
+
+    // Recompute the geometry that the cut may have changed.
+    let apex_peak = kept_peaks
+        .iter()
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+        .unwrap();
+    let apex_scan_index = apex_peak.zero_based_scan_index;
+    let apex_rt = apex_peak.retention_time as f64;
+    let start_rt = kept_peaks
+        .iter()
+        .map(|p| p.retention_time as f64)
+        .fold(f64::INFINITY, f64::min);
+    let end_rt = kept_peaks
+        .iter()
+        .map(|p| p.retention_time as f64)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let summed_intensity = kept_peaks.iter().map(|p| p.intensity as f64).sum();
+    let num_isotopes_observed = kept_peaks.iter().map(tooth).collect::<HashSet<i32>>().len();
+
+    Some(DetectedFeature {
+        monoisotopic_mass: f.monoisotopic_mass,
+        charge: f.charge,
+        mono_mz: f.mono_mz,
+        apex_scan_index,
+        apex_rt,
+        start_rt,
+        end_rt,
+        summed_intensity,
+        score: f.score,
+        num_isotopes_observed,
+        peaks: kept_peaks,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -402,6 +531,16 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1000.0);
+    // Noise-decoy m/z shift (NOISE_DECOY_SHIFT=<frac>, default 0 = real detector). A non-zero fraction
+    // (e.g. 0.5 = half-tooth) rigidly offsets the whole comb off the seed so every tooth samples noise
+    // between real isotopes — generates a faithful LOW-intensity junk null for target-decoy training.
+    let decoy_mz_shift_frac = std::env::var("NOISE_DECOY_SHIFT")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if decoy_mz_shift_frac != 0.0 {
+        eprintln!("NOISE_DECOY_SHIFT: comb shifted {decoy_mz_shift_frac} x (¹³C/z) off the seed — noise-decoy pass");
+    }
     // Score model (Change B): SCORE_MODEL=normalized selects the noise-floor-truncated normalised
     // correlation (default raw sum). NOISE_PCT is the percentile of peak intensity used as η (default 5).
     let score_model = match std::env::var("SCORE_MODEL").as_deref() {
@@ -563,6 +702,7 @@ fn main() {
         multicharge_enabled: multicharge,
         min_charge_states,
         multicharge_mono_kmax,
+        decoy_mz_shift_frac,
         ..TraceKernelParameters::default()
     };
     if multicharge {
@@ -639,6 +779,36 @@ fn main() {
     };
     let detect_dur = t1.elapsed();
     timings.push(("detect".into(), detect_dur.as_secs_f64()));
+
+    // --- post-detection experiment filters (opt-in) --------------------------------------------
+    // EXCLUDE_Z1=1: drop all singly-charged (|z|=1) detections.
+    // FILTER_CRITERIA=1: apply the isotope/scan visibility filters (see filter_detected_feature):
+    //   most-abundant m/z seen in ≥2 scans; ≥2 isotopes in some scan; cut on a ≥2-scan mono gap.
+    let exclude_z1 = std::env::var("EXCLUDE_Z1")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    let filter_criteria = std::env::var("FILTER_CRITERIA")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    if exclude_z1 || filter_criteria {
+        let before = detected.len();
+        if exclude_z1 {
+            detected.retain(|f| f.charge.abs() != 1);
+        }
+        let after_z1 = detected.len();
+        if filter_criteria {
+            let src = std::mem::take(&mut detected);
+            detected = src.into_iter().filter_map(filter_detected_feature).collect();
+        }
+        eprintln!(
+            "  post-detect filters: {before} -> {after_z1} (excl z1: {}) -> {} (criteria: {})  [dropped {}]",
+            if exclude_z1 { "on" } else { "off" },
+            detected.len(),
+            if filter_criteria { "on" } else { "off" },
+            before - detected.len()
+        );
+    }
+
     let detected_intensity: f64 = detected.iter().map(|f| f.summed_intensity).sum();
     eprintln!(
         "  {} features detected, explained {:.1}% of ΣTIC  ({:.1?})",
@@ -1554,6 +1724,142 @@ fn write_refined_tsv(path: &str, refined: &[RefinedFeature]) {
     w.flush().unwrap();
 }
 
+/// Per-peak **ppm-error spread** across a member's apex-scan isotope envelope — an intensity-orthogonal
+/// fit-quality score. For the member's detected feature (charge `z`, mono comb `mono_mz`), take the
+/// peaks in the apex scan, assign each to its nearest isotope tooth `mono_mz + k·(¹³C/z)`, keep the
+/// tallest peak per tooth, and return the population standard deviation (ppm) of those per-tooth mass
+/// errors. A real isotope envelope shares one small calibration offset across teeth → low spread; a
+/// noise coincidence's teeth scatter → high spread. Returns `None` for fewer than 2 usable teeth
+/// (single-isotope features can't be scored this way — the caller treats that as "worst").
+fn apex_ppm_spread(m: &RefinedFeature) -> Option<f64> {
+    let f = &m.detected;
+    let z = f.charge.max(1);
+    let spacing = C13_MINUS_C12 / z as f64;
+    if spacing <= 0.0 {
+        return None;
+    }
+    let apex = f.apex_scan_index;
+    // isotope tooth index k -> (tallest intensity so far, its ppm error)
+    let mut best: HashMap<i64, (f64, f64)> = HashMap::new();
+    for p in &f.peaks {
+        if p.zero_based_scan_index != apex {
+            continue;
+        }
+        let mz = p.mz as f64;
+        let k = ((mz - f.mono_mz) / spacing).round();
+        let expected = f.mono_mz + k * spacing;
+        if expected <= 0.0 {
+            continue;
+        }
+        let ppm = (mz - expected) / expected * 1e6;
+        // Guard against a stray peak that binned to a tooth it isn't really on (the detector claimed
+        // within 10 ppm; 20 ppm leaves margin without admitting garbage into the spread).
+        if ppm.abs() > 20.0 {
+            continue;
+        }
+        let e = best.entry(k as i64).or_insert((f64::NEG_INFINITY, 0.0));
+        if p.intensity as f64 > e.0 {
+            *e = (p.intensity as f64, ppm);
+        }
+    }
+    if best.len() < 2 {
+        return None;
+    }
+    let ppms: Vec<f64> = best.values().map(|v| v.1).collect();
+    let mean = ppms.iter().sum::<f64>() / ppms.len() as f64;
+    let var = ppms.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / ppms.len() as f64;
+    Some(var.sqrt())
+}
+
+/// Pearson correlation of two equal-length traces; `None` if fewer than 3 points or either trace is
+/// flat (zero variance — a correlation is undefined).
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    let n = a.len();
+    if n < 3 {
+        return None;
+    }
+    let (ma, mb) = (a.iter().sum::<f64>() / n as f64, b.iter().sum::<f64>() / n as f64);
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (da, db) = (a[i] - ma, b[i] - mb);
+        sab += da * db;
+        saa += da * da;
+        sbb += db * db;
+    }
+    if saa <= 0.0 || sbb <= 0.0 {
+        return None;
+    }
+    Some(sab / (saa.sqrt() * sbb.sqrt()))
+}
+
+/// **Isotopologue co-elution correlation** — the mean pairwise Pearson correlation of the feature's
+/// per-isotope XICs (intensity vs scan) over its elution window. A real feature's isotope traces rise
+/// and fall together (they are one chromatographic peak sampled at ¹³C-spaced m/z), so this is near 1;
+/// a noise coincidence's teeth vary independently, so it is low. Intensity-orthogonal and a cornerstone
+/// signal in Dinosaur/MaxQuant-style detectors.
+///
+/// `top_n` restricts to the `top_n` most intense isotope teeth (0 = all): the strongest teeth have the
+/// most reliable traces, so top-3/top-5 trade coverage for per-trace SNR. Returns `-2.0` (out-of-range
+/// sentinel) when it cannot be computed: fewer than 2 usable teeth or fewer than 3 shared scans.
+fn isotope_corr(m: &RefinedFeature, top_n: usize) -> f64 {
+    const SENTINEL: f64 = -2.0;
+    let f = &m.detected;
+    let spacing = C13_MINUS_C12 / f.charge.max(1) as f64;
+    if spacing <= 0.0 {
+        return SENTINEL;
+    }
+    // isotope tooth index k -> (scan index -> summed intensity) = that tooth's XIC.
+    let mut teeth: HashMap<i64, HashMap<i32, f64>> = HashMap::new();
+    for p in &f.peaks {
+        let k = (((p.mz as f64 - f.mono_mz) / spacing).round()) as i64;
+        *teeth
+            .entry(k)
+            .or_default()
+            .entry(p.zero_based_scan_index)
+            .or_insert(0.0) += p.intensity as f64;
+    }
+    if teeth.len() < 2 {
+        return SENTINEL;
+    }
+    // Rank teeth by total intensity; keep the top_n (0 = all).
+    let mut ranked: Vec<(f64, &HashMap<i32, f64>)> =
+        teeth.values().map(|xic| (xic.values().sum::<f64>(), xic)).collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let keep = if top_n == 0 { ranked.len() } else { top_n.min(ranked.len()) };
+    let sel: Vec<&HashMap<i32, f64>> = ranked[..keep].iter().map(|(_, x)| *x).collect();
+    if sel.len() < 2 {
+        return SENTINEL;
+    }
+    // Shared scan axis (union), each trace zero-filled where a tooth had no peak in that scan.
+    let scans: Vec<i32> = sel
+        .iter()
+        .flat_map(|x| x.keys().copied())
+        .collect::<BTreeSet<i32>>()
+        .into_iter()
+        .collect();
+    if scans.len() < 3 {
+        return SENTINEL;
+    }
+    let traces: Vec<Vec<f64>> = sel
+        .iter()
+        .map(|x| scans.iter().map(|s| *x.get(s).unwrap_or(&0.0)).collect())
+        .collect();
+    let (mut sum, mut n) = (0.0, 0usize);
+    for i in 0..traces.len() {
+        for j in (i + 1)..traces.len() {
+            if let Some(r) = pearson(&traces[i], &traces[j]) {
+                sum += r;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        SENTINEL
+    } else {
+        sum / n as f64
+    }
+}
+
 /// Writes the resolved features to a human-readable TSV, sorted by summed intensity descending.
 fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
     let mut rows: Vec<&ResolvedFeature> = resolved.iter().collect();
@@ -1576,7 +1882,8 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
         w,
         "Detected m/z (primary)\tRT Start\tRT Apex\tRT End\tCharge States\tPer-Charge Detected m/z\t\
          Num Charge States\tPrimary Charge\tMonoisotopic Mass\tMono m/z (primary)\tSummed Intensity\t\
-         Cross-Charge Support\tNum Members"
+         Cross-Charge Support\tNum Members\tDecon Score\tMin Decon Score\tMax Num Isotopes\tPPM Spread\t\
+         IsoCorr All\tIsoCorr Top5\tIsoCorr Top3"
     )
     .unwrap();
     // Most-abundant observed isotope-peak m/z of one member's detection (its tallest claimed peak).
@@ -1622,9 +1929,33 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             })
             .collect();
         let charges: Vec<String> = r.charge_states.iter().map(|c| c.to_string()).collect();
+        // Intensity-orthogonal fit-quality scores (see apex_ppm_spread). Decon score = the primary
+        // member's envelope-fit cosine; min decon score = the weakest member's (a multi-charge feature
+        // is only as trustworthy as its worst-fitting charge). Max num isotopes = envelope completeness.
+        // PPM spread uses a 999 sentinel when it can't be computed (single-isotope apex) so an ascending
+        // "low=better" ranking pushes those un-scorable features to the bottom, as intended.
+        let decon_score = primary_member.map(|m| m.decon_score).unwrap_or(0.0);
+        let min_decon = r
+            .members
+            .iter()
+            .map(|m| m.decon_score)
+            .fold(f64::INFINITY, f64::min);
+        let min_decon = if min_decon.is_finite() { min_decon } else { 0.0 };
+        let max_isotopes = r
+            .members
+            .iter()
+            .map(|m| m.detected.num_isotopes_observed)
+            .max()
+            .unwrap_or(0);
+        let ppm_spread = primary_member.and_then(apex_ppm_spread).unwrap_or(999.0);
+        // Isotopologue co-elution correlation, three isotope-selection variants (see isotope_corr).
+        let iso_all = primary_member.map(|m| isotope_corr(m, 0)).unwrap_or(-2.0);
+        let iso_top5 = primary_member.map(|m| isotope_corr(m, 5)).unwrap_or(-2.0);
+        let iso_top3 = primary_member.map(|m| isotope_corr(m, 3)).unwrap_or(-2.0);
         writeln!(
             w,
-            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}",
+            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{:.4}\t\
+             {:.4}\t{:.4}\t{:.4}",
             detected_mz,
             r.start_rt,
             r.apex_rt,
@@ -1637,7 +1968,14 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             mono_mz,
             r.summed_intensity,
             r.cross_charge_support,
-            r.members.len()
+            r.members.len(),
+            decon_score,
+            min_decon,
+            max_isotopes,
+            ppm_spread,
+            iso_all,
+            iso_top5,
+            iso_top3
         )
         .unwrap();
     }
