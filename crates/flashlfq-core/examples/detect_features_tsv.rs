@@ -1554,6 +1554,53 @@ fn write_refined_tsv(path: &str, refined: &[RefinedFeature]) {
     w.flush().unwrap();
 }
 
+/// Per-peak **ppm-error spread** across a member's apex-scan isotope envelope — an intensity-orthogonal
+/// fit-quality score. For the member's detected feature (charge `z`, mono comb `mono_mz`), take the
+/// peaks in the apex scan, assign each to its nearest isotope tooth `mono_mz + k·(¹³C/z)`, keep the
+/// tallest peak per tooth, and return the population standard deviation (ppm) of those per-tooth mass
+/// errors. A real isotope envelope shares one small calibration offset across teeth → low spread; a
+/// noise coincidence's teeth scatter → high spread. Returns `None` for fewer than 2 usable teeth
+/// (single-isotope features can't be scored this way — the caller treats that as "worst").
+fn apex_ppm_spread(m: &RefinedFeature) -> Option<f64> {
+    let f = &m.detected;
+    let z = f.charge.max(1);
+    let spacing = C13_MINUS_C12 / z as f64;
+    if spacing <= 0.0 {
+        return None;
+    }
+    let apex = f.apex_scan_index;
+    // isotope tooth index k -> (tallest intensity so far, its ppm error)
+    let mut best: HashMap<i64, (f64, f64)> = HashMap::new();
+    for p in &f.peaks {
+        if p.zero_based_scan_index != apex {
+            continue;
+        }
+        let mz = p.mz as f64;
+        let k = ((mz - f.mono_mz) / spacing).round();
+        let expected = f.mono_mz + k * spacing;
+        if expected <= 0.0 {
+            continue;
+        }
+        let ppm = (mz - expected) / expected * 1e6;
+        // Guard against a stray peak that binned to a tooth it isn't really on (the detector claimed
+        // within 10 ppm; 20 ppm leaves margin without admitting garbage into the spread).
+        if ppm.abs() > 20.0 {
+            continue;
+        }
+        let e = best.entry(k as i64).or_insert((f64::NEG_INFINITY, 0.0));
+        if p.intensity as f64 > e.0 {
+            *e = (p.intensity as f64, ppm);
+        }
+    }
+    if best.len() < 2 {
+        return None;
+    }
+    let ppms: Vec<f64> = best.values().map(|v| v.1).collect();
+    let mean = ppms.iter().sum::<f64>() / ppms.len() as f64;
+    let var = ppms.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / ppms.len() as f64;
+    Some(var.sqrt())
+}
+
 /// Writes the resolved features to a human-readable TSV, sorted by summed intensity descending.
 fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
     let mut rows: Vec<&ResolvedFeature> = resolved.iter().collect();
@@ -1576,7 +1623,7 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
         w,
         "Detected m/z (primary)\tRT Start\tRT Apex\tRT End\tCharge States\tPer-Charge Detected m/z\t\
          Num Charge States\tPrimary Charge\tMonoisotopic Mass\tMono m/z (primary)\tSummed Intensity\t\
-         Cross-Charge Support\tNum Members"
+         Cross-Charge Support\tNum Members\tDecon Score\tMin Decon Score\tMax Num Isotopes\tPPM Spread"
     )
     .unwrap();
     // Most-abundant observed isotope-peak m/z of one member's detection (its tallest claimed peak).
@@ -1622,9 +1669,28 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             })
             .collect();
         let charges: Vec<String> = r.charge_states.iter().map(|c| c.to_string()).collect();
+        // Intensity-orthogonal fit-quality scores (see apex_ppm_spread). Decon score = the primary
+        // member's envelope-fit cosine; min decon score = the weakest member's (a multi-charge feature
+        // is only as trustworthy as its worst-fitting charge). Max num isotopes = envelope completeness.
+        // PPM spread uses a 999 sentinel when it can't be computed (single-isotope apex) so an ascending
+        // "low=better" ranking pushes those un-scorable features to the bottom, as intended.
+        let decon_score = primary_member.map(|m| m.decon_score).unwrap_or(0.0);
+        let min_decon = r
+            .members
+            .iter()
+            .map(|m| m.decon_score)
+            .fold(f64::INFINITY, f64::min);
+        let min_decon = if min_decon.is_finite() { min_decon } else { 0.0 };
+        let max_isotopes = r
+            .members
+            .iter()
+            .map(|m| m.detected.num_isotopes_observed)
+            .max()
+            .unwrap_or(0);
+        let ppm_spread = primary_member.and_then(apex_ppm_spread).unwrap_or(999.0);
         writeln!(
             w,
-            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}",
+            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{:.4}",
             detected_mz,
             r.start_rt,
             r.apex_rt,
@@ -1637,7 +1703,11 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             mono_mz,
             r.summed_intensity,
             r.cross_charge_support,
-            r.members.len()
+            r.members.len(),
+            decon_score,
+            min_decon,
+            max_isotopes,
+            ppm_spread
         )
         .unwrap();
     }
