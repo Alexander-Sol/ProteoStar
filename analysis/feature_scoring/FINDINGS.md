@@ -57,6 +57,30 @@ regime; PPM Spread ties it only down to ~70% retained then falls off.
    don't test additivity. This is the decoy-calibrated multivariate-scoring question and is
    the productive direction for a scoring system — single new columns are not.
 
+## Isotopologue co-elution correlation (2026-07-23) — works, but adds little beyond existing scores
+
+New feature `IsoCorr All/Top5/Top3` (`isotope_corr` in the runner): mean pairwise Pearson correlation
+of the per-isotope XICs over the elution window (real features co-elute across isotopes ≈1, noise
+doesn't). Variants keep the top-N most intense teeth. Tested with `iso_corr_test.py` (AUC vs PSM).
+
+**Variant ranking: Top3 > Top5 > All, consistently** (marginal, ~0.01 AUC/step — fewer, stronger
+teeth give cleaner traces). Overall AUC (Top3): 10-min 0.808, 65-min 0.769, 2-hr 0.805.
+
+**But it does NOT beat Decon and carries no orthogonal signal on realistic files.** Overall AUC is
+slightly *below* Decon on every file (e.g. 2-hr 0.805 vs 0.816). Per-intensity-quintile (the honest
+fixed-intensity test) IsoCorr is ~0.47–0.51 in the mid bands on ALL three files — strong only in the
+top quintile (Q5 0.73–0.80). So its apparent power is largely an intensity proxy, same as Decon.
+52–55% of features are uncomputable (<3 shared isotope scans) — junk-like short/weak features.
+
+**Additivity (supervised, 10-min, best case):** adds only +0.1 to +0.5 pp on top of the full model
+(10% retained: full 92.1% → full+isocorr 92.6%). Decon already captures most co-elution info (a good
+envelope fit implies co-elution), so IsoCorr is largely redundant. On the big files (per-quintile
+~0.5) the additive value is negligible.
+
+**Conclusion:** physically motivated and a fine intensity-correlated quality score (Top3 best variant),
+but it hits the same wall as every other shape feature — no real-vs-junk signal at fixed intensity on
+realistic complex runs. It does not change the picture: intensity remains the lever.
+
 ## intensity x fit 2-D gate (2026-07-22) — BEATS intensity alone
 
 `combo_gate.py`: supervised logistic regression, label = PSM-match, evaluated out-of-fold (fair

@@ -26,9 +26,10 @@ ALL_FEATS = ["log_intensity", "decon", "persist", "min_decon", "ppm", "ppm_missi
              "max_iso", "num_cs", "cross_charge", "num_members"]
 MODELS = {
     "int": ["log_intensity"],
+    "int+isocorr": ["log_intensity", "isocorr"],
     "int+decon": ["log_intensity", "decon"],
-    "int+decon+pers": ["log_intensity", "decon", "persist"],
     "full": ALL_FEATS,
+    "full+isocorr": ALL_FEATS + ["isocorr"],
 }
 
 
@@ -45,6 +46,7 @@ def load(path):
         except (KeyError, ValueError):
             continue
         rows.append(dict(log_intensity=np.log1p(inten), decon=decon, min_decon=mindec,
+                         isocorr=float(r.get("IsoCorr Top3", -2.0)),
                          ppm=15.0 if ppm >= 999 else ppm, ppm_missing=1.0 if ppm >= 999 else 0.0,
                          max_iso=iso, num_cs=ncs, cross_charge=cc, num_members=nm,
                          persist=persist, mass=mass, rt=rt))
