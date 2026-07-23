@@ -12,6 +12,7 @@ import type {
   PlotViewport,
   RtRegion,
   SlotIndex,
+  SpectrumPeakHighlight,
   SpectrumPlotProps,
   TicPlotPoint,
   TicPlotProps,
@@ -207,6 +208,33 @@ function buildEnvelopeShapes(envelope: readonly EnvelopeLine[] | undefined): Par
   }));
 }
 
+// m/z half-width of a feature-highlight rectangle — a touch wider than the 0.001 peak bar so the
+// colour shows around each peak. Fixed in data units, so it's most visible at inspection zoom.
+const HIGHLIGHT_WIDTH = 0.06;
+
+/** Feature-membership highlights: a semi-transparent colored rectangle behind each matched peak (at
+ *  the peak's true m/z, as tall as the peak), coloured by the owning feature — drawn behind the peaks
+ *  so the real peak stays visible on top. One `bar` trace (cheap even for many features). The peak
+ *  `{mz, intensity}` rides in customdata so a click still resolves to a peak (e.g. a walkthrough seed). */
+function buildHighlightTrace(
+  highlights: readonly SpectrumPeakHighlight[] | undefined
+): PlotData {
+  const hs = highlights ?? [];
+  return {
+    type: "bar",
+    x: hs.map((h) => h.mz),
+    y: hs.map((h) => h.intensity),
+    width: HIGHLIGHT_WIDTH,
+    marker: { color: hs.map((h) => h.color), line: { width: 0 } },
+    opacity: 0.5,
+    customdata: hs.map((h) => ({
+      mz: h.mz,
+      intensity: h.intensity
+    })) as unknown as PlotData["customdata"],
+    hoverinfo: "skip"
+  } as unknown as PlotData;
+}
+
 /** Text labels above prominent peaks (m/z, with the inferred charge on a line beneath). Drawn
  *  arrow-less and horizontal (parallel to the x-axis), centered over and sitting just above the
  *  peak apex. */
@@ -228,10 +256,11 @@ function buildPeakAnnotations(
 }
 
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
-  const { traces, viewport, rangeSelectionEnabled, envelope, annotations, onEvent } = props;
+  const { traces, viewport, rangeSelectionEnabled, envelope, highlights, annotations, onEvent } =
+    props;
   const allPeaks = traces.flatMap((t) => t.peaks);
 
-  const data: PlotData[] = traces.flatMap((trace) => {
+  const peakTraces: PlotData[] = traces.flatMap((trace) => {
     // The 0.001-m/z-wide bars are the visual, but far too thin to hover or click. Overlay an
     // invisible wide-marker scatter at each peak apex to give Plotly a reliable hover/click
     // hit-target (mirrors the TIC's line+markers approach). The bar itself skips hover so the
@@ -255,6 +284,10 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     } as unknown as PlotData;
     return [bar, hit];
   });
+  // Highlight trace FIRST so the colored backing rectangles render BEHIND the peaks. Always present
+  // (empty when there's nothing to mark) so the trace COUNT stays constant across scan steps — a
+  // varying count disrupts Plotly's `uirevision`, which holds the user's zoom fixed while stepping.
+  const data: PlotData[] = [buildHighlightTrace(highlights), ...peakTraces];
 
   const layout: Partial<Layout> = {
     autosize: true,

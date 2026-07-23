@@ -119,6 +119,15 @@ export interface Feature {
   summedIntensity: number;
   crossChargeSupport: number;
   numMembers: number;
+  // Optional score columns — present only when the loaded resolved TSV carried them. The
+  // "uncomputable" sentinels are kept raw (PPM Spread 999, IsoCorr −2) and rendered as "—".
+  deconScore?: number | null;
+  minDeconScore?: number | null;
+  maxNumIsotopes?: number | null;
+  ppmSpread?: number | null;
+  isoCorrAll?: number | null;
+  isoCorrTop5?: number | null;
+  isoCorrTop3?: number | null;
 }
 
 // ---------------------------------------------------------------------- PSMs

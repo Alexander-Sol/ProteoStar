@@ -74,6 +74,15 @@ export interface PeakAnnotation {
   text: string;
 }
 
+// A feature-membership highlight anchored to an observed spectrum peak: a marker drawn at the peak's
+// (m/z, intensity) apex in the owning feature's colour, instead of a full-height comb line. Used for
+// the feature overlays (single selected feature + all features eluting at the scan).
+export interface SpectrumPeakHighlight {
+  mz: number;
+  intensity: number;
+  color: string;
+}
+
 // A predicted isotope-peak m/z line drawn over a spectrum.
 export interface EnvelopeLine {
   mz: number;
@@ -119,6 +128,9 @@ export interface SpectrumPlotProps {
   rangeSelectionEnabled: boolean;
   /** Predicted isotope-peak m/z lines overlaid on the spectrum (optional). */
   envelope?: readonly EnvelopeLine[];
+  /** Feature-membership markers drawn on matched peaks (optional) — the feature overlays use these
+   *  instead of full-height comb lines. */
+  highlights?: readonly SpectrumPeakHighlight[];
   /** Text labels on prominent peaks (m/z + inferred charge for MS1). Optional. */
   annotations?: readonly PeakAnnotation[];
   /** Plotly `uirevision`: while unchanged, the user's interactive zoom/pan is preserved across

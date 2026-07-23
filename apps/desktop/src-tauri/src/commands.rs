@@ -705,6 +705,16 @@ pub struct Feature {
     pub summed_intensity: f64,
     pub cross_charge_support: u32,
     pub num_members: u32,
+    // Optional score columns from the resolved TSV — present only when the run emitted them
+    // (and `None` for files without the column and for in-app detection). Raw values are kept
+    // as written; the UI renders the "uncomputable" sentinels (PPM Spread 999, IsoCorr −2) as "—".
+    pub decon_score: Option<f64>,
+    pub min_decon_score: Option<f64>,
+    pub max_num_isotopes: Option<i32>,
+    pub ppm_spread: Option<f64>,
+    pub iso_corr_all: Option<f64>,
+    pub iso_corr_top5: Option<f64>,
+    pub iso_corr_top3: Option<f64>,
 }
 
 /// Parse the resolved-feature TSV written by `detect_features_tsv` (columns keyed
@@ -745,9 +755,25 @@ fn parse_resolved_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
     let c_support = need("Cross-Charge Support")?;
     let c_members = need("Num Members")?;
 
+    // Optional score columns (only present when the run emitted them). Absent → the field is None.
+    let opt = |name: &str| -> Option<usize> { cols.get(name).copied() };
+    let c_decon = opt("Decon Score");
+    let c_min_decon = opt("Min Decon Score");
+    let c_max_iso = opt("Max Num Isotopes");
+    let c_ppm = opt("PPM Spread");
+    let c_corr_all = opt("IsoCorr All");
+    let c_corr5 = opt("IsoCorr Top5");
+    let c_corr3 = opt("IsoCorr Top3");
+
     let fnum = |f: &[&str], i: usize| -> f64 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0) };
     let inum = |f: &[&str], i: usize| -> i32 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0) };
     let unum = |f: &[&str], i: usize| -> u32 { f.get(i).and_then(|s| s.trim().parse().ok()).unwrap_or(0) };
+    let ofnum = |f: &[&str], i: Option<usize>| -> Option<f64> {
+        i.and_then(|i| f.get(i)).and_then(|s| s.trim().parse().ok())
+    };
+    let oinum = |f: &[&str], i: Option<usize>| -> Option<i32> {
+        i.and_then(|i| f.get(i)).and_then(|s| s.trim().parse().ok())
+    };
 
     let mut out = Vec::new();
     for line in lines {
@@ -788,6 +814,13 @@ fn parse_resolved_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
             summed_intensity: fnum(&f, c_intensity),
             cross_charge_support: unum(&f, c_support),
             num_members: unum(&f, c_members),
+            decon_score: ofnum(&f, c_decon),
+            min_decon_score: ofnum(&f, c_min_decon),
+            max_num_isotopes: oinum(&f, c_max_iso),
+            ppm_spread: ofnum(&f, c_ppm),
+            iso_corr_all: ofnum(&f, c_corr_all),
+            iso_corr_top5: ofnum(&f, c_corr5),
+            iso_corr_top3: ofnum(&f, c_corr3),
         });
     }
     Ok(out)
@@ -924,6 +957,15 @@ fn resolved_to_feature(r: &ResolvedFeature) -> Feature {
         summed_intensity: r.summed_intensity,
         cross_charge_support: r.cross_charge_support as u32,
         num_members: r.members.len() as u32,
+        // In-app detection doesn't compute the resolved-TSV score panel; these surface only
+        // when a scored TSV is loaded via `load_features`.
+        decon_score: None,
+        min_decon_score: None,
+        max_num_isotopes: None,
+        ppm_spread: None,
+        iso_corr_all: None,
+        iso_corr_top5: None,
+        iso_corr_top3: None,
     }
 }
 

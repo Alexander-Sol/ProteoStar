@@ -15,6 +15,7 @@ import type {
   PeakAnnotation,
   RtRegion,
   EnvelopeLine,
+  SpectrumPeakHighlight,
   PlotViewport
 } from "@msbrowser/plot-adapter";
 import {
@@ -27,7 +28,7 @@ import {
 } from "@msbrowser/ui";
 
 import { openDataset } from "./tauri-dataset-provider";
-import { loadFeatures, runFeatureDetection, isotopeGrid } from "./features";
+import { loadFeatures, runFeatureDetection, isotopeGrid, featureElutesAt } from "./features";
 import { computePeakLabels } from "./annotate";
 import { loadPsms, linkPsms, fetchIsotopeXics, sumXics } from "./psms";
 import { scoreSeedLadder } from "./walkthrough";
@@ -52,8 +53,31 @@ const CHARGE_COLORS = [
   "#2f6fb0", "#c0392b", "#27ae60", "#8e44ad",
   "#d35400", "#16a085", "#b7950b", "#c2185b"
 ];
+
+// "All features in this scan" overlay palette. Each feature's colour is assigned by its rank in
+// GLOBAL m/z order (see `featureColorByIndex`), so a feature keeps the same colour across scans
+// (the top priority) while features near each other in m/z still tend to differ. 8 distinct hues
+// keep adjacent-in-m/z clashes rare.
+const SCAN_FEATURE_COLORS = [
+  "#2f6fb0", "#c0392b", "#27ae60", "#8e44ad",
+  "#d35400", "#16a085", "#c2185b", "#b7950b"
+];
+// Render guard: draw at most this many eluting features' combs per scan (each comb is charge×teeth
+// Plotly shapes). Features are intensity-sorted, so the strongest survive; the subtitle flags when a
+// scan has more. This is NOT a load cap — the whole TSV is in memory (the 800 is a drawer-row cap).
+const SCAN_FEATURE_CAP = 150;
 const chargeColor = (z: number): string =>
   CHARGE_COLORS[(Math.max(1, z) - 1) % CHARGE_COLORS.length];
+
+// Decoy features (from a separate decoy-model detector run) are drawn in a single muted colour so
+// the real, charge-coloured features stand out; the selected item — target or decoy — is always
+// SELECTED_COLOR.
+const DECOY_COLOR = "#9098a1";
+const DECOY_REGION_FILL = "rgba(144,152,161,0.16)";
+// Feature-rug markers carry a numeric featureIndex that comes back on click. Decoy markers are
+// offset by this base so the one click handler can tell a target (< base) from a decoy (>= base)
+// without threading a discriminator through the shared plot-adapter event type.
+const DECOY_INDEX_BASE = 10_000_000;
 
 // Features are sorted by intensity on load; these cap what's drawn/listed so a
 // pathologically large TSV (top-down noise runs can be 100k+ features) stays
@@ -96,6 +120,17 @@ export function App() {
   const [featuresFile, setFeaturesFile] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Decoy features live in their own layer (drawn muted, kept out of PSM linking). Loaded from a
+  // separate decoy-run resolved TSV. `selectedDecoy` is mutually exclusive with `selected`.
+  const [decoys, setDecoys] = useState<readonly Feature[]>([]);
+  const [selectedDecoy, setSelectedDecoy] = useState<number | null>(null);
+  const [decoyDrawerOpen, setDecoyDrawerOpen] = useState(false);
+
+  // Show every feature eluting at the displayed MS1 scan (cycling colours on the spectrum). On by
+  // default: viewing an MS1 spectrum shows all co-eluting features; toggle off to inspect just the
+  // selected feature's envelope. Runs over the full loaded feature set (the 800 cap is drawer-only).
+  const [showScanFeatures, setShowScanFeatures] = useState(true);
 
   // PSMs loaded from a MetaMorpheus .psmtsv, linked to detected features client-side.
   // Selecting one extracts its isotope XICs (below) and jumps the spectrum to its RT.
@@ -270,7 +305,8 @@ export function App() {
   const drawerVisible =
     walkthrough ||
     (psmDrawerOpen && psms.length > 0) ||
-    (drawerOpen && features.length > 0);
+    (drawerOpen && features.length > 0) ||
+    (decoyDrawerOpen && decoys.length > 0);
   useEffect(() => {
     const id = window.setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
     return () => window.clearTimeout(id);
@@ -291,12 +327,7 @@ export function App() {
   }, [psms, features]);
 
   // ------------------------------------------------------------ load features
-  const handleLoadFeatures = useCallback(async () => {
-    const picked = await openFileDialog({
-      multiple: false,
-      filters: [{ name: "Feature TSV", extensions: ["tsv", "txt"] }]
-    });
-    if (typeof picked !== "string") return;
+  const loadFeaturesFromPath = useCallback(async (picked: string) => {
     try {
       const feats = await loadFeatures(picked);
       // Strongest first, so the caps below keep the most important features.
@@ -309,6 +340,61 @@ export function App() {
       setLoad({ status: "error", message: errMessage(err) });
     }
   }, []);
+
+  const handleLoadFeatures = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "Feature TSV", extensions: ["tsv", "txt"] }]
+    });
+    if (typeof picked !== "string") return;
+    await loadFeaturesFromPath(picked);
+  }, [loadFeaturesFromPath]);
+
+  // ------------------------------------------------------------- load decoys
+  // Decoy features come from a separate detector run (a decoy comb model) and share the resolved
+  // TSV format, so they load through the same command — we just keep them in their own layer and
+  // draw them muted, for target-vs-decoy comparison on the same raw data.
+  const loadDecoysFromPath = useCallback(async (picked: string) => {
+    try {
+      const feats = await loadFeatures(picked);
+      // Strongest first, so the rug/drawer caps keep the most important decoys.
+      const sorted = [...feats].sort((a, b) => b.summedIntensity - a.summedIntensity);
+      setDecoys(sorted);
+      setSelectedDecoy(null);
+      setDecoyDrawerOpen(true); // one right-side drawer at a time
+      setDrawerOpen(false);
+      setPsmDrawerOpen(false);
+    } catch (err) {
+      setLoad({ status: "error", message: errMessage(err) });
+    }
+  }, []);
+
+  const handleLoadDecoys = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "Feature TSV", extensions: ["tsv", "txt"] }]
+    });
+    if (typeof picked !== "string") return;
+    await loadDecoysFromPath(picked);
+  }, [loadDecoysFromPath]);
+
+  // E2E hook: load target/decoy feature TSVs by path, skipping the native file dialog (which
+  // Playwright can't automate). Exposed only under the tauri-plugin-playwright control server
+  // (`window.__PW_ACTIVE__`), mirroring `__msviewerOpenPath` — inert in normal/production runs.
+  useEffect(() => {
+    const w = window as typeof window & {
+      __PW_ACTIVE__?: boolean;
+      __msviewerLoadFeaturesPath?: (p: string) => void;
+      __msviewerLoadDecoysPath?: (p: string) => void;
+    };
+    if (!w.__PW_ACTIVE__) return;
+    w.__msviewerLoadFeaturesPath = (p: string) => void loadFeaturesFromPath(p);
+    w.__msviewerLoadDecoysPath = (p: string) => void loadDecoysFromPath(p);
+    return () => {
+      delete w.__msviewerLoadFeaturesPath;
+      delete w.__msviewerLoadDecoysPath;
+    };
+  }, [loadFeaturesFromPath, loadDecoysFromPath]);
 
   // ---------------------------------------------------------------- load PSMs
   const handleLoadPsms = useCallback(async () => {
@@ -350,12 +436,9 @@ export function App() {
   }, [handle, detecting, indexing]);
 
   // ------------------------------------------------------- select a feature
-  const selectFeature = useCallback(
-    async (index: number) => {
-      const f = features[index];
-      if (!f) return;
-      setSelected(index);
-
+  // Shared reframe + apex-spectrum load, used for both a target and a decoy selection.
+  const focusFeature = useCallback(
+    async (f: Feature) => {
       const pad = Math.max(0.2, (f.rtEnd - f.rtStart) * 0.6);
       reframeTic({ xMin: f.rtStart - pad, xMax: f.rtEnd + pad });
 
@@ -372,7 +455,29 @@ export function App() {
         }
       }
     },
-    [features, provider, spectrumPinned, reframeTic, reframeSpectrum]
+    [provider, spectrumPinned, reframeTic, reframeSpectrum]
+  );
+
+  const selectFeature = useCallback(
+    async (index: number) => {
+      const f = features[index];
+      if (!f) return;
+      setSelected(index);
+      setSelectedDecoy(null);
+      await focusFeature(f);
+    },
+    [features, focusFeature]
+  );
+
+  const selectDecoy = useCallback(
+    async (index: number) => {
+      const f = decoys[index];
+      if (!f) return;
+      setSelectedDecoy(index);
+      setSelected(null);
+      await focusFeature(f);
+    },
+    [decoys, focusFeature]
   );
 
   // ------------------------------------------------------------- select a PSM
@@ -385,6 +490,7 @@ export function App() {
       if (!psm) return;
       setSelectedPsm(index);
       setSelected(null); // clear any feature selection (its isotope envelope is MS1-only)
+      setSelectedDecoy(null);
 
       const link = psmLinks[index];
       const feature =
@@ -609,36 +715,48 @@ export function App() {
     return traces;
   }, [ticPoints, spectrum, xic, xicIndices, xicMode]);
 
-  const featureRug = useMemo<FeatureMarker[]>(
-    () =>
-      features.slice(0, RUG_CAP).map((f, i) => ({
-        featureIndex: i,
-        retentionTime: f.rtApex,
-        color: i === selected ? SELECTED_COLOR : chargeColor(f.primaryCharge),
-        label: `m/z ${f.detectedMz.toFixed(3)} · z${f.primaryCharge} · ${f.monoisotopicMass.toFixed(1)} Da · RT ${f.rtApex.toFixed(2)}`
-      })),
-    [features, selected]
-  );
+  const featureRug = useMemo<FeatureMarker[]>(() => {
+    const targets = features.slice(0, RUG_CAP).map((f, i) => ({
+      featureIndex: i,
+      retentionTime: f.rtApex,
+      color: i === selected ? SELECTED_COLOR : chargeColor(f.primaryCharge),
+      label: `m/z ${f.detectedMz.toFixed(3)} · z${f.primaryCharge} · ${f.monoisotopicMass.toFixed(1)} Da · RT ${f.rtApex.toFixed(2)}`
+    }));
+    const decoyMarkers = decoys.slice(0, RUG_CAP).map((f, i) => ({
+      featureIndex: DECOY_INDEX_BASE + i,
+      retentionTime: f.rtApex,
+      color: i === selectedDecoy ? SELECTED_COLOR : DECOY_COLOR,
+      label: `decoy · m/z ${f.detectedMz.toFixed(3)} · z${f.primaryCharge} · ${f.monoisotopicMass.toFixed(1)} Da · RT ${f.rtApex.toFixed(2)}`
+    }));
+    // Decoys first so target markers draw on top of them within the single rug trace.
+    return [...decoyMarkers, ...targets];
+  }, [features, decoys, selected, selectedDecoy]);
 
   const regions = useMemo<RtRegion[]>(() => {
-    if (selected === null) return [];
-    const f = features[selected];
-    if (!f) return [];
-    return [{ min: f.rtStart, max: f.rtEnd, color: "rgba(232,131,12,0.14)" }];
-  }, [features, selected]);
+    if (selected !== null) {
+      const f = features[selected];
+      if (f) return [{ min: f.rtStart, max: f.rtEnd, color: "rgba(232,131,12,0.14)" }];
+    }
+    if (selectedDecoy !== null) {
+      const f = decoys[selectedDecoy];
+      if (f) return [{ min: f.rtStart, max: f.rtEnd, color: DECOY_REGION_FILL }];
+    }
+    return [];
+  }, [features, decoys, selected, selectedDecoy]);
 
-  const envelope = useMemo<EnvelopeLine[]>(() => {
-    if (selected === null) return [];
-    const f = features[selected];
-    if (!f) return [];
-    return f.chargeStates.flatMap((z) =>
-      isotopeGrid(f.monoisotopicMass, z, 12).map((mz, k) => ({
-        mz,
-        color: chargeColor(z),
-        label: k === 0 ? `z${z} mono` : undefined
-      }))
-    );
-  }, [features, selected]);
+  // Stable per-feature colour for the scan overlay: cycle the palette in GLOBAL m/z order, so a
+  // feature keeps its colour across scans (the eluting SET changes scan-to-scan, but a feature's
+  // m/z rank doesn't — consistent colour is the priority) while features near each other in m/z
+  // still tend to differ. Indexed by position in `features`.
+  const featureColorByIndex = useMemo<string[]>(() => {
+    const order = features.map((f, i) => ({ i, mz: f.detectedMz }));
+    order.sort((a, b) => a.mz - b.mz);
+    const colors = new Array<string>(features.length);
+    order.forEach((o, rank) => {
+      colors[o.i] = SCAN_FEATURE_COLORS[rank % SCAN_FEATURE_COLORS.length];
+    });
+    return colors;
+  }, [features]);
 
   // Sorted m/z of the currently displayed scan's peaks — the lookup for the "detected" comb marker.
   const spectrumMz = useMemo(
@@ -666,13 +784,58 @@ export function App() {
     );
   }, [walkthrough, ladder, focusCharge, spectrumMz]);
 
-  // The feature isotope envelope only makes sense over an MS1 scan; a PSM's identified spectrum
-  // is MS2 (fragment ions), so suppress the comb there.
-  const spectrumEnvelope = walkthrough
-    ? ladderEnvelope
-    : spectrum?.msLevel === 1
-      ? envelope
-      : [];
+  // Every (target) feature eluting at the displayed MS1 scan's RT — the FULL loaded set, not the
+  // 800-row drawer cap. Each entry keeps the feature's global index (`gi`) so the overlay can look
+  // up its stable colour. Intensity-sorted (features are), so the strongest survive the cap below.
+  const scanEluting = useMemo<readonly { f: Feature; gi: number }[]>(() => {
+    if (!showScanFeatures || !spectrum || spectrum.msLevel !== 1) return [];
+    const out: { f: Feature; gi: number }[] = [];
+    features.forEach((f, gi) => {
+      if (featureElutesAt(f, spectrum.retentionTime)) out.push({ f, gi });
+    });
+    return out;
+  }, [showScanFeatures, spectrum, features]);
+  const scanFeatures = useMemo(() => scanEluting.slice(0, SCAN_FEATURE_CAP), [scanEluting]);
+
+  // Feature overlays drawn as markers sitting on the MATCHED peaks (peak apex, in the feature's
+  // colour), instead of full-height comb lines. Scan mode: every eluting feature, stable colour by
+  // m/z (the selected one emphasised in SELECTED_COLOR). Otherwise the single selected feature
+  // (per-charge colour) or a selected decoy (muted). Empty during walkthrough (its comb takes over)
+  // or when the displayed spectrum isn't MS1.
+  const peakHighlights = useMemo<SpectrumPeakHighlight[]>(() => {
+    if (walkthrough || !spectrum || spectrum.msLevel !== 1) return [];
+    const peaks = spectrum.peaks;
+    if (showScanFeatures) {
+      return scanFeatures.flatMap(({ f, gi }) => {
+        const color =
+          gi === selected ? SELECTED_COLOR : featureColorByIndex[gi] ?? SCAN_FEATURE_COLORS[0];
+        return matchedPeakHighlights(f, peaks, () => color, 6);
+      });
+    }
+    if (selected !== null) {
+      const f = features[selected];
+      return f ? matchedPeakHighlights(f, peaks, chargeColor, 12) : [];
+    }
+    if (selectedDecoy !== null) {
+      const f = decoys[selectedDecoy];
+      return f ? matchedPeakHighlights(f, peaks, () => DECOY_COLOR, 12) : [];
+    }
+    return [];
+  }, [
+    walkthrough,
+    spectrum,
+    showScanFeatures,
+    scanFeatures,
+    selected,
+    selectedDecoy,
+    features,
+    decoys,
+    featureColorByIndex
+  ]);
+
+  // Full-height comb lines are now ONLY the walkthrough charge-ladder (a predicted-position
+  // diagnostic that must show even the missing teeth); feature overlays use `peakHighlights`.
+  const spectrumEnvelope = walkthrough ? ladderEnvelope : [];
 
   const spectrumTraces = useMemo<SpectrumPlotTrace[]>(
     () => (spectrum ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }] : []),
@@ -691,7 +854,12 @@ export function App() {
     });
   }, [spectrum, spectrumViewport, walkthrough]);
 
-  const selectedFeature = selected === null ? null : features[selected] ?? null;
+  const selectedFeature =
+    selected !== null
+      ? features[selected] ?? null
+      : selectedDecoy !== null
+        ? decoys[selectedDecoy] ?? null
+        : null;
 
   return (
     <ViewerShell
@@ -713,6 +881,9 @@ export function App() {
           <PanelActionButton onClick={() => void handleOpenFile()}>Open file…</PanelActionButton>
           <PanelActionButton onClick={() => void handleLoadFeatures()}>
             Load features…
+          </PanelActionButton>
+          <PanelActionButton onClick={() => void handleLoadDecoys()}>
+            Load decoys…
           </PanelActionButton>
           <PanelActionButton onClick={() => void handleLoadPsms()}>Load PSMs…</PanelActionButton>
           {handle !== null ? (
@@ -745,12 +916,32 @@ export function App() {
               onClick={() =>
                 setDrawerOpen((v) => {
                   const next = !v;
-                  if (next) setPsmDrawerOpen(false);
+                  if (next) {
+                    setPsmDrawerOpen(false);
+                    setDecoyDrawerOpen(false);
+                  }
                   return next;
                 })
               }
             >
               Features ({features.length})
+            </PanelActionButton>
+          ) : null}
+          {decoys.length > 0 ? (
+            <PanelActionButton
+              pressed={decoyDrawerOpen}
+              onClick={() =>
+                setDecoyDrawerOpen((v) => {
+                  const next = !v;
+                  if (next) {
+                    setDrawerOpen(false);
+                    setPsmDrawerOpen(false);
+                  }
+                  return next;
+                })
+              }
+            >
+              Decoys ({decoys.length})
             </PanelActionButton>
           ) : null}
           {psms.length > 0 ? (
@@ -759,12 +950,23 @@ export function App() {
               onClick={() =>
                 setPsmDrawerOpen((v) => {
                   const next = !v;
-                  if (next) setDrawerOpen(false);
+                  if (next) {
+                    setDrawerOpen(false);
+                    setDecoyDrawerOpen(false);
+                  }
                   return next;
                 })
               }
             >
               PSMs ({psms.length})
+            </PanelActionButton>
+          ) : null}
+          {features.length > 0 ? (
+            <PanelActionButton
+              pressed={showScanFeatures}
+              onClick={() => setShowScanFeatures((v) => !v)}
+            >
+              Features in scan
             </PanelActionButton>
           ) : null}
         </>
@@ -779,7 +981,7 @@ export function App() {
               xicLabel
                 ? `${xicMode === "sum" ? "XIC Σ isotopes" : `XIC isotopologues M+${xicIndices.join(", M+")}`} (absolute abundance): ${xicLabel}`
                 : selectedFeature
-                  ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}`
+                  ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}${scoreReadout(selectedFeature)}`
                   : featuresFile
                     ? `${features.length} features from ${featuresFile} — click a marker or a row`
                     : "MS1 TIC · click to load a scan"
@@ -846,7 +1048,11 @@ export function App() {
             rangeSelectionEnabled={false}
             onEvent={(e) => {
               if (e.type === "area-click") void handleAreaClick(e.retentionTime);
-              else if (e.type === "feature-click") void selectFeature(e.featureIndex);
+              else if (e.type === "feature-click") {
+                if (e.featureIndex >= DECOY_INDEX_BASE)
+                  void selectDecoy(e.featureIndex - DECOY_INDEX_BASE);
+                else void selectFeature(e.featureIndex);
+              }
             }}
           />
         )}
@@ -862,9 +1068,11 @@ export function App() {
                 ? `Scan ${spectrum.oneBasedScanNumber} · RT ${spectrum.retentionTime.toFixed(2)} min${
                     walkthrough
                       ? " · click a peak to seed the charge-ladder"
-                      : selectedFeature
-                        ? " · dotted lines = predicted isotope m/z"
-                        : ""
+                      : showScanFeatures
+                        ? ` · ${scanEluting.length} feature${scanEluting.length === 1 ? "" : "s"} eluting${scanEluting.length > SCAN_FEATURE_CAP ? ` (showing strongest ${SCAN_FEATURE_CAP})` : ""}`
+                        : selectedFeature
+                          ? " · shaded columns mark matched isotope peaks"
+                          : ""
                   }`
                 : walkthrough
                   ? "Click the chromatogram to load a scan, then click a peak to seed"
@@ -899,6 +1107,7 @@ export function App() {
             traces={spectrumTraces}
             viewport={spectrumViewport}
             envelope={spectrumEnvelope}
+            highlights={peakHighlights}
             annotations={spectrumAnnotations}
             uirevision={spectrumUiRev}
             rangeSelectionEnabled={false}
@@ -942,6 +1151,16 @@ export function App() {
           onResize={setDrawerWidth}
           onSelect={(i) => void selectFeature(i)}
           onClose={() => setDrawerOpen(false)}
+        />
+      ) : decoyDrawerOpen && decoys.length > 0 ? (
+        <FeatureDrawer
+          features={decoys}
+          selected={selectedDecoy}
+          width={drawerWidth}
+          onResize={setDrawerWidth}
+          onSelect={(i) => void selectDecoy(i)}
+          onClose={() => setDecoyDrawerOpen(false)}
+          title="Decoys"
         />
       ) : null}
     </ViewerShell>
@@ -1198,6 +1417,45 @@ function hasPeakNear(sortedMz: readonly number[], mz: number, ppm: number): bool
   return lo < n && sortedMz[lo] <= mz + tol;
 }
 
+// The observed peak within `ppm` of `mz` (lower-bound candidate), or null. Mirrors `hasPeakNear`
+// but returns the peak, so an overlay can sit at its true (m/z, intensity). `peaks` must be m/z-sorted.
+function nearestPeak(
+  peaks: readonly { mz: number; intensity: number }[],
+  mz: number,
+  ppm: number
+): { mz: number; intensity: number } | null {
+  const n = peaks.length;
+  if (n === 0) return null;
+  const tol = (mz * ppm) / 1e6;
+  const loTarget = mz - tol;
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (peaks[mid].mz < loTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < n && peaks[lo].mz <= mz + tol ? peaks[lo] : null;
+}
+
+// Feature-membership highlights: for each predicted isotope tooth that matches an observed peak
+// (within DETECT_PPM), a marker at that peak's true (m/z, intensity), coloured by `colorFor(charge)`.
+// Predicted-but-absent teeth produce nothing — the overlay marks only real peaks.
+function matchedPeakHighlights(
+  f: Feature,
+  peaks: readonly { mz: number; intensity: number }[],
+  colorFor: (z: number) => string,
+  count: number
+): SpectrumPeakHighlight[] {
+  return f.chargeStates.flatMap((z) => {
+    const color = colorFor(z);
+    return isotopeGrid(f.monoisotopicMass, z, count).flatMap((mz) => {
+      const pk = nearestPeak(peaks, mz, DETECT_PPM);
+      return pk ? [{ mz: pk.mz, intensity: pk.intensity, color }] : [];
+    });
+  });
+}
+
 // A right-side drawer listing resolved features; click a row to select.
 function FeatureDrawer({
   features,
@@ -1205,7 +1463,8 @@ function FeatureDrawer({
   width,
   onResize,
   onSelect,
-  onClose
+  onClose,
+  title = "Features"
 }: {
   features: readonly Feature[];
   selected: number | null;
@@ -1213,13 +1472,17 @@ function FeatureDrawer({
   onResize: (width: number) => void;
   onSelect: (index: number) => void;
   onClose: () => void;
+  title?: string;
 }) {
   const shown = features.slice(0, DRAWER_CAP);
+  // Only render the seven score columns when the loaded TSV carried them (the table scrolls
+  // horizontally when it does — see drawerBodyStyle). Unscored files keep the compact layout.
+  const scored = shown.some(hasScores);
   return (
     <ResizableDrawer width={width} onResize={onResize}>
       <div style={drawerHeaderStyle}>
         <strong>
-          Features{" "}
+          {title}{" "}
           {features.length > DRAWER_CAP
             ? `(top ${DRAWER_CAP} of ${features.length})`
             : `(${features.length})`}
@@ -1237,6 +1500,17 @@ function FeatureDrawer({
               <th style={thStyle}>m/z</th>
               <th style={thStyle}>RT</th>
               <th style={thStyleRight}>Intensity</th>
+              {scored ? (
+                <>
+                  <th style={thStyleRight}>Decon</th>
+                  <th style={thStyleRight}>MinDec</th>
+                  <th style={thStyleRight}>MaxIso</th>
+                  <th style={thStyleRight}>PPM</th>
+                  <th style={thStyleRight}>Corr(all)</th>
+                  <th style={thStyleRight}>Corr5</th>
+                  <th style={thStyleRight}>Corr3</th>
+                </>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -1251,12 +1525,61 @@ function FeatureDrawer({
                 <td style={tdStyle}>{f.detectedMz.toFixed(3)}</td>
                 <td style={tdStyle}>{f.rtApex.toFixed(2)}</td>
                 <td style={tdStyleRight}>{f.summedIntensity.toExponential(1)}</td>
+                {scored ? (
+                  <>
+                    <td style={tdStyleRight}>{fmtScore(f.deconScore)}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.minDeconScore)}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.maxNumIsotopes, { digits: 0 })}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.ppmSpread, { sentinel: 999, digits: 1 })}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.isoCorrAll, { sentinel: -2 })}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.isoCorrTop5, { sentinel: -2 })}</td>
+                    <td style={tdStyleRight}>{fmtScore(f.isoCorrTop3, { sentinel: -2 })}</td>
+                  </>
+                ) : null}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
     </ResizableDrawer>
+  );
+}
+
+// Format an optional feature score; missing values and the "uncomputable" sentinels render as "—".
+function fmtScore(
+  v: number | null | undefined,
+  opts: { sentinel?: number; digits?: number } = {}
+): string {
+  if (v == null) return "—";
+  if (opts.sentinel != null && v === opts.sentinel) return "—";
+  return v.toFixed(opts.digits ?? 2);
+}
+
+// True when a feature carries any of the optional resolved-TSV score columns.
+function hasScores(f: Feature): boolean {
+  return (
+    f.deconScore != null ||
+    f.minDeconScore != null ||
+    f.maxNumIsotopes != null ||
+    f.ppmSpread != null ||
+    f.isoCorrAll != null ||
+    f.isoCorrTop5 != null ||
+    f.isoCorrTop3 != null
+  );
+}
+
+// A compact one-line score summary for the selected-feature readout; "" when the feature is unscored.
+function scoreReadout(f: Feature): string {
+  if (!hasScores(f)) return "";
+  const corr =
+    `${fmtScore(f.isoCorrAll, { sentinel: -2 })}/` +
+    `${fmtScore(f.isoCorrTop5, { sentinel: -2 })}/` +
+    `${fmtScore(f.isoCorrTop3, { sentinel: -2 })}`;
+  return (
+    ` · Decon ${fmtScore(f.deconScore)} (min ${fmtScore(f.minDeconScore)})` +
+    ` · MaxIso ${fmtScore(f.maxNumIsotopes, { digits: 0 })}` +
+    ` · PPM ${fmtScore(f.ppmSpread, { sentinel: 999, digits: 1 })}` +
+    ` · IsoCorr ${corr}`
   );
 }
 

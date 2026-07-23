@@ -15,6 +15,7 @@ export type {
   PlotViewport,
   RtRegion,
   SlotIndex,
+  SpectrumPeakHighlight,
   SpectrumPlotEvent,
   SpectrumPlotPeak,
   SpectrumPlotProps,
