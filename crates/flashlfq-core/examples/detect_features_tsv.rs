@@ -9,7 +9,7 @@
 //! Usage:
 //!   cargo run --release --example detect_features_tsv -- <spectra_file> <out.tsv> [reference.tsv]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
@@ -1612,6 +1612,95 @@ fn apex_ppm_spread(m: &RefinedFeature) -> Option<f64> {
     Some(var.sqrt())
 }
 
+/// Pearson correlation of two equal-length traces; `None` if fewer than 3 points or either trace is
+/// flat (zero variance — a correlation is undefined).
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    let n = a.len();
+    if n < 3 {
+        return None;
+    }
+    let (ma, mb) = (a.iter().sum::<f64>() / n as f64, b.iter().sum::<f64>() / n as f64);
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (da, db) = (a[i] - ma, b[i] - mb);
+        sab += da * db;
+        saa += da * da;
+        sbb += db * db;
+    }
+    if saa <= 0.0 || sbb <= 0.0 {
+        return None;
+    }
+    Some(sab / (saa.sqrt() * sbb.sqrt()))
+}
+
+/// **Isotopologue co-elution correlation** — the mean pairwise Pearson correlation of the feature's
+/// per-isotope XICs (intensity vs scan) over its elution window. A real feature's isotope traces rise
+/// and fall together (they are one chromatographic peak sampled at ¹³C-spaced m/z), so this is near 1;
+/// a noise coincidence's teeth vary independently, so it is low. Intensity-orthogonal and a cornerstone
+/// signal in Dinosaur/MaxQuant-style detectors.
+///
+/// `top_n` restricts to the `top_n` most intense isotope teeth (0 = all): the strongest teeth have the
+/// most reliable traces, so top-3/top-5 trade coverage for per-trace SNR. Returns `-2.0` (out-of-range
+/// sentinel) when it cannot be computed: fewer than 2 usable teeth or fewer than 3 shared scans.
+fn isotope_corr(m: &RefinedFeature, top_n: usize) -> f64 {
+    const SENTINEL: f64 = -2.0;
+    let f = &m.detected;
+    let spacing = C13_MINUS_C12 / f.charge.max(1) as f64;
+    if spacing <= 0.0 {
+        return SENTINEL;
+    }
+    // isotope tooth index k -> (scan index -> summed intensity) = that tooth's XIC.
+    let mut teeth: HashMap<i64, HashMap<i32, f64>> = HashMap::new();
+    for p in &f.peaks {
+        let k = (((p.mz as f64 - f.mono_mz) / spacing).round()) as i64;
+        *teeth
+            .entry(k)
+            .or_default()
+            .entry(p.zero_based_scan_index)
+            .or_insert(0.0) += p.intensity as f64;
+    }
+    if teeth.len() < 2 {
+        return SENTINEL;
+    }
+    // Rank teeth by total intensity; keep the top_n (0 = all).
+    let mut ranked: Vec<(f64, &HashMap<i32, f64>)> =
+        teeth.values().map(|xic| (xic.values().sum::<f64>(), xic)).collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let keep = if top_n == 0 { ranked.len() } else { top_n.min(ranked.len()) };
+    let sel: Vec<&HashMap<i32, f64>> = ranked[..keep].iter().map(|(_, x)| *x).collect();
+    if sel.len() < 2 {
+        return SENTINEL;
+    }
+    // Shared scan axis (union), each trace zero-filled where a tooth had no peak in that scan.
+    let scans: Vec<i32> = sel
+        .iter()
+        .flat_map(|x| x.keys().copied())
+        .collect::<BTreeSet<i32>>()
+        .into_iter()
+        .collect();
+    if scans.len() < 3 {
+        return SENTINEL;
+    }
+    let traces: Vec<Vec<f64>> = sel
+        .iter()
+        .map(|x| scans.iter().map(|s| *x.get(s).unwrap_or(&0.0)).collect())
+        .collect();
+    let (mut sum, mut n) = (0.0, 0usize);
+    for i in 0..traces.len() {
+        for j in (i + 1)..traces.len() {
+            if let Some(r) = pearson(&traces[i], &traces[j]) {
+                sum += r;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        SENTINEL
+    } else {
+        sum / n as f64
+    }
+}
+
 /// Writes the resolved features to a human-readable TSV, sorted by summed intensity descending.
 fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
     let mut rows: Vec<&ResolvedFeature> = resolved.iter().collect();
@@ -1634,7 +1723,8 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
         w,
         "Detected m/z (primary)\tRT Start\tRT Apex\tRT End\tCharge States\tPer-Charge Detected m/z\t\
          Num Charge States\tPrimary Charge\tMonoisotopic Mass\tMono m/z (primary)\tSummed Intensity\t\
-         Cross-Charge Support\tNum Members\tDecon Score\tMin Decon Score\tMax Num Isotopes\tPPM Spread"
+         Cross-Charge Support\tNum Members\tDecon Score\tMin Decon Score\tMax Num Isotopes\tPPM Spread\t\
+         IsoCorr All\tIsoCorr Top5\tIsoCorr Top3"
     )
     .unwrap();
     // Most-abundant observed isotope-peak m/z of one member's detection (its tallest claimed peak).
@@ -1699,9 +1789,14 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             .max()
             .unwrap_or(0);
         let ppm_spread = primary_member.and_then(apex_ppm_spread).unwrap_or(999.0);
+        // Isotopologue co-elution correlation, three isotope-selection variants (see isotope_corr).
+        let iso_all = primary_member.map(|m| isotope_corr(m, 0)).unwrap_or(-2.0);
+        let iso_top5 = primary_member.map(|m| isotope_corr(m, 5)).unwrap_or(-2.0);
+        let iso_top3 = primary_member.map(|m| isotope_corr(m, 3)).unwrap_or(-2.0);
         writeln!(
             w,
-            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{:.4}",
+            "{:.5}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{:.5}\t{:.5}\t{:.4e}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{:.4}\t\
+             {:.4}\t{:.4}\t{:.4}",
             detected_mz,
             r.start_rt,
             r.apex_rt,
@@ -1718,7 +1813,10 @@ fn write_tsv(path: &str, resolved: &[ResolvedFeature]) {
             decon_score,
             min_decon,
             max_isotopes,
-            ppm_spread
+            ppm_spread,
+            iso_all,
+            iso_top5,
+            iso_top3
         )
         .unwrap();
     }
