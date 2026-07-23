@@ -57,7 +57,42 @@ regime; PPM Spread ties it only down to ~70% retained then falls off.
    don't test additivity. This is the decoy-calibrated multivariate-scoring question and is
    the productive direction for a scoring system — single new columns are not.
 
+## Semi-supervised SVM rescore (2026-07-22) — decoys as negatives DON'T beat intensity
+
+Tried feature-level Percolator (`svm_rescore.py`): NEGATIVES = decoy-model detections (spacing =
+`DECOY_LATTICE=scaled`, weird-averagine = `COMB_MODEL=custom`/`shuffled`), POSITIVES = confident
+targets seeded by apex fit, re-selected each iteration by out-of-fold SVM score at a decoy-FDR
+threshold, 3-fold CV.
+
+**Result: the SVM score ranks targets WORSE than plain Summed Intensity at every retained
+fraction** (10-min, e.g. 40% kept: SVM 95.9% vs intensity 97.5%; 20% kept: 82.9% vs 93.5%).
+
+**Why (diagnosed, not guessed):**
+- The semi-supervised loop collapses — every target scores above the decoys (q≈0), so the positive
+  set becomes *all* targets. The SVM learns "target-like vs decoy-like", not "real vs junk".
+- The learned model's standardized weights lean on `ppm_spread` (+0.30) and `decon_score` (+0.24)
+  and assign `log_intensity` **+0.008 — essentially zero**. It *discards* intensity.
+- Root cause: **the decoys have the same intensity distribution as targets** (log-intensity median
+  target 14.12 vs shuffled 14.18 / custom 13.90 / spacing 14.50). A decoy detection claims real
+  peaks, so it is a *normal-intensity* feature that fits a *wrong* template. Target junk is the
+  opposite: a *low-intensity* feature that fits the *right* template. So intensity — the true
+  junk axis — carries no target-vs-decoy signal and the objective zeroes it out, forcing the model
+  onto shape features we already know underperform intensity.
+
+**Conclusion:** these decoys model the wrong failure mode ("wrong envelope shape", normal
+intensity), not the actual junk ("low-abundance noise coincidence", real envelope shape). Any
+classifier trained against them is structurally barred from using intensity and so cannot beat it.
+
+**The fix:** a *noise-faithful* decoy — the **real** averagine comb placed at m/z positions
+**offset off the true isotope grid** so it can only claim noise. Its detections would be
+low-intensity, low-persistence — the same profile as target junk — so intensity would separate
+target-real from decoy-noise and the SVM could keep intensity AND add shape refinements. The
+`decoy-features` branch reportedly has a "shifted" decoy of this kind; porting/enabling it is the
+concrete next step. (A pure m/z offset, not `DECOY_LATTICE=scaled`, which lands teeth near real
+peaks and inherits normal intensity.)
+
 ## Artifacts
+- `svm_rescore.py` — semi-supervised SVM rescorer (Percolator-style, 3-fold CV, decoy-FDR).
 - `score_tradeoff.py` — the ranker/curve tool.
 - New resolved-TSV columns: Decon Score, Min Decon Score, Max Num Isotopes, PPM Spread
   (see `apex_ppm_spread` in `examples/detect_features_tsv.rs`).
