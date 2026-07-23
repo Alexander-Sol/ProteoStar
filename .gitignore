@@ -4,6 +4,9 @@
 target/
 **/*.rs.bk
 
+# Large detector output TSVs (features/decoys for the benchmark files); analysis artifacts, not source.
+feature_decoy_outputs/
+
 # --- Node / TypeScript / Vite (desktop frontend + packages) ---
 node_modules/
 dist/

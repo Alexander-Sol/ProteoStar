@@ -256,6 +256,135 @@ fn open_out(path: &str) -> Option<BufWriter<File>> {
     }
 }
 
+/// Isotope-tooth index of an observed peak relative to a feature's monoisotopic comb: the nearest
+/// integer number of `¹³C/z` steps from `mono_mz`. Used to bin a feature's claimed peaks into teeth.
+#[inline]
+fn tooth_index(mz: f64, mono_mz: f64, spacing: f64) -> i32 {
+    ((mz - mono_mz) / spacing).round() as i32
+}
+
+/// Apply post-detection filtering criteria (experiment, gated by env in `main`):
+///   1. the most-abundant isotope tooth must be observed in ≥ 2 distinct scans;
+///   2. ≥ 2 distinct isotope teeth must co-occur in at least one scan;
+///   3. if the most-abundant tooth is absent for ≥ 2 successive scans, cut the feature at that gap,
+///      keeping the contiguous scan run that contains the apex.
+/// Criterion 3 runs first (it can shrink the feature), then 1 & 2 gate the survivor. Returns `None`
+/// when the feature fails to qualify, dropping it.
+fn filter_detected_feature(f: DetectedFeature) -> Option<DetectedFeature> {
+    use std::collections::{HashMap, HashSet};
+    if f.peaks.is_empty() {
+        return None;
+    }
+    let spacing = C13_MINUS_C12 / f.charge.abs().max(1) as f64;
+    let tooth = |p: &IndexedMassSpectralPeak| tooth_index(p.m() as f64, f.mono_mz, spacing);
+
+    // Most-abundant tooth = the one with the greatest summed intensity across all claimed scans.
+    let mut tooth_intensity: HashMap<i32, f64> = HashMap::new();
+    for p in &f.peaks {
+        *tooth_intensity.entry(tooth(p)).or_insert(0.0) += p.intensity as f64;
+    }
+    let top_tooth = *tooth_intensity
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(k, _)| k)
+        .unwrap();
+
+    // Scans in which the most-abundant tooth is observed, ascending & deduped.
+    let mut top_scans: Vec<i32> = f
+        .peaks
+        .iter()
+        .filter(|p| tooth(p) == top_tooth)
+        .map(|p| p.zero_based_scan_index)
+        .collect();
+    top_scans.sort_unstable();
+    top_scans.dedup();
+    if top_scans.is_empty() {
+        return None;
+    }
+
+    // Criterion 3 — split the top-tooth presence into runs, breaking at any gap of ≥ 2 missing scans.
+    let mut runs: Vec<(i32, i32)> = Vec::new();
+    let (mut lo, mut prev) = (top_scans[0], top_scans[0]);
+    for &s in &top_scans[1..] {
+        if s - prev - 1 >= 2 {
+            runs.push((lo, prev));
+            lo = s;
+        }
+        prev = s;
+    }
+    runs.push((lo, prev));
+    // Keep the run containing the apex scan; if the apex isn't on the top tooth, keep the widest run.
+    let (keep_lo, keep_hi) = runs
+        .iter()
+        .find(|&&(a, b)| f.apex_scan_index >= a && f.apex_scan_index <= b)
+        .copied()
+        .unwrap_or_else(|| *runs.iter().max_by_key(|&&(a, b)| b - a).unwrap());
+
+    let kept_peaks: Vec<IndexedMassSpectralPeak> = f
+        .peaks
+        .iter()
+        .filter(|p| p.zero_based_scan_index >= keep_lo && p.zero_based_scan_index <= keep_hi)
+        .cloned()
+        .collect();
+    if kept_peaks.is_empty() {
+        return None;
+    }
+
+    // Criterion 1 — most-abundant tooth observed in ≥ 2 distinct scans (within the retained run).
+    let top_scan_set: HashSet<i32> = kept_peaks
+        .iter()
+        .filter(|p| tooth(p) == top_tooth)
+        .map(|p| p.zero_based_scan_index)
+        .collect();
+    if top_scan_set.len() < 2 {
+        return None;
+    }
+
+    // Criterion 2 — ≥ 2 distinct teeth co-occur in at least one scan.
+    let mut per_scan_teeth: HashMap<i32, HashSet<i32>> = HashMap::new();
+    for p in &kept_peaks {
+        per_scan_teeth
+            .entry(p.zero_based_scan_index)
+            .or_default()
+            .insert(tooth(p));
+    }
+    if !per_scan_teeth.values().any(|t| t.len() >= 2) {
+        return None;
+    }
+
+    // Recompute the geometry that the cut may have changed.
+    let apex_peak = kept_peaks
+        .iter()
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+        .unwrap();
+    let apex_scan_index = apex_peak.zero_based_scan_index;
+    let apex_rt = apex_peak.retention_time as f64;
+    let start_rt = kept_peaks
+        .iter()
+        .map(|p| p.retention_time as f64)
+        .fold(f64::INFINITY, f64::min);
+    let end_rt = kept_peaks
+        .iter()
+        .map(|p| p.retention_time as f64)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let summed_intensity = kept_peaks.iter().map(|p| p.intensity as f64).sum();
+    let num_isotopes_observed = kept_peaks.iter().map(tooth).collect::<HashSet<i32>>().len();
+
+    Some(DetectedFeature {
+        monoisotopic_mass: f.monoisotopic_mass,
+        charge: f.charge,
+        mono_mz: f.mono_mz,
+        apex_scan_index,
+        apex_rt,
+        start_rt,
+        end_rt,
+        summed_intensity,
+        score: f.score,
+        num_isotopes_observed,
+        peaks: kept_peaks,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -650,6 +779,36 @@ fn main() {
     };
     let detect_dur = t1.elapsed();
     timings.push(("detect".into(), detect_dur.as_secs_f64()));
+
+    // --- post-detection experiment filters (opt-in) --------------------------------------------
+    // EXCLUDE_Z1=1: drop all singly-charged (|z|=1) detections.
+    // FILTER_CRITERIA=1: apply the isotope/scan visibility filters (see filter_detected_feature):
+    //   most-abundant m/z seen in ≥2 scans; ≥2 isotopes in some scan; cut on a ≥2-scan mono gap.
+    let exclude_z1 = std::env::var("EXCLUDE_Z1")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    let filter_criteria = std::env::var("FILTER_CRITERIA")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    if exclude_z1 || filter_criteria {
+        let before = detected.len();
+        if exclude_z1 {
+            detected.retain(|f| f.charge.abs() != 1);
+        }
+        let after_z1 = detected.len();
+        if filter_criteria {
+            let src = std::mem::take(&mut detected);
+            detected = src.into_iter().filter_map(filter_detected_feature).collect();
+        }
+        eprintln!(
+            "  post-detect filters: {before} -> {after_z1} (excl z1: {}) -> {} (criteria: {})  [dropped {}]",
+            if exclude_z1 { "on" } else { "off" },
+            detected.len(),
+            if filter_criteria { "on" } else { "off" },
+            before - detected.len()
+        );
+    }
+
     let detected_intensity: f64 = detected.iter().map(|f| f.summed_intensity).sum();
     eprintln!(
         "  {} features detected, explained {:.1}% of ΣTIC  ({:.1?})",
