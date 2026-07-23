@@ -120,19 +120,43 @@ unlabeled targets), positive *purity* matters less than positive *quantity* — 
 more signal, and the decoy supplies the clean contrast. So Percolator's confident-minority seeding
 doesn't transfer here; a permissive per-band seed is better.
 
-**65-min (glyco): the method works but the SIGNAL isn't there.** Same pipeline gives only +0.3–0.7 pp
-at gentle cuts and LOSES at aggressive cuts (10% retained: 80.6% vs intensity 86.0% at λ=0.5). The
-shape-score within-band AUC vs PSM is ~0.5 (Q10 even 0.43 — *below* chance). This is NOT a decoy
-failure: the PSM-supervised combo_gate was also only +0.5–0.9 pp here. Root cause is the analyte —
-**glycopeptides are not averagine**, so averagine-fit (decon/ppm) barely correlates with being real,
-and at high intensity a good averagine fit even anti-correlates with real glyco. The method faithfully
-learned the shape signal available; on glyco there is little to learn.
+### All-three breakdown — the 10-min gain does NOT generalize (2026-07-22, revised)
 
-**Bottom line for option A:** the noise-decoy + within-band semi-supervised score is a genuine,
-label-free win **where the envelope model matches the analyte** (tryptic 10-min: matches the
-supervised ceiling, +7 pp at aggressive cut). Where it doesn't (glyco), shape carries little
-real-vs-junk signal and the gate should be down-weighted (small λ) or off. Recommended: ship it
-λ≈0.5 for standard tryptic runs; make λ tunable and default it low/off for glyco workflows.
+within-band λ=0.5 minus intensity, at each retained fraction:
+
+| retained | 10-min | 65-min | 2-hr |
+|---------:|-------:|-------:|-----:|
+| 40% | +0.2 | +0.7 | −0.3 |
+| 25% | +2.2 | −0.2 | −1.3 |
+| 20% | +2.2 | −0.9 | −2.0 |
+| 15% | +3.6 | −2.4 | −3.5 |
+| 10% | **+7.2** | **−5.4** | **−6.6** |
+
+**The clear win is ONLY the 10-min.** On BOTH large realistic files — the 65-min glyco AND the 2-hr
+IonStar (tryptic!) — the label-free gate HURTS at aggressive cuts. So the earlier "works on tryptic,
+fails on glyco (glyco≠averagine)" story was WRONG: the 2-hr is tryptic and also has no usable shape
+signal.
+
+**Why — it's a signal problem, confirmed by the supervised ceiling.** The PSM-supervised combo_gate
+gain is +7 pp on the 10-min but only **+1.3 pp (2-hr)** and **+0.9 pp (65-min)** at a 10% cut, and the
+shape-vs-PSM within-band AUC is ~0.82 on the 10-min but **~0.5 on both big files**. So realistic,
+complex runs carry little real-vs-junk shape signal at all; the 10-min (a small 555-ref, abundant
+"tutorial" sample) is the outlier where shape separates strongly.
+
+**Why label-free HURTS on the big files while the supervised ceiling merely stalls:** the supervised
+model keeps intensity dominant (weight ~+1.1) and adds shape only as much as it helps, so it never
+drops below intensity. The label-free score blends a near-noise (AUC≈0.5) shape score at a FIXED
+λ=0.5 — injecting noise into the ranking. A data-driven λ (→0 when the decoy shows shape isn't
+separating) would remove the harm, but on the big files it would then just reduce to intensity — i.e.
+no gain to be had.
+
+**Bottom line for option A (honest):** the noise-decoy + within-band pipeline is sound and recovers
+whatever shape signal exists label-free. But on realistic complex samples that signal is small
+(~1 pp supervised ceiling) and a fixed-λ blend actively hurts, so the impressive 10-min result does
+not generalize. To ship at all it needs a data-driven λ (off when the decoy shows no within-band
+separation); even then the expected gain on production-scale runs is ~0–1 pp, not the 10-min's +7.
+The real headroom for feature reduction remains the intensity/noise floor (per-scan local floor),
+not a shape score.
 
 Caveat unchanged: eval is abundance-biased PSM recall, so low-abundance rescue is still unmeasured —
 but the decoy now provides label-free negatives at every intensity, which is the machinery a
