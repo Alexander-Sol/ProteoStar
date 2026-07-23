@@ -120,6 +120,20 @@ unlabeled targets), positive *purity* matters less than positive *quantity* — 
 more signal, and the decoy supplies the clean contrast. So Percolator's confident-minority seeding
 doesn't transfer here; a permissive per-band seed is better.
 
+**65-min (glyco): the method works but the SIGNAL isn't there.** Same pipeline gives only +0.3–0.7 pp
+at gentle cuts and LOSES at aggressive cuts (10% retained: 80.6% vs intensity 86.0% at λ=0.5). The
+shape-score within-band AUC vs PSM is ~0.5 (Q10 even 0.43 — *below* chance). This is NOT a decoy
+failure: the PSM-supervised combo_gate was also only +0.5–0.9 pp here. Root cause is the analyte —
+**glycopeptides are not averagine**, so averagine-fit (decon/ppm) barely correlates with being real,
+and at high intensity a good averagine fit even anti-correlates with real glyco. The method faithfully
+learned the shape signal available; on glyco there is little to learn.
+
+**Bottom line for option A:** the noise-decoy + within-band semi-supervised score is a genuine,
+label-free win **where the envelope model matches the analyte** (tryptic 10-min: matches the
+supervised ceiling, +7 pp at aggressive cut). Where it doesn't (glyco), shape carries little
+real-vs-junk signal and the gate should be down-weighted (small λ) or off. Recommended: ship it
+λ≈0.5 for standard tryptic runs; make λ tunable and default it low/off for glyco workflows.
+
 Caveat unchanged: eval is abundance-biased PSM recall, so low-abundance rescue is still unmeasured —
 but the decoy now provides label-free negatives at every intensity, which is the machinery a
 decoy-FDR (not recall) evaluation of the low bands would need.
