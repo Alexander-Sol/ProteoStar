@@ -62,10 +62,10 @@ const SCAN_FEATURE_COLORS = [
   "#2f6fb0", "#c0392b", "#27ae60", "#8e44ad",
   "#d35400", "#16a085", "#c2185b", "#b7950b"
 ];
-// Render guard: draw at most this many eluting features' combs per scan (each comb is charge×teeth
-// Plotly shapes). Features are intensity-sorted, so the strongest survive; the subtitle flags when a
-// scan has more. This is NOT a load cap — the whole TSV is in memory (the 800 is a drawer-row cap).
-const SCAN_FEATURE_CAP = 150;
+// Render guard: draw at most this many eluting features' highlights per scan. The overlay re-iterates
+// on zoom (only features with a peak in the visible m/z window compete), so far fewer are in play when
+// zoomed and this cap can stay modest. NOT a load cap — the whole TSV is in memory.
+const SCAN_FEATURE_CAP = 80;
 const chargeColor = (z: number): string =>
   CHARGE_COLORS[(Math.max(1, z) - 1) % CHARGE_COLORS.length];
 
@@ -166,8 +166,13 @@ export function App() {
   // walkthrough comb framing, reset-zoom), so the user's zoom stays put while stepping scans with
   // the arrow keys or loading a scan by clicking the TIC/XIC — neither of which reframes.
   const [spectrumUiRev, setSpectrumUiRev] = useState(0);
+  // The currently visible m/z window (null = full view). Tracked from reframes AND user zoom/pan
+  // (SpectrumPlot's xrange-change event) so the scan overlay can re-iterate on zoom — showing the
+  // features in the visible window (including weak ones) rather than only the strongest globally.
+  const [spectrumXView, setSpectrumXView] = useState<{ min: number; max: number } | null>(null);
   const reframeSpectrum = useCallback((vp: PlotViewport) => {
     setSpectrumViewport(vp);
+    setSpectrumXView(vp.xMin !== null && vp.xMax !== null ? { min: vp.xMin, max: vp.xMax } : null);
     setSpectrumUiRev((r) => r + 1);
   }, []);
 
@@ -811,7 +816,6 @@ export function App() {
     });
     return out;
   }, [showScanFeatures, spectrum, features]);
-  const scanFeatures = useMemo(() => scanEluting.slice(0, SCAN_FEATURE_CAP), [scanEluting]);
 
   // Feature overlays drawn as markers sitting on the MATCHED peaks (peak apex, in the feature's
   // colour), instead of full-height comb lines. Scan mode: every eluting feature, stable colour by
@@ -822,7 +826,21 @@ export function App() {
     if (walkthrough || !spectrum || spectrum.msLevel !== 1) return [];
     const peaks = spectrum.peaks;
     if (showScanFeatures) {
-      return scanFeatures.flatMap(({ f, gi }) => {
+      // Re-iterate on zoom: when zoomed in, only features with a peak in the visible m/z window are
+      // candidates, so weak features in that window get shown (and far fewer compete for the cap).
+      const inWindow = spectrumXView
+        ? scanEluting.filter(({ f }) =>
+            featureHasPeakInWindow(f, spectrumXView.min, spectrumXView.max)
+          )
+        : scanEluting;
+      const items = inWindow.slice(0, SCAN_FEATURE_CAP);
+      // Always include the selected feature, even if it fell beyond the cap or the window — otherwise
+      // clicking a weak feature in the list wouldn't highlight it.
+      if (selected !== null && !items.some((it) => it.gi === selected)) {
+        const f = features[selected];
+        if (f) items.push({ f, gi: selected });
+      }
+      return items.flatMap(({ f, gi }) => {
         const color =
           gi === selected ? SELECTED_COLOR : featureColorByIndex[gi] ?? SCAN_FEATURE_COLORS[0];
         return matchedPeakHighlights(f, peaks, () => color, 6);
@@ -844,7 +862,8 @@ export function App() {
     walkthrough,
     spectrum,
     showScanFeatures,
-    scanFeatures,
+    scanEluting,
+    spectrumXView,
     selected,
     selectedDecoy,
     features,
@@ -1132,6 +1151,7 @@ export function App() {
             rangeSelectionEnabled={false}
             onEvent={(e) => {
               if (e.type === "peak-click") handlePeakClick(e.peak.mz);
+              else if (e.type === "xrange-change") setSpectrumXView(e.range);
             }}
           />
         )}
@@ -1484,6 +1504,17 @@ function findFeatureAtPeak(
   return best;
 }
 
+// True if any predicted isotope tooth of the feature falls within the visible m/z window [lo, hi].
+// Used to filter the scan overlay to features visible at the current zoom.
+function featureHasPeakInWindow(f: Feature, lo: number, hi: number): boolean {
+  for (const z of f.chargeStates) {
+    for (const mz of isotopeGrid(f.monoisotopicMass, z, 8)) {
+      if (mz >= lo && mz <= hi) return true;
+    }
+  }
+  return false;
+}
+
 // Feature-membership highlights: for each predicted isotope tooth that matches an observed peak
 // (within DETECT_PPM), a marker at that peak's true (m/z, intensity), coloured by `colorFor(charge)`.
 // Predicted-but-absent teeth produce nothing — the overlay marks only real peaks.
@@ -1546,10 +1577,23 @@ function FeatureDrawer({
 }) {
   const [sortKey, setSortKey] = useState<FeatureSortKey>("intensity");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  // Indices into `features`, sorted by the chosen column (missing scores last). We sort INDICES (not
-  // the rows) so onSelect / data-row / `selected` stay in the parent's feature-index space.
+  const [filterCharge, setFilterCharge] = useState("");
+  const [filterMinIntensity, setFilterMinIntensity] = useState("");
+  // Indices into `features`, filtered (charge / min intensity) then sorted by the chosen column
+  // (missing scores last). We keep INDICES (not rows) so onSelect / data-row / `selected` stay in the
+  // parent's feature-index space.
   const sortedIndices = useMemo(() => {
-    const idx = features.map((_, i) => i);
+    const zf = parseInt(filterCharge, 10);
+    const minI = parseFloat(filterMinIntensity);
+    const hasZ = Number.isFinite(zf);
+    const hasI = Number.isFinite(minI);
+    const idx: number[] = [];
+    for (let i = 0; i < features.length; i++) {
+      const f = features[i];
+      if (hasZ && !f.chargeStates.includes(zf)) continue;
+      if (hasI && f.summedIntensity < minI) continue;
+      idx.push(i);
+    }
     const dir = sortDir === "asc" ? 1 : -1;
     idx.sort((a, b) => {
       const va = featureSortValue(features[a], sortKey);
@@ -1562,7 +1606,8 @@ function FeatureDrawer({
       return va === vb ? 0 : va < vb ? -dir : dir;
     });
     return idx;
-  }, [features, sortKey, sortDir]);
+  }, [features, sortKey, sortDir, filterCharge, filterMinIntensity]);
+  const total = sortedIndices.length;
   const positionOf = useMemo(() => {
     const m = new Map<number, number>();
     sortedIndices.forEach((gi, p) => m.set(gi, p));
@@ -1572,7 +1617,7 @@ function FeatureDrawer({
   // Rows per page auto-fit the drawer height (measure effect below), in steps of 5. Any feature is
   // still reachable via the pager, which can auto-follow a selection made elsewhere (peak / rug click).
   const [pageSize, setPageSize] = useState(DRAWER_PAGE);
-  const pageCount = Math.max(1, Math.ceil(features.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const [page, setPage] = useState(0);
   const clampedPage = Math.min(page, pageCount - 1);
   const start = clampedPage * pageSize;
@@ -1584,7 +1629,7 @@ function FeatureDrawer({
   // that when something is selected, the follow effect's page wins.
   useEffect(() => {
     setPage(0);
-  }, [features, sortKey, sortDir]);
+  }, [features, sortKey, sortDir, filterCharge, filterMinIntensity]);
   // Jump to the page holding the selection — a peak / rug click (or a re-sort / resize) can move it.
   useEffect(() => {
     if (selected === null) return;
@@ -1638,19 +1683,58 @@ function FeatureDrawer({
     </th>
   );
 
-  const first = features.length === 0 ? 0 : start + 1;
-  const last = Math.min(start + pageSize, features.length);
+  const first = total === 0 ? 0 : start + 1;
+  const last = Math.min(start + pageSize, total);
+  const filtered = filterCharge !== "" || filterMinIntensity !== "";
   return (
     <ResizableDrawer width={width} onResize={onResize}>
       <div style={drawerHeaderStyle}>
         <strong>
-          {title} ({features.length.toLocaleString()})
+          {title} (
+          {filtered
+            ? `${total.toLocaleString()} of ${features.length.toLocaleString()}`
+            : total.toLocaleString()}
+          )
         </strong>
         <button onClick={onClose} style={drawerCloseStyle} type="button">
           ✕
         </button>
       </div>
-      {features.length > pageSize ? (
+      <div style={drawerFilterStyle}>
+        <label style={filterLabelStyle}>
+          z
+          <input
+            type="number"
+            value={filterCharge}
+            onChange={(e) => setFilterCharge(e.target.value)}
+            placeholder="any"
+            style={filterInputStyle}
+          />
+        </label>
+        <label style={filterLabelStyle}>
+          min int.
+          <input
+            type="number"
+            value={filterMinIntensity}
+            onChange={(e) => setFilterMinIntensity(e.target.value)}
+            placeholder="any"
+            style={{ ...filterInputStyle, width: 76 }}
+          />
+        </label>
+        {filtered ? (
+          <button
+            type="button"
+            style={pagerBtnStyle}
+            onClick={() => {
+              setFilterCharge("");
+              setFilterMinIntensity("");
+            }}
+          >
+            clear
+          </button>
+        ) : null}
+      </div>
+      {total > pageSize ? (
         <div style={drawerPagerStyle}>
           <button
             style={pagerBtnStyle}
@@ -1671,7 +1755,7 @@ function FeatureDrawer({
             ◀
           </button>
           <span style={pagerLabelStyle}>
-            {first.toLocaleString()}–{last.toLocaleString()} of {features.length.toLocaleString()}
+            {first.toLocaleString()}–{last.toLocaleString()} of {total.toLocaleString()}
           </span>
           <button
             style={pagerBtnStyle}
@@ -2035,6 +2119,23 @@ const pagerBtnStyle: React.CSSProperties = {
   fontSize: "0.8rem"
 };
 const pagerLabelStyle: React.CSSProperties = { minWidth: 132, textAlign: "center" };
+const drawerFilterStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "5px 10px",
+  borderBottom: "1px solid #d5deeb",
+  fontSize: "0.76rem",
+  color: "#3a4a60"
+};
+const filterLabelStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 4 };
+const filterInputStyle: React.CSSProperties = {
+  width: 56,
+  fontSize: "0.76rem",
+  padding: "1px 4px",
+  border: "1px solid #cbd6e5",
+  borderRadius: 4
+};
 const drawerBodyStyle: React.CSSProperties = { overflow: "auto", minHeight: 0, flex: 1 };
 const tableStyle: React.CSSProperties = {
   width: "100%",

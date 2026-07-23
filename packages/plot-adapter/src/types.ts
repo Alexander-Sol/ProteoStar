@@ -102,7 +102,10 @@ export type TicPlotEvent =
 export type SpectrumPlotEvent =
   | { type: "point-hover"; peak: SpectrumPlotPeak | null }
   | { type: "peak-click"; peak: SpectrumPlotPeak }
-  | { type: "range-select"; range: NumericRange };
+  | { type: "range-select"; range: NumericRange }
+  /** The visible m/z window changed (user zoom/pan or autorange reset). `range` is null when the
+   *  axis returned to autorange (full view). Lets overlays react to the current zoom. */
+  | { type: "xrange-change"; range: NumericRange | null };
 
 export interface TicPlotProps {
   traces: readonly TicPlotTrace[];

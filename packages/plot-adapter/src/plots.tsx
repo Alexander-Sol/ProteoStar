@@ -363,6 +363,19 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
           onEvent({ type: "range-select", range });
         }
       }}
+      onRelayout={(event: Record<string, unknown>) => {
+        // Report the new visible m/z window so overlays can react to zoom/pan. Autorange reset
+        // (double-click) sends null; an explicit zoom sends the [min, max] bounds.
+        if (event["xaxis.autorange"]) {
+          onEvent({ type: "xrange-change", range: null });
+          return;
+        }
+        const min = event["xaxis.range[0]"];
+        const max = event["xaxis.range[1]"];
+        if (typeof min === "number" && typeof max === "number") {
+          onEvent({ type: "xrange-change", range: { min, max } });
+        }
+      }}
     />
   );
 }
