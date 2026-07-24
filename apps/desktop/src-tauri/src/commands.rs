@@ -12,12 +12,16 @@ use std::sync::atomic::Ordering;
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, Response};
 use tauri::{Emitter, State};
 
 use flashlfq_core::feature_refinement::{
     self, refine_feature_multi, resolve_consensus_by_apex, RefinedFeature, ResolvedFeature,
+};
+use flashlfq_core::ms1_feature::{
+    contiguous_charge_runs, is_ms1_feature_header, read_ms1_feature, write_ms1_feature_file,
+    Ms1FeatureDialect, Ms1FeatureRecord,
 };
 use flashlfq_core::peak_indexing::{
     read_ms1_scans, read_ms1_tic_metadata, PeakIndexingEngine, PeakSource, RandomAccessMs1Reader,
@@ -702,7 +706,9 @@ pub async fn get_ms2_for_precursor(
 // ------------------------------------------------------------- feature overlay
 
 /// One observed isotope-peak m/z for a specific charge state of a resolved feature.
-#[derive(Debug, Serialize, Clone)]
+///
+/// `Deserialize` so the frontend can hand loaded features back for export.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerChargeMz {
     pub charge: i32,
@@ -711,8 +717,11 @@ pub struct PerChargeMz {
 
 /// A resolved (peptide/proteoform-level) feature parsed from the runner's output
 /// TSV — the unit the overlay draws and the feature list browses.
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+///
+/// `Deserialize` (with the optional score fields defaulting) so the frontend can send the
+/// currently-loaded features back down to `export_ms1_features`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Feature {
     pub detected_mz: f64,
     pub rt_start: f64,
@@ -738,14 +747,94 @@ pub struct Feature {
     pub iso_corr_top3: Option<f64>,
 }
 
-/// Parse the resolved-feature TSV written by `detect_features_tsv` (columns keyed
-/// by header name, tolerant of reordering). Returns a `FEATURE_PARSE`-coded error
-/// if the file is unreadable or lacks the expected header.
+/// Load features from either of the two supported tables, picked by inspecting the
+/// header rather than the file extension:
+///
+/// - the resolved-feature TSV written by `detect_features_tsv` (see [`parse_resolved_features`]);
+/// - a TopFD / FLASHDeconv `_ms1.feature` table (see [`parse_ms1_feature_features`]).
+///
+/// Sniffing rather than switching on the extension matters because both formats are
+/// routinely named `.tsv`, and `_ms1.feature` files carry a compound extension that a
+/// naive `Path::extension()` reads as `.feature`.
+///
+/// Returns a `FEATURE_PARSE`-coded error if the file matches neither shape.
 #[tauri::command]
 pub async fn load_features(path: String) -> Result<Vec<Feature>, ViewerError> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| ViewerError::new("FEATURE_READ", format!("{path}: {e}")))?;
-    parse_resolved_features(&text)
+    let header = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if is_ms1_feature_header(header) {
+        parse_ms1_feature_features(&text)
+    } else {
+        parse_resolved_features(&text)
+    }
+}
+
+/// Adapt a TopFD / FLASHDeconv `_ms1.feature` table onto the viewer's [`Feature`].
+///
+/// **One row becomes one feature.** The format stores a charge *range*, not a set, so a
+/// producer that observed a gapped charge set must emit several rows (this is what
+/// `flashlfq_core::ms1_feature::resolved_to_ms1_feature_records` does). Those rows are not
+/// re-merged here: merging would mean guessing which same-mass rows came from one proteoform,
+/// and in a real TopFD file distinct co-eluting features can legitimately share a mass.
+/// What the file says is what gets drawn.
+///
+/// Fields the format does not carry are derived or left empty rather than faked:
+///
+/// - `per_charge_mz` is **theoretical** (`mass → m/z` per charge), because `_ms1.feature`
+///   records no observed per-charge peak position. The overlay uses it to draw isotope combs,
+///   which is exactly what a theoretical m/z is good for.
+/// - `primary_charge` is TopFD's `Rep_charge` when present, otherwise the midpoint of the
+///   charge range — the format offers nothing better.
+/// - the score panel (`decon_score`, `iso_corr_*`, …) stays `None`. TopFD's `EC_score` is an
+///   envelope-collection metric on a different scale from ProteoStar's deconvolution score;
+///   showing it under that heading would misreport it.
+fn parse_ms1_feature_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
+    let set = read_ms1_feature(text)
+        .map_err(|e| ViewerError::new("FEATURE_PARSE", format!("ms1.feature: {e}")))?;
+
+    Ok(set
+        .records
+        .iter()
+        .map(|r| {
+            let charge_states = r.charge_states();
+            // Rep_charge, else the middle of the range (nearest the envelope the producer
+            // most likely considered representative). Zero only if the row has no charges.
+            let primary_charge = r.rep_charge.unwrap_or_else(|| {
+                charge_states
+                    .get(charge_states.len() / 2)
+                    .copied()
+                    .unwrap_or(0)
+            });
+            let mono_mz = if primary_charge != 0 {
+                mass_to_mz(r.mass, primary_charge)
+            } else {
+                0.0
+            };
+            Feature {
+                // Rep_average_mz is TopFD's observed representative m/z; without it the
+                // theoretical mono m/z is the best available stand-in.
+                detected_mz: r.rep_average_mz.unwrap_or(mono_mz),
+                rt_start: r.rt_begin,
+                rt_apex: r.rt_apex,
+                rt_end: r.rt_end,
+                per_charge_mz: charge_states
+                    .iter()
+                    .map(|&z| PerChargeMz { charge: z, mz: mass_to_mz(r.mass, z) })
+                    .collect(),
+                primary_charge,
+                monoisotopic_mass: r.mass,
+                mono_mz,
+                summed_intensity: r.intensity,
+                // The row's charge span is the only support evidence the format carries, so
+                // both counts collapse to it: one "member" per charge state.
+                cross_charge_support: charge_states.len() as u32,
+                num_members: charge_states.len() as u32,
+                charge_states,
+                ..Feature::default()
+            }
+        })
+        .collect())
 }
 
 /// Parse the resolved-feature TSV body (header + rows). Pure so it can be unit-tested.
@@ -850,6 +939,102 @@ fn parse_resolved_features(text: &str) -> Result<Vec<Feature>, ViewerError> {
 /// Neutral monoisotopic mass → m/z at a given charge.
 pub fn mass_to_mz(mass: f64, charge: i32) -> f64 {
     (mass + charge as f64 * PROTON_MASS) / charge.max(1) as f64
+}
+
+/// Write the features currently loaded in the viewer to a TopFD / FLASHDeconv
+/// `_ms1.feature` file, so they can be handed to TopPIC, mzLib, or any other consumer of
+/// that format. Returns the number of **rows** written, which exceeds `features.len()` when
+/// a feature's charge states are gapped (see below).
+///
+/// `dialect` is one of `"flashdeconv"` (default), `"topfd1.6"`, or `"topfd1.7"`. The default
+/// is deliberate: the viewer's [`Feature`] has no apex intensity, and the TopFD dialects
+/// define an `Apex_intensity` column. Writing TopFD would leave that column blank, which
+/// mzLib reads as null and then substitutes zero for — silently zeroing every intensity
+/// downstream. FLASHDeconv simply has no such column, so nothing is lost or misread. The
+/// detector's own `MS1FEATURE_OUT` export does emit TopFD v1.6, because there the apex
+/// intensity is genuinely available.
+///
+/// A feature whose charge states are gapped (say {10, 12}) is split into one row per
+/// contiguous run, because the format stores only min/max and a single 10–12 row would be
+/// read back as {10, 11, 12} — inventing a charge that was never observed. The feature's
+/// summed intensity is divided across its rows in proportion to how many charge states each
+/// covers, so the rows still total the feature's intensity (as opposed to mzLib's
+/// `ToMs1Features`, which repeats the full summed intensity on every split row).
+#[tauri::command]
+pub async fn export_ms1_features(
+    path: String,
+    features: Vec<Feature>,
+    source_file_name: Option<String>,
+    dialect: Option<String>,
+) -> Result<usize, ViewerError> {
+    let dialect = match dialect.as_deref().unwrap_or("flashdeconv") {
+        "flashdeconv" => Ms1FeatureDialect::FlashDeconv,
+        "topfd1.6" => Ms1FeatureDialect::TopFdV1_6,
+        "topfd1.7" => Ms1FeatureDialect::TopFdV1_7,
+        other => {
+            return Err(ViewerError::new(
+                "FEATURE_EXPORT",
+                format!("unknown ms1.feature dialect '{other}'"),
+            ))
+        }
+    };
+    let records = features_to_ms1_feature_records(&features, source_file_name.as_deref());
+    write_ms1_feature_file(&path, &records, dialect)
+        .map_err(|e| ViewerError::new("FEATURE_EXPORT", format!("{path}: {e}")))?;
+    Ok(records.len())
+}
+
+/// Viewer [`Feature`]s → `_ms1.feature` rows. Pure, so the splitting and intensity
+/// apportioning are unit-testable. See [`export_ms1_features`] for the rationale.
+fn features_to_ms1_feature_records(
+    features: &[Feature],
+    source_file_name: Option<&str>,
+) -> Vec<Ms1FeatureRecord> {
+    let mut out: Vec<Ms1FeatureRecord> = Vec::new();
+    for f in features {
+        // A feature with no charge states can't be expressed as a charge range; fall back to
+        // its primary charge so it still round-trips as a single-charge row.
+        let charges: Vec<i32> = if f.charge_states.is_empty() {
+            if f.primary_charge == 0 {
+                continue;
+            }
+            vec![f.primary_charge]
+        } else {
+            f.charge_states.clone()
+        };
+        let runs = contiguous_charge_runs(&charges);
+        let total_charges: i32 = runs.iter().map(|(lo, hi)| hi - lo + 1).sum();
+        for (lo, hi) in runs {
+            let span = (hi - lo + 1) as f64;
+            out.push(Ms1FeatureRecord {
+                file_name: source_file_name.map(str::to_owned),
+                sample_id: Some(0),
+                fraction_id: Some(0),
+                id: out.len() as i32,
+                mass: f.monoisotopic_mass,
+                intensity: f.summed_intensity * span / total_charges.max(1) as f64,
+                rt_begin: f.rt_start,
+                rt_end: f.rt_end,
+                rt_apex: f.rt_apex,
+                // Not carried by the viewer's Feature — left absent rather than guessed.
+                apex_intensity: None,
+                charge_min: lo,
+                charge_max: hi,
+                scan_min: None,
+                scan_max: None,
+                apex_scan: None,
+                // Only meaningful on the row that actually contains the primary charge.
+                rep_charge: (f.primary_charge >= lo && f.primary_charge <= hi)
+                    .then_some(f.primary_charge),
+                rep_average_mz: (f.primary_charge >= lo && f.primary_charge <= hi
+                    && f.detected_mz > 0.0)
+                    .then_some(f.detected_mz),
+                envelope_num: None,
+                ec_score: None,
+            });
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------------ PSMs
@@ -1272,6 +1457,135 @@ mod tests {
         assert_eq!(err.code, "FEATURE_PARSE");
     }
 
+    // A TopFD v1.6.2 `_ms1.feature` table: retention times in seconds, charge given as a range.
+    const MS1_FEATURE_TSV: &str = "Sample_ID\tID\tMass\tIntensity\tTime_begin\tTime_end\tApex_time\tApex_intensity\tMinimum_charge_state\tMaximum_charge_state\tMinimum_fraction_id\tMaximum_fraction_id\n\
+0\t0\t10835.85272090354\t10849947123.04\t2372.27\t2401.92\t2390.8\t912795138.8\t7\t9\t0\t0\n";
+
+    #[test]
+    fn load_dispatch_picks_the_parser_from_the_header() {
+        // Both formats are routinely named ".tsv", so the header is the only reliable signal.
+        assert!(!is_ms1_feature_header(RESOLVED_TSV.lines().next().unwrap()));
+        assert!(is_ms1_feature_header(MS1_FEATURE_TSV.lines().next().unwrap()));
+    }
+
+    #[test]
+    fn maps_ms1_feature_rows_onto_viewer_features() {
+        let feats = parse_ms1_feature_features(MS1_FEATURE_TSV).expect("parse ok");
+        assert_eq!(feats.len(), 1);
+        let f = &feats[0];
+
+        assert!((f.monoisotopic_mass - 10835.85272090354).abs() < 1e-6);
+        assert!((f.summed_intensity - 10849947123.04).abs() < 1e-2);
+        // The file is in seconds; the viewer works in minutes throughout.
+        assert!((f.rt_start - 2372.27 / 60.0).abs() < 1e-9);
+        assert!((f.rt_apex - 2390.8 / 60.0).abs() < 1e-9);
+        assert!((f.rt_end - 2401.92 / 60.0).abs() < 1e-9);
+
+        // A charge *range* of 7-9 expands to the full set.
+        assert_eq!(f.charge_states, vec![7, 8, 9]);
+        // No Rep_charge in this dialect, so the midpoint stands in.
+        assert_eq!(f.primary_charge, 8);
+        assert_eq!(f.per_charge_mz.len(), 3);
+        // Per-charge m/z is theoretical here — the format records no observed peak position.
+        for pc in &f.per_charge_mz {
+            assert!((pc.mz - mass_to_mz(f.monoisotopic_mass, pc.charge)).abs() < 1e-9);
+        }
+        // TopFD's EC_score is not ProteoStar's decon score, so nothing fills the score panel.
+        assert!(f.decon_score.is_none() && f.iso_corr_all.is_none() && f.ppm_spread.is_none());
+    }
+
+    #[test]
+    fn ms1_feature_parse_errors_carry_the_feature_parse_code() {
+        let bad = "Sample_ID\tID\tMass\tIntensity\tTime_begin\tTime_end\tApex_time\tMinimum_charge_state\tMaximum_charge_state\n\
+0\t0\tNOT_A_MASS\t1.0\t10\t20\t15\t2\t3\n";
+        let err = parse_ms1_feature_features(bad).unwrap_err();
+        assert_eq!(err.code, "FEATURE_PARSE");
+    }
+
+    #[test]
+    fn export_splits_gapped_charges_and_conserves_intensity() {
+        // Charges {2, 3, 7}: two contiguous runs, so two rows — a single 2-7 row would read
+        // back as {2,3,4,5,6,7}, inventing four charges.
+        let f = Feature {
+            monoisotopic_mass: 992.5022,
+            charge_states: vec![2, 3, 7],
+            primary_charge: 2,
+            detected_mz: 497.2584,
+            rt_start: 30.12,
+            rt_apex: 30.45,
+            rt_end: 30.90,
+            summed_intensity: 900.0,
+            ..Feature::default()
+        };
+        let recs = features_to_ms1_feature_records(&[f], Some("run.raw"));
+        assert_eq!(recs.len(), 2);
+        assert_eq!((recs[0].charge_min, recs[0].charge_max), (2, 3));
+        assert_eq!((recs[1].charge_min, recs[1].charge_max), (7, 7));
+
+        // Intensity is apportioned by charge count (2/3 and 1/3), not duplicated, so the rows
+        // still sum to the feature's total.
+        assert!((recs[0].intensity - 600.0).abs() < 1e-9);
+        assert!((recs[1].intensity - 300.0).abs() < 1e-9);
+        assert!((recs.iter().map(|r| r.intensity).sum::<f64>() - 900.0).abs() < 1e-9);
+
+        // Rep_charge belongs only to the run that actually contains the primary charge.
+        assert_eq!(recs[0].rep_charge, Some(2));
+        assert_eq!(recs[1].rep_charge, None);
+        // The viewer has no apex intensity, so the column must stay empty rather than be faked.
+        assert!(recs.iter().all(|r| r.apex_intensity.is_none()));
+        assert_eq!(recs[0].file_name.as_deref(), Some("run.raw"));
+    }
+
+    #[test]
+    fn contiguous_charges_export_as_a_single_row() {
+        let f = Feature {
+            charge_states: vec![2, 3, 4],
+            primary_charge: 3,
+            summed_intensity: 500.0,
+            ..Feature::default()
+        };
+        let recs = features_to_ms1_feature_records(&[f], None);
+        assert_eq!(recs.len(), 1);
+        assert_eq!((recs[0].charge_min, recs[0].charge_max), (2, 4));
+        assert!((recs[0].intensity - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn export_round_trips_back_through_the_loader() {
+        let original = Feature {
+            monoisotopic_mass: 10835.85,
+            charge_states: vec![7, 8, 9],
+            primary_charge: 8,
+            rt_start: 39.5,
+            rt_apex: 39.8,
+            rt_end: 40.0,
+            summed_intensity: 1.0e9,
+            ..Feature::default()
+        };
+        let recs = features_to_ms1_feature_records(&[original.clone()], Some("run.raw"));
+        let mut buf: Vec<u8> = Vec::new();
+        flashlfq_core::ms1_feature::write_ms1_feature(
+            &mut buf,
+            &recs,
+            Ms1FeatureDialect::FlashDeconv,
+        )
+        .unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        // What the viewer would do with the file it just wrote.
+        assert!(is_ms1_feature_header(text.lines().next().unwrap()));
+        let back = parse_ms1_feature_features(&text).expect("reload ok");
+        assert_eq!(back.len(), 1);
+        let f = &back[0];
+        assert!((f.monoisotopic_mass - original.monoisotopic_mass).abs() < 1e-6);
+        assert_eq!(f.charge_states, original.charge_states);
+        assert_eq!(f.primary_charge, original.primary_charge);
+        assert!((f.rt_start - original.rt_start).abs() < 1e-9);
+        assert!((f.rt_apex - original.rt_apex).abs() < 1e-9);
+        assert!((f.rt_end - original.rt_end).abs() < 1e-9);
+        assert!((f.summed_intensity - original.summed_intensity).abs() < 1.0);
+    }
+
     #[test]
     fn empty_file_errors() {
         assert_eq!(parse_resolved_features("").unwrap_err().code, "FEATURE_PARSE");
@@ -1299,10 +1613,13 @@ mod tests {
     #[test]
     #[ignore]
     fn in_app_detection_on_real_raw() {
-        let ds = build_dataset(r"D:\JurkatTopdown\02-18-20_jurkat_td_rep1_fract6.raw")
-            .expect("read raw");
-        assert_eq!(ds.scans.len(), 2851);
-        let feats = run_topdown_pipeline(&ds.scans, &ds.engine, 25, 300_000.0, |_, _, _| {});
+        // Same two steps `open_dataset` performs; this test used to call a `build_dataset`
+        // helper that no longer exists, which broke compilation of the whole test binary.
+        let scans =
+            read_ms1_scans(r"D:\JurkatTopdown\02-18-20_jurkat_td_rep1_fract6.raw").expect("read raw");
+        assert_eq!(scans.len(), 2851);
+        let engine = PeakIndexingEngine::index_peaks(&scans).expect("index peaks");
+        let feats = run_topdown_pipeline(&scans, &engine, 25, 300_000.0, |_, _, _| {});
         assert!(!feats.is_empty(), "expected some features");
         let f = &feats[0];
         assert!(f.monoisotopic_mass > 0.0);

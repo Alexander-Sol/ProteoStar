@@ -24,6 +24,7 @@ fn main() {
             commands::get_ms2_spectrum,
             commands::get_ms2_for_precursor,
             commands::load_features,
+            commands::export_ms1_features,
             commands::load_psms,
             commands::run_feature_detection,
             commands::score_seed_ladder,

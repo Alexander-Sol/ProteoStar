@@ -1297,6 +1297,35 @@ fn main() {
         }
     }
 
+    // MS1FEATURE_OUT=1: also emit the resolved features as a TopFD-style `_ms1.feature`
+    // table (read by TopPIC, mzLib, and MsViewer). Opt-in, like MSALIGN_OUT above; the TSV
+    // outputs are unchanged. This writes the TopFD v1.6 dialect rather than the viewer's
+    // default FLASHDeconv because a resolved feature *does* carry a real apex intensity, so
+    // the Apex_intensity column can be filled honestly.
+    if std::env::var("MS1FEATURE_OUT").is_ok() {
+        let feature_path = match out_path.strip_suffix(".tsv") {
+            Some(stem) => format!("{stem}.ms1.feature"),
+            None => format!("{out_path}.ms1.feature"),
+        };
+        let src = std::path::Path::new(spectra_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(spectra_path);
+        let recs = flashlfq_core::ms1_feature::resolved_to_ms1_feature_records(&resolved, src);
+        match flashlfq_core::ms1_feature::write_ms1_feature_file(
+            &feature_path,
+            &recs,
+            flashlfq_core::ms1_feature::Ms1FeatureDialect::TopFdV1_6,
+        ) {
+            Ok(()) => eprintln!(
+                "  MS1FEATURE_OUT: wrote {} rows ({} features) -> {feature_path}",
+                recs.len(),
+                resolved.len()
+            ),
+            Err(e) => eprintln!("  WARN: could not write ms1.feature {feature_path}: {e}"),
+        }
+    }
+
     if let Some(ref_path) = reference_path {
         let t5 = Instant::now();
         compare_to_reference(ref_path, &resolved);

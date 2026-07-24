@@ -23,6 +23,7 @@ pub mod mbr;
 pub mod mbr_chromatographic_peak;
 pub mod mbr_scorer;
 pub mod mbr_search;
+pub mod ms1_feature;
 pub mod parquet_output;
 pub mod peak_indexing;
 pub mod peptide;

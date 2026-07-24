@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   TicPlot,
@@ -28,7 +28,13 @@ import {
 } from "@msbrowser/ui";
 
 import { openDataset } from "./tauri-dataset-provider";
-import { loadFeatures, runFeatureDetection, isotopeGrid, featureElutesAt } from "./features";
+import {
+  loadFeatures,
+  exportMs1Features,
+  runFeatureDetection,
+  isotopeGrid,
+  featureElutesAt
+} from "./features";
 import { computePeakLabels } from "./annotate";
 import { loadPsms, linkPsms, fetchIsotopeXics, sumXics } from "./psms";
 import { scoreSeedLadder } from "./walkthrough";
@@ -112,6 +118,10 @@ type LoadState =
 
 export function App() {
   const [load, setLoad] = useState<LoadState>({ status: "idle" });
+  // Transient confirmation for actions that produce a file rather than changing the view
+  // (currently the ms1.feature export). Shown in the side panel, not over the plot, and
+  // cleared on a timer so it can't be mistaken for current state.
+  const [notice, setNotice] = useState<string | null>(null);
   const [provider, setProvider] = useState<DatasetProvider | null>(null);
   const [handle, setHandle] = useState<number | null>(null);
   const [detecting, setDetecting] = useState<string | null>(null);
@@ -357,11 +367,45 @@ export function App() {
   const handleLoadFeatures = useCallback(async () => {
     const picked = await openFileDialog({
       multiple: false,
-      filters: [{ name: "Feature TSV", extensions: ["tsv", "txt"] }]
+      // ".feature" covers TopFD / FLASHDeconv "*_ms1.feature" tables; the backend sniffs the
+      // header to tell them from the detector's resolved TSV, so either can be picked here.
+      filters: [{ name: "Feature table", extensions: ["tsv", "txt", "feature"] }]
     });
     if (typeof picked !== "string") return;
     await loadFeaturesFromPath(picked);
   }, [loadFeaturesFromPath]);
+
+  // ------------------------------------------------- export as ms1.feature
+  // Hands the loaded features to TopPIC / mzLib / anything else that reads the TopFD
+  // interchange format. Writes the FLASHDeconv dialect by default — see `exportMs1Features`
+  // for why that beats leaving a TopFD Apex_intensity column blank.
+  const handleExportMs1Features = useCallback(async () => {
+    if (features.length === 0) return;
+    // TopFD's own naming convention: "<run>_ms1.feature" beside the data.
+    const stem = (metadata?.fileName ?? "features").replace(/\.[^.]+$/, "");
+    const picked = await saveFileDialog({
+      defaultPath: `${stem}_ms1.feature`,
+      filters: [{ name: "MS1 feature table", extensions: ["feature"] }]
+    });
+    if (typeof picked !== "string") return;
+    try {
+      const rows = await exportMs1Features(picked, features, metadata?.fileName);
+      const name = picked.split(/[\\/]/).pop() ?? picked;
+      // Rows can exceed features when a gapped charge set is split across rows, so report
+      // both rather than implying one row per feature.
+      setNotice(
+        `Wrote ${rows} row${rows === 1 ? "" : "s"} from ${features.length} features → ${name}`
+      );
+    } catch (err) {
+      setLoad({ status: "error", message: errMessage(err) });
+    }
+  }, [features, metadata]);
+
+  useEffect(() => {
+    if (notice === null) return;
+    const t = setTimeout(() => setNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   // ------------------------------------------------------------- load decoys
   // Decoy features come from a separate detector run (a decoy comb model) and share the resolved
@@ -385,7 +429,9 @@ export function App() {
   const handleLoadDecoys = useCallback(async () => {
     const picked = await openFileDialog({
       multiple: false,
-      filters: [{ name: "Feature TSV", extensions: ["tsv", "txt"] }]
+      // ".feature" covers TopFD / FLASHDeconv "*_ms1.feature" tables; the backend sniffs the
+      // header to tell them from the detector's resolved TSV, so either can be picked here.
+      filters: [{ name: "Feature table", extensions: ["tsv", "txt", "feature"] }]
     });
     if (typeof picked !== "string") return;
     await loadDecoysFromPath(picked);
@@ -936,6 +982,12 @@ export function App() {
             Load decoys…
           </PanelActionButton>
           <PanelActionButton onClick={() => void handleLoadPsms()}>Load PSMs…</PanelActionButton>
+          {features.length > 0 ? (
+            <PanelActionButton onClick={() => void handleExportMs1Features()}>
+              Export ms1.feature…
+            </PanelActionButton>
+          ) : null}
+          {notice ? <StatusBanner tone="info">{notice}</StatusBanner> : null}
           {handle !== null ? (
             <PanelActionButton onClick={() => void handleRunDetection()}>
               {indexing

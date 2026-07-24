@@ -1,6 +1,46 @@
 # MS1 feature-output format: decision + spec
 
-## Decision
+## Update (2026-07-24): `_ms1.feature` is now supported, for both reading and writing
+
+The original decision below picked `.msalign` on the grounds that it was the **only** MS1
+format mzLib could read. That is no longer true: mzLib's `FeatureFinding` branch carries
+`Readers/ExternalResults/.../Ms1Feature.cs` + `Ms1FeatureFile.cs`, a full reader/writer for the
+TopFD / FLASHDeconv **`_ms1.feature`** table. So ProteoStar now supports it too, in
+`crates/flashlfq-core/src/ms1_feature.rs`.
+
+**`_ms1.feature` is the better fit and is now the preferred interchange format.** `.msalign`
+is a *per-scan deconvoluted spectrum* format — a feature has to be flattened into a single
+peak entry filed under its apex scan, which discards its RT range and its charge span.
+`_ms1.feature` is genuinely feature-shaped: one row carries the neutral mass, the RT
+begin/apex/end, the charge range, and both summed and apex intensity. Nothing is lost.
+`.msalign` export is retained (`MSALIGN_OUT=1`) for consumers that want spectra.
+
+What exists now:
+
+| Direction | Entry point |
+|---|---|
+| Read (any dialect) | `ms1_feature::read_ms1_feature{,_file}`; the viewer's `load_features` sniffs the header and dispatches, so the same "Load features…" button takes this or the resolved TSV |
+| Write from the detector | `MS1FEATURE_OUT=1` on `detect_features_tsv` → `<out>.ms1.feature` (TopFD v1.6 dialect, real apex intensities) |
+| Write from the viewer | `export_ms1_features` command / "Export ms1.feature…" button (FLASHDeconv dialect by default) |
+
+Three dialects are read — TopFD v1.6.2, TopFD v1.7.0, and FLASHDeconv/OpenMS — with column
+aliasing that matches mzLib's, so anything mzLib accepts is accepted here. Reference files
+from mzLib's own reader-test corpus are vendored at `crates/flashlfq-core/data/ms1_feature/`
+and parsed by `tests/ms1_feature_reference_files.rs`.
+
+**The trap: retention-time units are not declared and the dialects disagree.** TopFD v1.6.2
+and FLASHDeconv write **seconds**; TopFD v1.7.0 writes **minutes**. Both were confirmed from
+the reference files by peak-width reasoning (a v1.6 feature spanning `2375.98 → 2398.21` is a
+22-*second* elution peak, not a 22-minute one; a v1.7 feature spanning 0.82 units across 54
+scans is 0.82 *minutes*). ProteoStar normalises everything to minutes on read and converts
+back to the dialect's native unit on write. Note **mzLib does not normalise** — it reads the
+raw doubles — so a v1.6 file read through mzLib yields RTs 60× larger than one read here.
+
+Verified interop: a 2448-row file written by the detector was read back by mzLib's own
+`Ms1FeatureFile` (detected as `Software.TopFD`, all rows parsed, expanded to 2768
+single-charge features, no zeroed or inverted fields).
+
+## Decision (original)
 
 **Primary format: TopFD / msDeconv `.msalign` (MS1 flavour).**
 

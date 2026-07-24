@@ -9,9 +9,34 @@ const PROTON_MASS = 1.0072764668;
 // ¹³C − ¹²C mass difference — the isotope spacing in Da (per charge, divide by z).
 const C13_C12 = 1.0033548;
 
-/** Load resolved features from a TSV file produced by `detect_features_tsv`. */
+/**
+ * Load features from either the resolved TSV produced by `detect_features_tsv` or a
+ * TopFD / FLASHDeconv `_ms1.feature` table. The backend picks the parser by sniffing the
+ * header, so both formats go through this one call regardless of file extension.
+ */
 export function loadFeatures(path: string): Promise<Feature[]> {
   return invoke<Feature[]>("load_features", { path });
+}
+
+/** Column vocabularies `exportMs1Features` can write. */
+export type Ms1FeatureDialect = "flashdeconv" | "topfd1.6" | "topfd1.7";
+
+/**
+ * Write `features` to `path` as a TopFD / FLASHDeconv `_ms1.feature` file and resolve to
+ * the number of rows written — more than `features.length` when a feature's charge states
+ * are gapped, since the format can only express a contiguous charge range per row.
+ *
+ * Defaults to the FLASHDeconv dialect: it has no `Apex_intensity` column, and a viewer
+ * feature has no apex intensity to put there. The TopFD dialects would leave that column
+ * blank, which mzLib reads as null and then treats as zero intensity downstream.
+ */
+export function exportMs1Features(
+  path: string,
+  features: readonly Feature[],
+  sourceFileName?: string,
+  dialect: Ms1FeatureDialect = "flashdeconv"
+): Promise<number> {
+  return invoke<number>("export_ms1_features", { path, features, sourceFileName, dialect });
 }
 
 export interface DetectOptions {
