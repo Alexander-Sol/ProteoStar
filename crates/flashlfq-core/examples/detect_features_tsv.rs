@@ -782,14 +782,15 @@ fn main() {
 
     // --- post-detection experiment filters (opt-in) --------------------------------------------
     // EXCLUDE_Z1=1: drop all singly-charged (|z|=1) detections.
-    // FILTER_CRITERIA=1: apply the isotope/scan visibility filters (see filter_detected_feature):
+    // FILTER_CRITERIA: apply the isotope/scan visibility filters (see filter_detected_feature):
     //   most-abundant m/z seen in ≥2 scans; ≥2 isotopes in some scan; cut on a ≥2-scan mono gap.
+    //   Default ON; set FILTER_CRITERIA=0 to disable (e.g. to reproduce the old unfiltered baseline).
     let exclude_z1 = std::env::var("EXCLUDE_Z1")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
     let filter_criteria = std::env::var("FILTER_CRITERIA")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     if exclude_z1 || filter_criteria {
         let before = detected.len();
         if exclude_z1 {
