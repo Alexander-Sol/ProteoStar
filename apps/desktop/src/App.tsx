@@ -900,20 +900,23 @@ export function App() {
         const f = features[selected];
         if (f) items.push({ f, gi: selected });
       }
-      return items.flatMap(({ f, gi }) => {
-        const color = gi === selected ? SELECTED_COLOR : featureColor(gi);
-        return matchedPeakHighlights(f, peaks, () => color, 6);
-      });
+      return dedupeHighlights(
+        items.flatMap(({ f, gi }) => {
+          const isSelected = gi === selected;
+          const color = isSelected ? SELECTED_COLOR : featureColor(gi);
+          return matchedPeakHighlights(f, peaks, () => color, 6, isSelected ? 1 : 0);
+        })
+      );
     }
     if (selected !== null) {
       const f = features[selected];
       // The selection is SELECTED_COLOR here for the same reason it is on the rug and in the drawer:
       // one feature, one colour, in every view it appears in.
-      return f ? matchedPeakHighlights(f, peaks, () => SELECTED_COLOR, 12) : [];
+      return f ? dedupeHighlights(matchedPeakHighlights(f, peaks, () => SELECTED_COLOR, 12)) : [];
     }
     if (selectedDecoy !== null) {
       const f = decoys[selectedDecoy];
-      return f ? matchedPeakHighlights(f, peaks, () => DECOY_COLOR, 12) : [];
+      return f ? dedupeHighlights(matchedPeakHighlights(f, peaks, () => DECOY_COLOR, 12)) : [];
     }
     return [];
   }, [
@@ -1601,22 +1604,47 @@ function featureHasPeakInWindow(f: Feature, lo: number, hi: number): boolean {
   return false;
 }
 
+// A highlight plus the fields `dedupeHighlights` breaks ties on when several features claim the same
+// observed peak: `priority` (a selected feature outranks any other, whatever the ppm) then `ppm`
+// (the gap between the predicted tooth and the peak it snapped to).
+type ScoredHighlight = SpectrumPeakHighlight & { ppm: number; priority: number };
+
 // Feature-membership highlights: for each predicted isotope tooth that matches an observed peak
 // (within DETECT_PPM), a marker at that peak's true (m/z, intensity), coloured by `colorFor(charge)`.
-// Predicted-but-absent teeth produce nothing — the overlay marks only real peaks.
+// Predicted-but-absent teeth produce nothing — the overlay marks only real peaks. `priority` tags
+// every highlight so a selected feature can win a shared peak in `dedupeHighlights`.
 function matchedPeakHighlights(
   f: Feature,
   peaks: readonly { mz: number; intensity: number }[],
   colorFor: (z: number) => string,
-  count: number
-): SpectrumPeakHighlight[] {
+  count: number,
+  priority = 0
+): ScoredHighlight[] {
   return f.chargeStates.flatMap((z) => {
     const color = colorFor(z);
-    return isotopeGrid(f.monoisotopicMass, z, count).flatMap((mz) => {
-      const pk = nearestPeak(peaks, mz, DETECT_PPM);
-      return pk ? [{ mz: pk.mz, intensity: pk.intensity, color }] : [];
+    return isotopeGrid(f.monoisotopicMass, z, count).flatMap((predMz) => {
+      const pk = nearestPeak(peaks, predMz, DETECT_PPM);
+      if (!pk) return [];
+      const ppm = (Math.abs(predMz - pk.mz) / pk.mz) * 1e6;
+      return [{ mz: pk.mz, intensity: pk.intensity, color, ppm, priority }];
     });
   });
+}
+
+// Overlapping features' isotope teeth can resolve to the SAME observed peak (both within DETECT_PPM);
+// each would emit its own bar in the single Plotly highlight trace, and the later semi-transparent bar
+// paints over the earlier one — so a feature's tooth shows a neighbour's colour. Collapse to one bar
+// per observed peak: the selected feature wins any peak it touches (highest `priority`), otherwise the
+// closest-ppm claimant. Strip the scoring fields before handing to the plot.
+function dedupeHighlights(hs: readonly ScoredHighlight[]): SpectrumPeakHighlight[] {
+  const best = new Map<number, ScoredHighlight>();
+  for (const h of hs) {
+    const cur = best.get(h.mz);
+    const wins =
+      !cur || h.priority > cur.priority || (h.priority === cur.priority && h.ppm < cur.ppm);
+    if (wins) best.set(h.mz, h);
+  }
+  return Array.from(best.values(), ({ mz, intensity, color }) => ({ mz, intensity, color }));
 }
 
 // Sortable columns of the feature drawer.
