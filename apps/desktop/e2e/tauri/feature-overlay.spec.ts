@@ -77,6 +77,35 @@ function readRug(page: TauriPage): Promise<Rug | null> {
   );
 }
 
+// First target (non-decoy) featureIndex on the rug, or null. Decoys carry featureIndex >= 1e7.
+function readTargetIndex(page: TauriPage): Promise<number | null> {
+  return ev<number | null>(
+    page,
+    `${FIND_TIC}
+     if (!gd || !gd.data) return null;
+     var rug = gd.data.find(function(t){ return t.marker && t.marker.symbol === 'triangle-up'; });
+     if (!rug) return null;
+     var cd = rug.customdata || [];
+     for (var i = 0; i < cd.length; i++) {
+       if (cd[i] && cd[i].featureIndex < 10000000) return cd[i].featureIndex;
+     }
+     return null;`
+  );
+}
+
+// Count of XIC overlay traces on the TIC — the isotopologue line traces added when a feature (or
+// PSM) is selected. Their hovertemplate carries the "XIC"/"M+" label; the base TIC line does not.
+function readXicTraceCount(page: TauriPage): Promise<number> {
+  return ev<number>(
+    page,
+    `${FIND_TIC}
+     if (!gd || !gd.data) return 0;
+     return gd.data.filter(function(t){
+       return typeof t.hovertemplate === 'string' && t.hovertemplate.indexOf('XIC') >= 0;
+     }).length;`
+  );
+}
+
 // Fire the TIC's real feature-click handler for a given rug featureIndex (selects that feature).
 async function clickFeature(page: TauriPage, featureIndex: number): Promise<void> {
   await ev(
@@ -147,4 +176,44 @@ test("target + decoy feature overlays both render on the TIC and spectrum", asyn
   console.log(`[decoy envelope] ${envColors.length} lines; colours: ${[...new Set(envColors)].join(", ")}`);
   expect(envColors.length).toBeGreaterThan(0);
   expect(envColors.every((c) => c === DECOY_COLOR)).toBe(true);
+});
+
+test("selecting a target feature traces its isotopologue XIC on the TIC", async ({ tauriPage }) => {
+  test.setTimeout(120_000);
+  // Re-open the dataset first: `openPath` clears any prior XIC overlay, so the "0 before select"
+  // check is valid even when the app instance is shared with the test above.
+  await openDatasetByPath(tauriPage, dataPath(YEAST));
+  await waitForTic(tauriPage);
+  await loadFeaturesByPath(tauriPage, dataPath(TARGET_TSV));
+
+  // Wait for the target rug to populate.
+  await tauriPage.waitForFunction(
+    `(function(){ ${FIND_TIC}
+       if (!gd || !gd.data) return false;
+       var rug = gd.data.find(function(t){ return t.marker && t.marker.symbol === 'triangle-up'; });
+       return !!(rug && rug.x && rug.x.length > 0);
+     })()`,
+    60_000
+  );
+
+  const targetIndex = await readTargetIndex(tauriPage);
+  if (targetIndex === null) throw new Error("no target feature marker found on the rug");
+
+  // No XIC overlay until a feature is selected.
+  expect(await readXicTraceCount(tauriPage)).toBe(0);
+
+  // Selecting the feature extracts and overlays its isotopologue XIC(s) — like a PSM.
+  await clickFeature(tauriPage, targetIndex);
+  await tauriPage.waitForFunction(
+    `(function(){ ${FIND_TIC}
+       if (!gd || !gd.data) return false;
+       return gd.data.some(function(t){
+         return typeof t.hovertemplate === 'string' && t.hovertemplate.indexOf('XIC') >= 0;
+       });
+     })()`,
+    30_000
+  );
+  const xicCount = await readXicTraceCount(tauriPage);
+  console.log(`[target XIC] ${xicCount} XIC trace(s) on the TIC after selecting feature ${targetIndex}`);
+  expect(xicCount).toBeGreaterThan(0);
 });

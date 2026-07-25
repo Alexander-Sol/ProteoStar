@@ -218,6 +218,11 @@ export function App() {
     setSpectrum(null);
     setScanSummaries([]);
     setSelected(null);
+    // Drop any prior file's XIC overlay / PSM selection so it doesn't linger over the new dataset.
+    setSelectedPsm(null);
+    setXic([]);
+    setXicIndices([]);
+    setXicLabel(null);
     reframeTic(createDefaultViewport());
     try {
       const { handle: h, provider: p } = await openDataset(picked, (progress) => {
@@ -595,6 +600,40 @@ export function App() {
     },
     [psms, psmLinks, features, provider, spectrumPinned, reframeTic, reframeSpectrum]
   );
+
+  // A selected feature (target or decoy) traces its isotopologue XICs on the TIC, the same overlay
+  // used for a PSM. Keying off the selection — not a specific handler — means every gesture that
+  // selects a feature (rug marker, list row, or a spectrum-peak click that stays on the scan) shows
+  // the same XIC. Selecting a PSM clears both `selected` and `selectedDecoy`, so this no-ops and
+  // leaves the PSM's own XIC (set in `selectPsm`) untouched.
+  useEffect(() => {
+    const target = selected !== null ? features[selected] ?? null : null;
+    const decoy = selectedDecoy !== null ? decoys[selectedDecoy] ?? null : null;
+    const f = target ?? decoy;
+    if (!f || !provider) return;
+    const z = f.primaryCharge || f.chargeStates[0] || 1;
+    if (z <= 0 || f.monoisotopicMass <= 0) return;
+
+    // The overlay now describes a feature, not a PSM. A target keeps `xicLabel` null so the panel's
+    // richer feature readout (charge states, RT, scores) shows; a decoy has no such readout, so
+    // label it here.
+    setSelectedPsm(null);
+    setXicLabel(decoy ? `decoy · ${f.monoisotopicMass.toFixed(2)} Da · z${z}` : null);
+
+    let cancelled = false;
+    fetchIsotopeXics(provider, f.monoisotopicMass, z, { numIsotopes: 3, maxPoints: 4000 })
+      .then((iso) => {
+        if (cancelled) return;
+        setXic(iso.traces);
+        setXicIndices(iso.indices);
+      })
+      .catch((err) => {
+        if (!cancelled) setLoad({ status: "error", message: errMessage(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, selectedDecoy, features, decoys, provider]);
 
   // Click the TIC background → nearest scan's spectrum (unless the spectrum is pinned).
   const handleAreaClick = useCallback(
@@ -1086,7 +1125,7 @@ export function App() {
               xicLabel
                 ? `${xicMode === "sum" ? "XIC Σ isotopes" : `XIC isotopologues M+${xicIndices.join(", M+")}`} (absolute abundance): ${xicLabel}`
                 : selectedFeature
-                  ? `Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}${scoreReadout(selectedFeature)}`
+                  ? `${xic.length > 0 ? `XIC ${xicMode === "sum" ? "Σ isotopes" : `M+${xicIndices.join(", M+")}`} · ` : ""}Feature: ${selectedFeature.monoisotopicMass.toFixed(2)} Da · z ${selectedFeature.chargeStates.join(",")} · RT ${selectedFeature.rtStart.toFixed(2)}–${selectedFeature.rtEnd.toFixed(2)}${scoreReadout(selectedFeature)}`
                   : featuresFile
                     ? `${features.length} features from ${featuresFile} — click a marker or a row`
                     : "MS1 TIC · click to load a scan"
