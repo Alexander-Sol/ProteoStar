@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import {
   TicPlot,
@@ -87,6 +88,16 @@ const DECOY_REGION_FILL = "rgba(144,152,161,0.16)";
 // offset by this base so the one click handler can tell a target (< base) from a decoy (>= base)
 // without threading a discriminator through the shared plot-adapter event type.
 const DECOY_INDEX_BASE = 10_000_000;
+
+// Mass-spec dataset extensions accepted by both the "Open file…" dialog and drag-and-drop.
+const DATASET_EXTENSIONS = ["raw", "mzML", "mzml", "mzMLb", "mgf"] as const;
+// Lowercased for case-insensitive matching of dropped paths.
+const DATASET_EXTENSIONS_LC = DATASET_EXTENSIONS.map((e) => e.toLowerCase());
+const hasDatasetExtension = (path: string): boolean => {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return false;
+  return DATASET_EXTENSIONS_LC.includes(path.slice(dot + 1).toLowerCase());
+};
 
 // Features are sorted by intensity on load; these cap what's drawn/listed so a
 // pathologically large TSV (top-down noise runs can be 100k+ features) stays
@@ -250,10 +261,42 @@ export function App() {
   const handleOpenFile = useCallback(async () => {
     const picked = await openFileDialog({
       multiple: false,
-      filters: [{ name: "Mass spec", extensions: ["raw", "mzML", "mzml", "mzMLb", "mgf"] }]
+      filters: [{ name: "Mass spec", extensions: [...DATASET_EXTENSIONS] }]
     });
     if (typeof picked !== "string") return;
     await openPath(picked);
+  }, [openPath]);
+
+  // Drag-and-drop open. Tauri v2 keeps OS-level drag-drop enabled by default (so HTML5
+  // drop events never reach the webview); we subscribe to the native webview drag-drop
+  // event, which hands us real filesystem paths — exactly what `openPath` wants. `dragOver`
+  // drives the drop overlay while a drag hovers the window.
+  const [dragOver, setDragOver] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const { type } = event.payload;
+        if (type === "over") {
+          setDragOver(true);
+        } else if (type === "leave") {
+          setDragOver(false);
+        } else if (type === "drop") {
+          setDragOver(false);
+          // Open the first supported file; ignore folders / unsupported drops.
+          const picked = event.payload.paths.find(hasDatasetExtension);
+          if (picked) void openPath(picked);
+        }
+      })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, [openPath]);
 
   // E2E hook: open a dataset by path, skipping the native file dialog (which
@@ -1000,6 +1043,8 @@ export function App() {
         : null;
 
   return (
+    <>
+    {dragOver ? <DropOverlay /> : null}
     <ViewerShell
       title="MsViewer — feature finder"
       subtitle="Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
@@ -1331,6 +1376,18 @@ export function App() {
         />
       ) : null}
     </ViewerShell>
+    </>
+  );
+}
+
+// Full-window overlay shown while a file is dragged over the app, cueing the user that a
+// drop will open the dataset. Purely visual — the real work happens in the webview
+// drag-drop listener; `pointerEvents: none` keeps it from interfering with the OS drop.
+function DropOverlay() {
+  return (
+    <div style={dropOverlayStyle}>
+      <div style={dropOverlayCardStyle}>Drop a .raw or mzML file to open it</div>
+    </div>
   );
 }
 
@@ -2228,6 +2285,30 @@ function PsmDrawer({
     </div>
   );
 }
+
+const dropOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  // Above the drawer (zIndex 1000) so the cue is never occluded.
+  zIndex: 2000,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  backgroundColor: "rgba(47,111,176,0.12)",
+  border: "3px dashed #2f6fb0",
+  // Never intercept the OS drop; this is a visual cue only.
+  pointerEvents: "none"
+};
+const dropOverlayCardStyle: React.CSSProperties = {
+  padding: "16px 28px",
+  backgroundColor: "#ffffff",
+  border: "1.5px solid #2f6fb0",
+  borderRadius: 8,
+  boxShadow: "0 6px 24px rgba(0,0,0,0.18)",
+  fontSize: 16,
+  fontWeight: 600,
+  color: "#2f6fb0"
+};
 
 const drawerStyle: React.CSSProperties = {
   position: "fixed",
