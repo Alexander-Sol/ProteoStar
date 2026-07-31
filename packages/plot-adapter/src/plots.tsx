@@ -13,6 +13,7 @@ import type {
   RtRegion,
   SlotIndex,
   SpectrumPeakHighlight,
+  SpectrumPlotPeak,
   SpectrumPlotProps,
   TicPlotPoint,
   TicPlotProps,
@@ -283,34 +284,114 @@ function buildPeakAnnotations(
   }));
 }
 
+// Peak-rendering budget. A top-down MS1 scan carries 10^5+ centroids; drawing one SVG `bar` rect per
+// peak makes every zoom/pan relayout re-lay-out that many DOM nodes, which is the source of the hang.
+// Peaks are instead drawn as WebGL "stems" (a single scattergl line trace, below), and the set that
+// reaches the GPU + hover hit-test is bounded two ways: culled to the visible m/z window, then
+// decimated to the tallest peak per screen column. When zoomed in past the budget, every peak shows.
+const MAX_RENDERED_PEAKS = 6000;
+// Cull a little past the visible edges so a pan doesn't reveal a blank margin before relayout re-culls.
+const CULL_MARGIN_FRACTION = 0.1;
+
+/** The peaks to actually render for the current x-window: culled to the viewport (plus a small pan
+ *  margin), then, if still over budget, decimated by keeping the tallest peak in each of
+ *  MAX_RENDERED_PEAKS evenly-spaced m/z bins. Apex m/z and height are preserved, so the profile stays
+ *  faithful; at or below the budget the visible peaks are returned unchanged (full fidelity). */
+function renderablePeaks(
+  peaks: readonly SpectrumPlotPeak[],
+  viewport: { xMin: number | null; xMax: number | null }
+): readonly SpectrumPlotPeak[] {
+  if (peaks.length === 0) return peaks;
+
+  // Visible window (with margin) — or the full peak extent when the axis is autoranged.
+  let lo: number;
+  let hi: number;
+  const { xMin, xMax } = viewport;
+  if (xMin !== null && xMin !== undefined && xMax !== null && xMax !== undefined && xMax > xMin) {
+    const margin = (xMax - xMin) * CULL_MARGIN_FRACTION;
+    lo = xMin - margin;
+    hi = xMax + margin;
+  } else {
+    lo = Infinity;
+    hi = -Infinity;
+    for (const p of peaks) {
+      if (p.mz < lo) lo = p.mz;
+      if (p.mz > hi) hi = p.mz;
+    }
+  }
+  if (hi <= lo) return [];
+
+  const visible = peaks.filter((p) => p.mz >= lo && p.mz <= hi);
+  if (visible.length <= MAX_RENDERED_PEAKS) return visible;
+
+  // Max-per-column decimation: keep the tallest peak in each of MAX_RENDERED_PEAKS m/z bins.
+  const span = hi - lo;
+  const bins: (SpectrumPlotPeak | null)[] = new Array(MAX_RENDERED_PEAKS).fill(null);
+  for (const p of visible) {
+    let b = Math.floor(((p.mz - lo) / span) * MAX_RENDERED_PEAKS);
+    if (b < 0) b = 0;
+    else if (b >= MAX_RENDERED_PEAKS) b = MAX_RENDERED_PEAKS - 1;
+    const cur = bins[b];
+    if (cur === null || p.intensity > cur.intensity) bins[b] = p;
+  }
+  const out: SpectrumPlotPeak[] = [];
+  for (const p of bins) if (p !== null) out.push(p);
+  return out;
+}
+
+/** One WebGL scattergl line trace drawing every peak as a vertical stem: three vertices per peak —
+ *  (mz, 0) → (mz, intensity) → (mz, null) — where the null y breaks the line so the segments render
+ *  as discrete sticks from a single GPU-backed trace. Hover/click is handled by a separate marker
+ *  trace, so this one skips hover. */
+function buildStemTrace(peaks: readonly SpectrumPlotPeak[], color: string): PlotData {
+  const n = peaks.length;
+  const x: (number | null)[] = new Array(n * 3);
+  const y: (number | null)[] = new Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const p = peaks[i];
+    const j = i * 3;
+    x[j] = p.mz;
+    y[j] = 0;
+    x[j + 1] = p.mz;
+    y[j + 1] = p.intensity;
+    x[j + 2] = p.mz;
+    y[j + 2] = null;
+  }
+  return {
+    type: "scattergl",
+    mode: "lines",
+    x,
+    y,
+    line: { color, width: 1 },
+    connectgaps: false,
+    hoverinfo: "skip"
+  } as unknown as PlotData;
+}
+
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   const { traces, viewport, rangeSelectionEnabled, envelope, highlights, annotations, onEvent } =
     props;
   const allPeaks = traces.flatMap((t) => t.peaks);
 
   const peakTraces: PlotData[] = traces.flatMap((trace) => {
-    // The 0.001-m/z-wide bars are the visual, but far too thin to hover or click. Overlay an
-    // invisible wide-marker scatter at each peak apex to give Plotly a reliable hover/click
-    // hit-target (mirrors the TIC's line+markers approach). The bar itself skips hover so the
-    // tooltip and click both resolve to the marker trace's customdata.
-    const bar = {
-      type: "bar",
-      x: trace.peaks.map((p) => p.mz),
-      y: trace.peaks.map((p) => p.intensity),
-      marker: { color: trace.color },
-      width: 0.001,
-      hoverinfo: "skip"
-    } as unknown as PlotData;
+    // Cull to the visible window and decimate to the per-column budget before anything touches the
+    // GPU or the hover hit-test — the whole spectrum never reaches Plotly at once.
+    const shown = renderablePeaks(trace.peaks, viewport);
+    // Peaks are drawn as WebGL stems (one scattergl line trace) instead of an SVG `bar` per peak.
+    const stem = buildStemTrace(shown, trace.color);
+    // The stems are 1-px lines, far too thin to hover or click. Overlay an invisible wide-marker
+    // scatter at each peak apex to give Plotly a reliable hover/click hit-target (mirrors the TIC's
+    // line+markers approach). The stem trace skips hover so tooltip and click resolve to this trace.
     const hit = {
       type: "scattergl",
       mode: "markers",
-      x: trace.peaks.map((p) => p.mz),
-      y: trace.peaks.map((p) => p.intensity),
-      customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
+      x: shown.map((p) => p.mz),
+      y: shown.map((p) => p.intensity),
+      customdata: shown.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
       marker: { size: 12, color: "rgba(0,0,0,0)" },
       hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
     } as unknown as PlotData;
-    return [bar, hit];
+    return [stem, hit];
   });
   // Highlight trace FIRST so the colored backing rectangles render BEHIND the peaks. Always present
   // (empty when there's nothing to mark) so the trace COUNT stays constant across scan steps — a
