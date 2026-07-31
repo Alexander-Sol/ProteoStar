@@ -14,6 +14,61 @@ export function StatusBanner({
   return <div style={statusStyles[tone]}>{children}</div>;
 }
 
+/** An indeterminate loading spinner. Self-contained SVG using SMIL `animateTransform`, so it needs
+ *  no global `@keyframes` / CSS file and animates even inside the system webview. */
+export function Spinner({
+  size = 30,
+  color = "#3b6ea5"
+}: {
+  size?: number;
+  color?: string;
+}) {
+  const c = size / 2;
+  const r = c - 3;
+  const circumference = 2 * Math.PI * r;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      role="status"
+      aria-label="Loading"
+    >
+      <circle cx={c} cy={c} r={r} fill="none" stroke="#d8e2ef" strokeWidth={3} />
+      <circle
+        cx={c}
+        cy={c}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={3}
+        strokeLinecap="round"
+        strokeDasharray={`${circumference * 0.28} ${circumference}`}
+      >
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from={`0 ${c} ${c}`}
+          to={`360 ${c} ${c}`}
+          dur="0.9s"
+          repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
+}
+
+/** A centered spinner with an optional caption, sized to fill its container — the empty-state to
+ *  drop into a plot/panel body while work is in flight. */
+export function LoadingState({ message }: { message?: ReactNode }) {
+  return (
+    <div style={loadingStateStyle}>
+      <Spinner />
+      {message ? <span style={loadingMessageStyle}>{message}</span> : null}
+    </div>
+  );
+}
+
 export function MetricReadout({
   label,
   value
@@ -39,6 +94,25 @@ const badgeStyle: CSSProperties = {
   color: "#28415f",
   fontSize: "0.9rem",
   fontWeight: 600
+};
+
+const loadingStateStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 12,
+  width: "100%",
+  height: "100%",
+  minHeight: 120,
+  color: "#506279",
+  fontSize: "0.95rem",
+  textAlign: "center"
+};
+
+const loadingMessageStyle: CSSProperties = {
+  maxWidth: 340,
+  lineHeight: 1.5
 };
 
 const metricStyle: CSSProperties = {

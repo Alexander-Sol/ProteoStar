@@ -25,6 +25,7 @@ import {
   PanelHeader,
   StatusBanner,
   ViewerShell,
+  LoadingState,
   MetricReadout
 } from "@msbrowser/ui";
 
@@ -1290,7 +1291,11 @@ export function App() {
         }
       >
         {spectrumTraces.length === 0 ? (
-          <StatusBanner tone="muted">No spectrum selected.</StatusBanner>
+          indexing ? (
+            <LoadingState message="Building peak index — spectra will be available when it’s ready…" />
+          ) : (
+            <StatusBanner tone="muted">No spectrum selected.</StatusBanner>
+          )
         ) : (
           <SpectrumPlot
             traces={spectrumTraces}
