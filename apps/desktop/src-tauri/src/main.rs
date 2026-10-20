@@ -23,6 +23,8 @@ fn main() {
             commands::get_spectrum_at_rt,
             commands::get_ms2_spectrum,
             commands::get_ms2_for_precursor,
+            commands::open_simulated_dataset,
+            commands::simulate_scan,
             commands::load_features,
             commands::export_ms1_features,
             commands::load_psms,

@@ -28,6 +28,9 @@ serde_json = "1"
 arrow = { workspace = true }
 # The engine core, now a workspace sibling (../../../crates/flashlfq-core), not a vendored copy.
 flashlfq-core = { path = "../../../crates/flashlfq-core" }
+# The MS1 simulator (Phase 2): drives open_simulated_dataset + simulate_scan. Its output scans are
+# flashlfq-core's `Scan`, so a simulated run indexes through the same PeakIndexingEngine.
+sim-core = { path = "../../../crates/sim-core" }
 # Native file-open dialog (real .raw/mzML path → open_dataset).
 tauri-plugin-dialog = "2"
 # E2E control server for Playwright — only linked under the `e2e-testing` feature.

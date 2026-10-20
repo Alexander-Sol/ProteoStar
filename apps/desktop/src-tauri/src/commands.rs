@@ -181,15 +181,18 @@ fn build_indexed(path: &str) -> Result<IndexedData, ViewerError> {
     if scans.is_empty() {
         return Err(ViewerError::new("EMPTY_INDEX", "no MS1 scans found in file"));
     }
+    indexed_from_scans(scans)
+}
+
+/// Build the peak index + per-scan summed-centroid TIC from MS1 scans already in memory. Shared by
+/// the file path ([`build_indexed`]) and the simulated path ([`open_simulated_dataset`]).
+fn indexed_from_scans(scans: Vec<Scan>) -> Result<IndexedData, ViewerError> {
     let engine = PeakIndexingEngine::index_peaks(&scans)
         .ok_or_else(|| ViewerError::new("EMPTY_INDEX", "no indexable MS1 peaks"))?;
 
     // Per-scan TIC = summed centroided MS1 intensity. Used by scan summaries + nearest-scan;
-    // the displayed TIC chromatogram is the native one read on the fast path.
-    let tic: Vec<f32> = scans
-        .iter()
-        .map(|s| s.intensity.iter().sum::<f64>() as f32)
-        .collect();
+    // for a file the displayed TIC chromatogram is the native one read on the fast path.
+    let tic: Vec<f32> = scans.iter().map(|s| s.intensity.iter().sum::<f64>() as f32).collect();
 
     Ok(IndexedData {
         scans: Arc::new(scans),
@@ -344,7 +347,7 @@ pub async fn open_dataset(
         tic_rt: fast_tic.rt,
         tic_intensity: fast_tic.intensity,
         tic_is_ms1: fast_tic.is_ms1,
-        reader: Arc::new(std::sync::Mutex::new(reader)),
+        reader: Some(Arc::new(std::sync::Mutex::new(reader))),
         indexed: Arc::new(std::sync::Mutex::new(None)),
     };
     let indexed_slot = dataset.indexed.clone();
@@ -638,6 +641,16 @@ pub async fn get_spectrum_at_rt(
         let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
         d.reader.clone()
     };
+
+    // Reader-less dataset (simulated, in-memory): it is indexed at creation, so resolve the RT
+    // against the indexed MS1 scans and serve that scan directly.
+    let Some(reader) = reader else {
+        let (scans, _, _) = indexed_handles(&state, handle)?;
+        let si = nearest_scan_index(&scans, retention_time)
+            .ok_or_else(|| ViewerError::new("NO_SCAN", "no MS1 scan near that retention time"))?;
+        return build_spectrum_response(&scans[si], si as i64, mz_min, mz_max, max_peaks);
+    };
+
     // Read off the async runtime: a single-scan `.raw` read crosses into the .NET runtime.
     let scan = tauri::async_runtime::spawn_blocking(move || {
         let mut r = reader.lock().map_err(|e| e.to_string())?;
@@ -676,6 +689,10 @@ pub async fn get_ms2_spectrum(
         let d = datasets.get(&handle).ok_or_else(|| ViewerError::handle_not_found(handle))?;
         d.reader.clone()
     };
+    // A simulated (reader-less) dataset is MS1-only: it has no MS2 scans to fetch by number.
+    let Some(reader) = reader else {
+        return Err(ViewerError::new("NO_SCAN", format!("no scan with number {scan_number}")));
+    };
     // Read off the async runtime: a single-scan `.raw` read crosses into the .NET runtime.
     let scan = tauri::async_runtime::spawn_blocking(move || {
         let mut r = reader.lock().map_err(|e| e.to_string())?;
@@ -701,6 +718,111 @@ pub async fn get_ms2_for_precursor(
     ensure_handle(&state, handle)?;
     let _ = (mz, ms1_scan_index); // MS1-only reader: no MS2 scans retained
     Ok(Vec::new())
+}
+
+// ------------------------------------------------------------- simulated data
+
+/// Map a `sim_core` error to the viewer's error taxonomy.
+fn sim_err(e: sim_core::SimError) -> ViewerError {
+    match e {
+        sim_core::SimError::ScanOutOfRange { index, count } => {
+            ViewerError::scan_out_of_range(index as u32, count)
+        }
+        sim_core::SimError::UnsupportedSchema(_) | sim_core::SimError::InvalidSpec(_) => {
+            ViewerError::new("INVALID_SPEC", e.to_string())
+        }
+        sim_core::SimError::Io(_) | sim_core::SimError::Json(_) => {
+            ViewerError::new("READ_ERROR", e.to_string())
+        }
+    }
+}
+
+/// Provisional metadata for an in-memory simulated run; [`refine_metadata`] fills the ranges.
+fn simulated_metadata() -> DatasetMetadata {
+    DatasetMetadata {
+        file_name: "Simulated".into(),
+        format: "simulated".into(),
+        scan_count: 0,
+        ms1_scan_count: 0,
+        ms_levels_present: vec![1],
+        retention_time_range: None,
+        mz_range: None,
+        index_error: None,
+    }
+}
+
+/// Index of the scan whose retention time is closest to `rt` (scans are RT-ascending).
+fn nearest_scan_index(scans: &[Scan], rt: f64) -> Option<usize> {
+    scans
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (a.retention_time - rt).abs().total_cmp(&(b.retention_time - rt).abs())
+        })
+        .map(|(i, _)| i)
+}
+
+/// Commit path (workbench interaction model): simulate every scan of `spec`, index it, and
+/// register it as a dataset handle served by the same `DatasetProvider` commands as a real run.
+/// Reader-less — spectra come from the in-memory index, not a file (see [`OpenDataset::reader`]).
+#[tauri::command]
+pub async fn open_simulated_dataset(
+    spec: sim_core::spec::SimSpec,
+    state: State<'_, AppState>,
+) -> Result<OpenResult, ViewerError> {
+    // Simulate + index off the async runtime: both are CPU-bound.
+    let indexed = tauri::async_runtime::spawn_blocking(move || {
+        let scans = sim_core::simulate_run(&spec).map_err(sim_err)?;
+        if scans.is_empty() {
+            return Err(ViewerError::new("EMPTY_INDEX", "simulation produced no scans"));
+        }
+        indexed_from_scans(scans)
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))??;
+
+    // TIC + metadata straight from the simulated scans: a sim has no native TIC and is MS1-only,
+    // so the fast TIC is the indexed MS1 TIC and is final (never superseded).
+    let tic_rt: Vec<f64> = indexed.scans.iter().map(|s| s.retention_time).collect();
+    let tic_intensity: Vec<f32> = indexed.tic.as_ref().clone();
+    let mut metadata = simulated_metadata();
+    refine_metadata(&mut metadata, &indexed.scans);
+    metadata.scan_count = metadata.ms1_scan_count;
+
+    let handle = state.next.fetch_add(1, Ordering::SeqCst) + 1;
+    let dataset = OpenDataset {
+        metadata: Arc::new(std::sync::Mutex::new(metadata.clone())),
+        tic_rt,
+        tic_intensity,
+        tic_is_ms1: true,
+        reader: None,
+        indexed: Arc::new(std::sync::Mutex::new(Some(indexed))),
+    };
+    {
+        let mut datasets = state.datasets.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        datasets.insert(handle, dataset);
+    }
+    Ok(OpenResult { handle, metadata })
+}
+
+/// Live path (workbench interaction model): one fully simulated scan, returned as the same Arrow
+/// spectrum a real scan is. Stateless — no handle, no index, no stored dataset — so the parameter
+/// panel can call it on every edit and repaint just the viewed scan.
+#[tauri::command]
+pub async fn simulate_scan(
+    spec: sim_core::spec::SimSpec,
+    scan_index: u32,
+    mz_min: Option<f64>,
+    mz_max: Option<f64>,
+    max_peaks: Option<u32>,
+) -> Result<Response, ViewerError> {
+    let si = scan_index as usize;
+    let scan = tauri::async_runtime::spawn_blocking(move || {
+        sim_core::simulate_scan(&spec, si).map_err(sim_err)
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))??;
+    build_spectrum_response(&scan, scan_index as i64, mz_min, mz_max, max_peaks)
 }
 
 // ------------------------------------------------------------- feature overlay

@@ -2570,6 +2570,7 @@ dependencies = [
  "flashlfq-core",
  "serde",
  "serde_json",
+ "sim-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

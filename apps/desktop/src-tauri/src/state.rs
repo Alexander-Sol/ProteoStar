@@ -45,7 +45,12 @@ pub struct OpenDataset {
     /// The file kept open for on-demand single-scan reads, so spectra can be shown by RT
     /// before the full index exists. Behind a `Mutex` (the reader needs `&mut self` per read)
     /// and an `Arc` so a command can clone it, drop the state lock, and read off-thread.
-    pub reader: Arc<Mutex<RandomAccessMs1Reader>>,
+    ///
+    /// `None` for an in-memory dataset that has no backing file — a **simulated** run
+    /// (`open_simulated_dataset`). Such a dataset is indexed at creation, so its spectra are
+    /// served from `indexed` instead of a reader (see `get_spectrum_at_rt`), and it carries no
+    /// MS2 scans to read by number.
+    pub reader: Option<Arc<Mutex<RandomAccessMs1Reader>>>,
     /// Full indexed state; `None` until the background indexing task fills it.
     pub indexed: Arc<Mutex<Option<IndexedData>>>,
 }
