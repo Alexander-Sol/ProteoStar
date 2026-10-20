@@ -34,7 +34,6 @@ pub const SKIP_FRACTION_OF_FLOOR: f64 = 0.5;
 /// One (proteoform, charge) envelope's Gaussians.
 #[derive(Debug, Clone)]
 struct Envelope {
-    proteoform: usize,
     charge_weight: f64,
     centers: Vec<f64>,
     unit_heights: Vec<f64>,
@@ -69,17 +68,123 @@ pub struct Centroids {
     pub intensity: Vec<f64>,
 }
 
-/// Precomputed envelopes for a set of proteoforms. Immutable, so scans can be centroided in
-/// parallel against one instance.
+/// The charge states envelopes are built over, and the peak width that shapes every Gaussian —
+/// the run-level inputs every envelope depends on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvelopeLayout {
+    pub min_charge: i32,
+    pub max_charge: i32,
+    pub width: PeakWidthModel,
+}
+
+/// One proteoform's share of the precomputed state.
+#[derive(Debug, Clone)]
+struct Species {
+    model: ProteoformModel,
+    /// Depends only on the mass; kept so that a layout change does not redo averagine.
+    kernel: IsotopeEnvelope,
+    /// Ascending charge.
+    envelopes: Vec<Envelope>,
+    /// The tallest component this proteoform can contribute per unit of `A_p·g_p(t)`: max over
+    /// its envelopes of `f(z) · unit height`. Lets it be skipped whole when even its tallest
+    /// Gaussian is below the pruning threshold.
+    max_unit_component: f64,
+}
+
+impl Species {
+    fn build(model: ProteoformModel, kernel: IsotopeEnvelope, layout: &EnvelopeLayout) -> Result<Self, SimError> {
+        let envelopes = envelopes_for(&model, &kernel, layout)?;
+        let max_unit_component =
+            envelopes.iter().fold(0.0f64, |m, e| m.max(e.charge_weight * e.max_unit_height));
+        Ok(Self { model, kernel, envelopes, max_unit_component })
+    }
+
+    /// The tallest Gaussian this proteoform puts in a scan at `scan_time`, with the same cut-off
+    /// [`ProfileCentroider::max_component_height`] applies.
+    fn tallest_component(&self, scan_time: f64) -> f64 {
+        tallest_component(&self.model, self.max_unit_component, scan_time)
+    }
+
+    fn reach(&self) -> SpeciesReach {
+        SpeciesReach { model: self.model.clone(), max_unit_component: self.max_unit_component }
+    }
+}
+
+/// Just enough of a [`Species`] to bound what it adds to a scan.
+#[derive(Debug, Clone)]
+struct SpeciesReach {
+    model: ProteoformModel,
+    max_unit_component: f64,
+}
+
+impl SpeciesReach {
+    fn tallest_component(&self, scan_time: f64) -> f64 {
+        tallest_component(&self.model, self.max_unit_component, scan_time)
+    }
+}
+
+#[inline]
+fn tallest_component(model: &ProteoformModel, max_unit_component: f64, scan_time: f64) -> f64 {
+    let w = rt_weight(model, scan_time);
+    if w > MINIMUM_CONTRIBUTION_WEIGHT { w * max_unit_component } else { 0.0 }
+}
+
+/// `A_p · g_p(t)`.
+#[inline]
+fn rt_weight(p: &ProteoformModel, scan_time: f64) -> f64 {
+    let rt = p.rt.evaluate(scan_time);
+    if rt > 0.0 { p.abundance * rt } else { 0.0 }
+}
+
+/// What an [`ProfileCentroider::update`] changed, for invalidating anything cached per scan.
+#[derive(Debug, Clone, Default)]
+pub struct SignalChange {
+    /// Every envelope was rebuilt: nothing computed from the old signal can be kept.
+    pub everything: bool,
+    /// The proteoforms the update replaced, removed or added, as they were before and are after.
+    before: Vec<SpeciesReach>,
+    after: Vec<SpeciesReach>,
+}
+
+impl SignalChange {
+    pub fn is_empty(&self) -> bool {
+        !self.everything && self.before.is_empty() && self.after.is_empty()
+    }
+
+    /// The tallest Gaussian any changed proteoform contributed before, or contributes after, at
+    /// `scan_time`. Meaningless when [`Self::everything`] is set.
+    pub fn tallest_changed_component(&self, scan_time: f64) -> f64 {
+        self.before
+            .iter()
+            .chain(&self.after)
+            .map(|s| s.tallest_component(scan_time))
+            .fold(0.0, f64::max)
+    }
+}
+
+/// The brightest centroid of one scan, and the tallest single Gaussian under it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScanMax {
+    pub brightest: f64,
+    pub tallest_component: f64,
+}
+
+impl ScanMax {
+    /// Whether this scan's value is unaffected by a change whose tallest changed component in
+    /// the scan is `changed`. Below the prune threshold [`ProfileCentroider::scan_max`] used, the
+    /// changed proteoforms were and are dropped from the scan whole, so its component set — and
+    /// hence its tallest component and brightest centroid — is the same either way.
+    pub fn survives(&self, changed: f64) -> bool {
+        changed < PRUNE_FRACTION_OF_FLOOR * self.tallest_component
+    }
+}
+
+/// Precomputed envelopes for a set of proteoforms. Read-only while simulating, so scans can be
+/// centroided in parallel against one instance; [`Self::update`] edits it between simulations.
 #[derive(Debug, Clone)]
 pub struct ProfileCentroider {
-    proteoforms: Vec<ProteoformModel>,
-    envelopes: Vec<Envelope>,
-    /// Per proteoform, the tallest component it can contribute per unit of `A_p·g_p(t)`:
-    /// max over its envelopes of `f(z) · unit height`. Lets a whole proteoform be skipped when
-    /// even its tallest Gaussian is below the pruning threshold.
-    max_unit_component: Vec<f64>,
-    width: PeakWidthModel,
+    species: Vec<Species>,
+    layout: EnvelopeLayout,
 }
 
 impl ProfileCentroider {
@@ -89,80 +194,100 @@ impl ProfileCentroider {
         max_charge: i32,
         width: PeakWidthModel,
     ) -> Result<Self, SimError> {
-        if min_charge < 1 || max_charge < min_charge {
-            return Err(SimError::InvalidSpec(
-                "charge range must satisfy 1 <= min <= max".into(),
-            ));
-        }
-
-        // Proteoforms are independent, so their envelopes are built in parallel; collecting in
-        // proteoform order keeps the envelope list identical to a serial build.
-        let per_proteoform: Vec<Vec<Envelope>> = proteoforms
-            .par_iter()
-            .enumerate()
-            .map(|(p, model)| Self::envelopes_for(p, model, min_charge, max_charge, &width))
-            .collect::<Result<_, _>>()?;
-        let envelopes: Vec<Envelope> = per_proteoform.into_iter().flatten().collect();
-
-        let mut max_unit_component = vec![0.0f64; proteoforms.len()];
-        for e in &envelopes {
-            let m = &mut max_unit_component[e.proteoform];
-            *m = m.max(e.charge_weight * e.max_unit_height);
-        }
-
-        Ok(Self { proteoforms, envelopes, max_unit_component, width })
+        let layout = EnvelopeLayout { min_charge, max_charge, width };
+        check_layout(&layout)?;
+        Ok(Self { species: build_species(proteoforms, &layout)?, layout })
     }
 
-    /// One proteoform's (charge) envelopes, ascending charge.
-    fn envelopes_for(
-        p: usize,
-        model: &ProteoformModel,
-        min_charge: i32,
-        max_charge: i32,
-        width: &PeakWidthModel,
-    ) -> Result<Vec<Envelope>, SimError> {
-        let kernel = IsotopeEnvelope::new(model.monoisotopic_mass);
-        let n = kernel.len();
-        let mut envelopes = Vec::new();
+    pub fn width(&self) -> PeakWidthModel {
+        self.layout.width
+    }
 
-        for z in min_charge..=max_charge {
-            let fz = model.charge.evaluate(z);
-            if !(fz > 0.0) || n == 0 {
-                continue;
-            }
+    /// Brings the centroider to `proteoforms` under `layout`, rebuilding only the envelopes the
+    /// difference touches. The result is identical to [`Self::new`] on the same inputs. On error
+    /// nothing has changed.
+    pub fn update(
+        &mut self,
+        proteoforms: Vec<ProteoformModel>,
+        layout: EnvelopeLayout,
+    ) -> Result<SignalChange, SimError> {
+        check_layout(&layout)?;
 
-            let mut centers = Vec::with_capacity(n);
-            let mut heights = Vec::with_capacity(n);
-            let mut inv_2_sigma2 = Vec::with_capacity(n);
-            let mut sigmas = Vec::with_capacity(n);
-            for i in 0..n {
-                let center = to_mz(kernel.neutral_masses[i], z);
-                let sigma = width.sigma_at(center);
-                if !(sigma > 0.0) || !sigma.is_finite() {
-                    return Err(SimError::InvalidSpec(format!(
-                        "σ_m must be finite and positive; got {sigma} at m/z {center}"
-                    )));
-                }
-                centers.push(center);
-                sigmas.push(sigma);
-                // Unit-area Gaussians weighted by the normalized isotopologue abundance.
-                heights.push(kernel.intensities[i] / (sigma * (2.0 * PI).sqrt()));
-                inv_2_sigma2.push(1.0 / (2.0 * sigma * sigma));
-            }
-
-            let max_unit_height = heights.iter().copied().fold(0.0f64, f64::max);
-            envelopes.push(Envelope {
-                proteoform: p,
-                charge_weight: fz,
-                centers,
-                unit_heights: heights,
-                inv_2_sigma2,
-                sigmas,
-                max_unit_height,
-            });
+        if layout != self.layout {
+            // Every envelope depends on the layout; only the averagine kernels carry over.
+            let kernels: Vec<IsotopeEnvelope> = proteoforms
+                .par_iter()
+                .enumerate()
+                .map(|(i, m)| match self.species.get(i) {
+                    Some(s) if s.model.monoisotopic_mass == m.monoisotopic_mass => s.kernel.clone(),
+                    _ => IsotopeEnvelope::new(m.monoisotopic_mass),
+                })
+                .collect();
+            let species = proteoforms
+                .into_par_iter()
+                .zip(kernels)
+                .map(|(m, k)| Species::build(m, k, &layout))
+                .collect::<Result<_, _>>()?;
+            self.species = species;
+            self.layout = layout;
+            return Ok(SignalChange { everything: true, ..Default::default() });
         }
 
-        Ok(envelopes)
+        // Unchanged proteoforms at both ends; the middle of the old list becomes the middle of
+        // the new one.
+        let old = &self.species;
+        let same = |s: &Species, m: &ProteoformModel| s.model == *m;
+        let prefix = old.iter().zip(&proteoforms).take_while(|(s, m)| same(s, m)).count();
+        let max_suffix = old.len().min(proteoforms.len()) - prefix;
+        let suffix = old
+            .iter()
+            .rev()
+            .zip(proteoforms.iter().rev())
+            .take(max_suffix)
+            .take_while(|(s, m)| same(s, m))
+            .count();
+        let old_middle = prefix..old.len() - suffix;
+        let new_middle_len = proteoforms.len() - suffix - prefix;
+        let paired = old_middle.len() == new_middle_len;
+
+        // Build every replacement before committing any, so a failure leaves `self` untouched.
+        let replacements: Vec<Option<Species>> = proteoforms[prefix..prefix + new_middle_len]
+            .par_iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let previous = paired.then(|| &old[prefix + i]);
+                match previous {
+                    Some(s) if s.model == *m => Ok(None),
+                    // Envelopes depend on mass and charge distribution only.
+                    Some(s) if s.model.monoisotopic_mass == m.monoisotopic_mass
+                        && s.model.charge == m.charge =>
+                    {
+                        Ok(Some(Species { model: m.clone(), ..s.clone() }))
+                    }
+                    Some(s) if s.model.monoisotopic_mass == m.monoisotopic_mass => {
+                        Species::build(m.clone(), s.kernel.clone(), &self.layout).map(Some)
+                    }
+                    _ => Species::build(m.clone(), IsotopeEnvelope::new(m.monoisotopic_mass), &self.layout)
+                        .map(Some),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+
+        let mut change = SignalChange::default();
+        if paired {
+            for (i, r) in replacements.into_iter().enumerate() {
+                if let Some(new) = r {
+                    change.after.push(new.reach());
+                    change.before.push(std::mem::replace(&mut self.species[prefix + i], new).reach());
+                }
+            }
+        } else {
+            let added: Vec<Species> =
+                replacements.into_iter().map(|r| r.expect("an unpaired proteoform is always built")).collect();
+            change.after = added.iter().map(Species::reach).collect();
+            change.before = self.species.splice(old_middle, added).map(|s| s.reach()).collect();
+        }
+        Ok(change)
     }
 
     /// The centroids of the summed profile at one retention time, ascending m/z. Exact: every
@@ -270,58 +395,59 @@ impl ProfileCentroider {
         out
     }
 
-    /// `A_p · g_p(t)` per proteoform.
-    fn rt_weights(&self, scan_time: f64) -> Vec<f64> {
-        self.proteoforms
-            .iter()
-            .map(|p| {
-                let rt = p.rt.evaluate(scan_time);
-                if rt > 0.0 { p.abundance * rt } else { 0.0 }
-            })
-            .collect()
-    }
-
     /// The tallest single Gaussian at this retention time. A lower bound on the tallest centroid,
     /// since the summed profile is at least as tall as any one of its (non-negative) terms.
     pub fn max_component_height(&self, scan_time: f64) -> f64 {
-        self.rt_weights(scan_time)
-            .iter()
-            .zip(&self.max_unit_component)
-            .filter(|(&w, _)| w > MINIMUM_CONTRIBUTION_WEIGHT)
-            .map(|(&w, &unit)| w * unit)
-            .fold(0.0, f64::max)
+        self.species.iter().map(|s| s.tallest_component(scan_time)).fold(0.0, f64::max)
+    }
+
+    /// The brightest centroid at this retention time, found with the scan's tallest Gaussian `T`
+    /// as the floor bound: the brightest centroid is at least `T`, so [`Self::centroid_above`]
+    /// always reports it, while everything below `PRUNE_FRACTION_OF_FLOOR · T` is pruned and only
+    /// the neighbourhoods of the tallest Gaussians are walked.
+    ///
+    /// Depends on the signal model alone (not on noise or reduction), so it can be cached per
+    /// scan across those edits; [`ScanMax::survives`] says when a signal edit leaves it valid.
+    pub fn scan_max(&self, scan_time: f64, parallelism: Parallelism) -> ScanMax {
+        let tallest_component = self.max_component_height(scan_time);
+        let brightest = if tallest_component > 0.0 {
+            self.centroid_above(scan_time, tallest_component, parallelism)
+                .intensity
+                .iter()
+                .fold(0.0, |max, &y| if y > max { y } else { max })
+        } else {
+            0.0
+        };
+        ScanMax { brightest, tallest_component }
     }
 
     fn active_components(&self, scan_time: f64, min_height: f64) -> Vec<Component> {
-        let mut weights = self.rt_weights(scan_time);
-        if min_height > 0.0 {
-            for (w, &unit) in weights.iter_mut().zip(&self.max_unit_component) {
-                if *w * unit < min_height {
-                    *w = 0.0;
-                }
-            }
-        }
-
         let mut components = Vec::new();
-        for e in &self.envelopes {
-            let mut weight = weights[e.proteoform];
+        for s in &self.species {
+            let mut weight = rt_weight(&s.model, scan_time);
+            if min_height > 0.0 && weight * s.max_unit_component < min_height {
+                weight = 0.0;
+            }
             if weight <= MINIMUM_CONTRIBUTION_WEIGHT {
                 continue;
             }
-            weight *= e.charge_weight;
-            if weight <= MINIMUM_CONTRIBUTION_WEIGHT || weight * e.max_unit_height < min_height {
-                continue;
-            }
 
-            for i in 0..e.centers.len() {
-                let height = weight * e.unit_heights[i];
-                if height > 0.0 && height >= min_height {
-                    components.push(Component {
-                        center: e.centers[i],
-                        height,
-                        inv_2_sigma2: e.inv_2_sigma2[i],
-                        sigma: e.sigmas[i],
-                    });
+            for e in &s.envelopes {
+                let weight = weight * e.charge_weight;
+                if weight <= MINIMUM_CONTRIBUTION_WEIGHT || weight * e.max_unit_height < min_height {
+                    continue;
+                }
+
+                for i in 0..e.centers.len() {
+                    let height = weight * e.unit_heights[i];
+                    if height > 0.0 && height >= min_height {
+                        components.push(Component {
+                            center: e.centers[i],
+                            height,
+                            inv_2_sigma2: e.inv_2_sigma2[i],
+                            sigma: e.sigmas[i],
+                        });
+                    }
                 }
             }
         }
@@ -383,7 +509,7 @@ impl ProfileCentroider {
 
             // prev1 is a maximum when it rises from prev2 and does not fall short of y.
             if !prev2.is_nan() && prev1 > prev2 && prev1 >= y {
-                let step = self.width.sigma_at(prev_x) / GRID_POINTS_PER_SIGMA;
+                let step = self.layout.width.sigma_at(prev_x) / GRID_POINTS_PER_SIGMA;
                 let (peak_mz, peak_height) = polish(cluster, prev_x, window, step);
                 if peak_height < skip_below {
                     // Possibly an artefact of a skipped neighbour read as 0, and below the floor
@@ -405,9 +531,77 @@ impl ProfileCentroider {
             prev2 = prev1;
             prev1 = y;
             prev_x = x;
-            x = hi.min(x + self.width.sigma_at(x) / GRID_POINTS_PER_SIGMA);
+            x = hi.min(x + self.layout.width.sigma_at(x) / GRID_POINTS_PER_SIGMA);
         }
     }
+}
+
+fn check_layout(layout: &EnvelopeLayout) -> Result<(), SimError> {
+    if layout.min_charge < 1 || layout.max_charge < layout.min_charge {
+        return Err(SimError::InvalidSpec("charge range must satisfy 1 <= min <= max".into()));
+    }
+    Ok(())
+}
+
+/// Proteoforms are independent, so they are built in parallel; collecting in order keeps the
+/// result identical to a serial build.
+fn build_species(proteoforms: Vec<ProteoformModel>, layout: &EnvelopeLayout) -> Result<Vec<Species>, SimError> {
+    proteoforms
+        .into_par_iter()
+        .map(|m| {
+            let kernel = IsotopeEnvelope::new(m.monoisotopic_mass);
+            Species::build(m, kernel, layout)
+        })
+        .collect()
+}
+
+/// One proteoform's (charge) envelopes, ascending charge.
+fn envelopes_for(
+    model: &ProteoformModel,
+    kernel: &IsotopeEnvelope,
+    layout: &EnvelopeLayout,
+) -> Result<Vec<Envelope>, SimError> {
+    let EnvelopeLayout { min_charge, max_charge, width } = *layout;
+    let n = kernel.len();
+    let mut envelopes = Vec::new();
+
+    for z in min_charge..=max_charge {
+        let fz = model.charge.evaluate(z);
+        if !(fz > 0.0) || n == 0 {
+            continue;
+        }
+
+        let mut centers = Vec::with_capacity(n);
+        let mut heights = Vec::with_capacity(n);
+        let mut inv_2_sigma2 = Vec::with_capacity(n);
+        let mut sigmas = Vec::with_capacity(n);
+        for i in 0..n {
+            let center = to_mz(kernel.neutral_masses[i], z);
+            let sigma = width.sigma_at(center);
+            if !(sigma > 0.0) || !sigma.is_finite() {
+                return Err(SimError::InvalidSpec(format!(
+                    "σ_m must be finite and positive; got {sigma} at m/z {center}"
+                )));
+            }
+            centers.push(center);
+            sigmas.push(sigma);
+            // Unit-area Gaussians weighted by the normalized isotopologue abundance.
+            heights.push(kernel.intensities[i] / (sigma * (2.0 * PI).sqrt()));
+            inv_2_sigma2.push(1.0 / (2.0 * sigma * sigma));
+        }
+
+        let max_unit_height = heights.iter().copied().fold(0.0f64, f64::max);
+        envelopes.push(Envelope {
+            charge_weight: fz,
+            centers,
+            unit_heights: heights,
+            inv_2_sigma2,
+            sigmas,
+            max_unit_height,
+        });
+    }
+
+    Ok(envelopes)
 }
 
 /// C# `Math.Clamp`.

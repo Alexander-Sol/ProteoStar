@@ -772,15 +772,22 @@ pub async fn open_simulated_dataset(
 ) -> Result<OpenResult, ViewerError> {
     // Simulate + index off the async runtime: both are CPU-bound.
     let indexed = tauri::async_runtime::spawn_blocking(move || {
-        let scans = sim_core::simulate_run(&spec).map_err(sim_err)?;
-        if scans.is_empty() {
-            return Err(ViewerError::new("EMPTY_INDEX", "simulation produced no scans"));
-        }
-        indexed_from_scans(scans)
+        index_simulated_run(sim_core::simulate_run(&spec).map_err(sim_err)?)
     })
     .await
     .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))??;
+    register_simulated_dataset(indexed, &state)
+}
 
+fn index_simulated_run(scans: Vec<Scan>) -> Result<IndexedData, ViewerError> {
+    if scans.is_empty() {
+        return Err(ViewerError::new("EMPTY_INDEX", "simulation produced no scans"));
+    }
+    indexed_from_scans(scans)
+}
+
+/// Register an indexed simulated run as a reader-less dataset handle.
+fn register_simulated_dataset(indexed: IndexedData, state: &AppState) -> Result<OpenResult, ViewerError> {
     // TIC + metadata straight from the simulated scans: a sim has no native TIC and is MS1-only,
     // so the fast TIC is the indexed MS1 TIC and is final (never superseded).
     let tic_rt: Vec<f64> = indexed.scans.iter().map(|s| s.retention_time).collect();
@@ -823,6 +830,95 @@ pub async fn simulate_scan(
     .await
     .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))??;
     build_spectrum_response(&scan, scan_index as i64, mz_min, mz_max, max_peaks)
+}
+
+// ------------------------------------------------------- live simulator session
+//
+// The workbench's parameter panel keeps one `Simulator` alive and sends it the whole edited spec
+// on every change; `Simulator::update` diffs it against the last one and recomputes only what
+// the edit invalidated (agent_info/TopDown-Simulator-Live-Session-Plan.md). The frontend keeps at
+// most one request per session in flight, so requests queue on the session lock only briefly.
+
+fn sim_session(
+    session: u64,
+    state: &AppState,
+) -> Result<Arc<std::sync::Mutex<sim_core::Simulator>>, ViewerError> {
+    let sessions = state.sim_sessions.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    sessions.get(&session).cloned().ok_or_else(|| {
+        ViewerError::new("SESSION_NOT_FOUND", format!("no simulator session {session}"))
+    })
+}
+
+/// Run `f` on the session's simulator, brought to `spec` first, off the async runtime.
+async fn with_updated_session<T: Send + 'static>(
+    session: u64,
+    spec: sim_core::spec::SimSpec,
+    state: &AppState,
+    f: impl FnOnce(&sim_core::Simulator) -> Result<T, ViewerError> + Send + 'static,
+) -> Result<T, ViewerError> {
+    let sim = sim_session(session, state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sim = sim.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        sim.update(&spec).map_err(sim_err)?;
+        f(&sim)
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))?
+}
+
+/// Start a live session on `spec`; returns its id.
+#[tauri::command]
+pub async fn open_sim_session(
+    spec: sim_core::spec::SimSpec,
+    state: State<'_, AppState>,
+) -> Result<u64, ViewerError> {
+    let sim = tauri::async_runtime::spawn_blocking(move || sim_core::Simulator::new(&spec).map_err(sim_err))
+        .await
+        .map_err(|e| ViewerError::internal(format!("simulate task failed: {e}")))??;
+    let session = state.next.fetch_add(1, Ordering::SeqCst) + 1;
+    state
+        .sim_sessions
+        .lock()
+        .map_err(|e| ViewerError::internal(e.to_string()))?
+        .insert(session, Arc::new(std::sync::Mutex::new(sim)));
+    Ok(session)
+}
+
+/// Live path: bring the session to `spec`, then simulate the viewed scan.
+#[tauri::command]
+pub async fn sim_session_scan(
+    session: u64,
+    spec: sim_core::spec::SimSpec,
+    scan_index: u32,
+    mz_min: Option<f64>,
+    mz_max: Option<f64>,
+    max_peaks: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Response, ViewerError> {
+    let scan = with_updated_session(session, spec, &state, move |sim| {
+        sim.simulate_scan(scan_index as usize).map_err(sim_err)
+    })
+    .await?;
+    build_spectrum_response(&scan, scan_index as i64, mz_min, mz_max, max_peaks)
+}
+
+/// Commit path (Accept): bring the session to `spec`, simulate the whole run on the same
+/// simulator, and open it as a dataset like [`open_simulated_dataset`]. The session stays open.
+#[tauri::command]
+pub async fn commit_sim_session(
+    session: u64,
+    spec: sim_core::spec::SimSpec,
+    state: State<'_, AppState>,
+) -> Result<OpenResult, ViewerError> {
+    let indexed =
+        with_updated_session(session, spec, &state, |sim| index_simulated_run(sim.simulate_run())).await?;
+    register_simulated_dataset(indexed, &state)
+}
+
+#[tauri::command]
+pub async fn close_sim_session(session: u64, state: State<'_, AppState>) -> Result<(), ViewerError> {
+    state.sim_sessions.lock().map_err(|e| ViewerError::internal(e.to_string()))?.remove(&session);
+    Ok(())
 }
 
 // ------------------------------------------------------------- feature overlay

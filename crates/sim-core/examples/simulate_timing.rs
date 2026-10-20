@@ -92,4 +92,45 @@ fn main() {
         t.elapsed().as_secs_f64() * 1e3,
         run.len()
     );
+    drop(run);
+
+    session_timings(spec, mid);
+}
+
+/// What one live edit costs on a long-lived simulator: `update` to the edited spec, then the
+/// viewed scan.
+fn session_timings(mut spec: SimSpec, viewed: usize) {
+    println!("\nsession: update + simulate_scan({viewed}) per edit");
+    let mut sim = Simulator::new(&spec).unwrap();
+    sim.simulate_scan(viewed).unwrap();
+
+    let edit = |name: &str, sim: &mut Simulator, spec: &mut SimSpec, f: &dyn Fn(&mut SimSpec)| {
+        f(spec);
+        let t = Instant::now();
+        sim.update(spec).unwrap();
+        let updated = t.elapsed().as_secs_f64() * 1e3;
+        let kept = sim.cached_scan_maxima();
+        sim.simulate_scan(viewed).unwrap();
+        println!(
+            "  {name:<30} {:>8.1} ms  (update {updated:.1} ms; scan maxima kept {kept}/{})",
+            t.elapsed().as_secs_f64() * 1e3,
+            sim.scan_count()
+        );
+    };
+
+    edit("abundance (noise on)", &mut sim, &mut spec, &|s| s.proteoforms[0].abundance *= 2.0);
+    edit("RT mu (noise on)", &mut sim, &mut spec, &|s| s.proteoforms[1].rt.mu += 0.5);
+    edit("mass (noise on)", &mut sim, &mut spec, &|s| s.proteoforms[2].monoisotopic_mass += 100.0);
+    edit("noise level", &mut sim, &mut spec, &|s| {
+        s.noise.as_mut().unwrap().floor.noise_level_at_reference_mz *= 1.05
+    });
+    edit("jitter off", &mut sim, &mut spec, &|s| s.noise.as_mut().unwrap().jitter.enabled = false);
+    edit("noise off (cold scan maxima)", &mut sim, &mut spec, &|s| s.noise = None);
+    edit("abundance (noise off)", &mut sim, &mut spec, &|s| s.proteoforms[0].abundance *= 2.0);
+    edit("RT mu (noise off)", &mut sim, &mut spec, &|s| s.proteoforms[1].rt.mu += 0.5);
+    edit("noise on", &mut sim, &mut spec, &|s| s.noise = Some(SimNoise::orbitrap_defaults(0)));
+    edit("noise off again (warm)", &mut sim, &mut spec, &|s| s.noise = None);
+    edit("peak width k (noise off)", &mut sim, &mut spec, &|s| {
+        s.peak_width_model = SimPeakWidthModel::Orbitrap { k: 1.3e-7 }
+    });
 }

@@ -39,8 +39,8 @@ export async function openDataset(
 /**
  * Commit path (workbench interaction model): simulate a whole run in the backend and open it as a
  * dataset. The returned provider is the same `DatasetProvider` as a real run's, so the viewer
- * shows a simulated run in a slot with no other changes. For the per-edit live preview use
- * {@link simulateScan}, not this.
+ * shows a simulated run in a slot with no other changes. One-off: the workbench uses
+ * {@link SimSession} (live preview + commit on one long-lived simulator) instead.
  */
 export async function openSimulatedDataset(
   spec: SimSpec
@@ -51,8 +51,8 @@ export async function openSimulatedDataset(
 
 /**
  * Live path (workbench interaction model): one fully simulated scan, decoded as a {@link Spectrum}.
- * Stateless — no handle, no stored dataset — so the parameter panel can call it on every edit and
- * repaint just the viewed scan.
+ * Stateless — it builds a simulator from scratch per call — so for repeated edits prefer
+ * {@link SimSession.scan}, which recomputes only what each edit changed.
  */
 export async function simulateScan(
   spec: SimSpec,
@@ -67,6 +67,79 @@ export async function simulateScan(
     maxPeaks: opts.maxPeaks
   });
   return decodeSpectrum(toTable(buf));
+}
+
+type ScanOpts = { mzRange?: NumericRange; maxPeaks?: number };
+
+interface PendingScan {
+  spec: SimSpec;
+  scanIndex: number;
+  opts: ScanOpts;
+  resolve: (s: Spectrum | null) => void;
+  reject: (e: unknown) => void;
+}
+
+/**
+ * A live simulator session: one long-lived backend `Simulator` that each edit updates in place,
+ * recomputing only what the edit invalidated. The panel always passes its whole current
+ * `SimSpec`; the backend diffs it against the last one.
+ */
+export class SimSession {
+  private inFlight = false;
+  private pending: PendingScan | null = null;
+
+  private constructor(readonly id: number) {}
+
+  static async open(spec: SimSpec): Promise<SimSession> {
+    return new SimSession(await invoke<number>("open_sim_session", { spec }));
+  }
+
+  /**
+   * Live path, latest-wins: at most one request is in flight. A call made while one is running
+   * replaces any earlier waiting call, which resolves to `null` (superseded) — so a slider drag
+   * renders the newest position as soon as the backend is free, with no debounce constant.
+   */
+  scan(spec: SimSpec, scanIndex: number, opts: ScanOpts = {}): Promise<Spectrum | null> {
+    return new Promise((resolve, reject) => {
+      this.pending?.resolve(null);
+      this.pending = { spec, scanIndex, opts, resolve, reject };
+      if (!this.inFlight) void this.drain();
+    });
+  }
+
+  private async drain(): Promise<void> {
+    this.inFlight = true;
+    while (this.pending) {
+      const { spec, scanIndex, opts, resolve, reject } = this.pending;
+      this.pending = null;
+      try {
+        const buf = await invoke<ArrayBuffer>("sim_session_scan", {
+          session: this.id,
+          spec,
+          scanIndex,
+          mzMin: opts.mzRange?.min,
+          mzMax: opts.mzRange?.max,
+          maxPeaks: opts.maxPeaks
+        });
+        resolve(decodeSpectrum(toTable(buf)));
+      } catch (e) {
+        reject(e);
+      }
+    }
+    this.inFlight = false;
+  }
+
+  /** Commit path (Accept): simulate the whole run on this session and open it as a dataset. */
+  async commit(spec: SimSpec): Promise<{ handle: number; provider: DatasetProvider }> {
+    const { handle } = await invoke<OpenResult>("commit_sim_session", { session: this.id, spec });
+    return { handle, provider: providerForHandle(handle) };
+  }
+
+  close(): Promise<void> {
+    this.pending?.resolve(null);
+    this.pending = null;
+    return invoke("close_sim_session", { session: this.id });
+  }
 }
 
 /** Build a `DatasetProvider` over Tauri IPC for an already-open dataset `handle`. */

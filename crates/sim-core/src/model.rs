@@ -29,7 +29,7 @@ fn sign(x: f64) -> f64 {
 }
 
 /// Exponentially-modified Gaussian elution profile, unit area. Port of `EmgProfile`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmgProfile {
     pub mu: f64,
     pub sigma: f64,
@@ -80,7 +80,7 @@ fn erf(x: f64) -> f64 {
 ///
 /// Note this is the Gaussian *density* in z, not renormalized over the charge range — the C#
 /// does not normalize either, and abundances are fitted against this exact form.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChargeDistribution {
     pub mu_z: f64,
     pub sigma_z: f64,
@@ -134,7 +134,7 @@ impl PeakWidthModel {
 }
 
 /// One proteoform's parameter vector, decoded from the spec.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProteoformModel {
     pub monoisotopic_mass: f64,
     pub abundance: f64,

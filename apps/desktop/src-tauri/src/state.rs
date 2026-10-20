@@ -71,5 +71,10 @@ pub struct IndexedData {
 #[derive(Default)]
 pub struct AppState {
     pub datasets: Mutex<HashMap<u64, OpenDataset>>,
+    /// Live simulator sessions (the workbench's parameter panel), keyed from the same counter as
+    /// `datasets`. Each holds one long-lived `Simulator` that every edit updates in place, so an
+    /// edit only recomputes what it invalidated. `Arc` so a command can drop the map lock before
+    /// simulating.
+    pub sim_sessions: Mutex<HashMap<u64, Arc<Mutex<sim_core::Simulator>>>>,
     pub next: AtomicU64,
 }
