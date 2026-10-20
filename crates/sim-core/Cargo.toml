@@ -1,0 +1,24 @@
+[package]
+name = "sim-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust port of the mzLib TopDownSimulator MS1 forward model, centroider and noise."
+
+[lib]
+name = "sim_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Output scans are flashlfq-core's `Scan`, so a simulated run indexes through the same
+# `PeakIndexingEngine` as a real one.
+flashlfq-core = { path = "../flashlfq-core" }
+serde = { workspace = true }
+# `float_roundtrip`: the contract promises a spec's doubles parse to the identical f64 C# wrote;
+# serde_json's default fast float parser can be an ulp off.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# Scans are independent (per-scan RNG streams), so the full run parallelises like the C#
+# `Parallel.For` without changing output.
+rayon = { workspace = true }

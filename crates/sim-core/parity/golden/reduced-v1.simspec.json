@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "instrument": {
+    "polarity": "Positive",
+    "analyzer": "Orbitrap",
+    "msLevel": 1
+  },
+  "chargeRange": {
+    "min": 3,
+    "max": 40
+  },
+  "peakWidthModel": {
+    "kind": "Orbitrap",
+    "k": 1.2E-07
+  },
+  "scanTimes": [
+    19.5,
+    19.6,
+    19.7,
+    19.8,
+    19.9,
+    20,
+    20.1,
+    20.2,
+    20.3,
+    20.4,
+    20.5,
+    20.6,
+    20.7,
+    20.8,
+    20.9,
+    21,
+    21.1,
+    21.2,
+    21.3,
+    21.4
+  ],
+  "proteoforms": [
+    {
+      "monoisotopicMass": 5000.25,
+      "abundance": 1000000000,
+      "rt": {
+        "mu": 20,
+        "sigma": 0.22,
+        "tau": 0.08
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 7.5,
+        "sigmaZ": 1.2
+      },
+      "identifier": "P1|SMALL"
+    },
+    {
+      "monoisotopicMass": 35000.75,
+      "abundance": 420000000,
+      "rt": {
+        "mu": 20.6,
+        "sigma": 0.3,
+        "tau": 0.12
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 30,
+        "sigmaZ": 3.5
+      },
+      "identifier": "P2|LARGE"
+    }
+  ],
+  "generator": {
+    "tool": "TopDownSimulator",
+    "writtenUtc": "2026-10-20T17:28:46.0265332Z"
+  },
+  "sourceRun": {
+    "description": "golden-v1 models; case reduced-v1"
+  },
+  "reduction": {
+    "relativeIntensityThreshold": 0.0001,
+    "absoluteIntensityFloor": 0
+  },
+  "background": []
+}

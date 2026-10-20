@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/flashlfq-core",
     "crates/flashlfq-py",
+    "crates/sim-core",
     "apps/desktop/src-tauri",
 ]
 # Keep flashlfq-py out of default-members: it's an extension-module cdylib that only links
@@ -10,6 +11,7 @@ members = [
 # the Tauri backend; the Python wheel is built explicitly via `maturin`.
 default-members = [
     "crates/flashlfq-core",
+    "crates/sim-core",
     "apps/desktop/src-tauri",
 ]
 

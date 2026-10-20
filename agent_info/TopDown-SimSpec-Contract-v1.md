@@ -72,7 +72,8 @@ A single UTF-8 JSON file, extension `.simspec.json`, written with `System.Text.J
 Noise is **live-editable in v1** (the workbench exposes these as knobs — see the plan's Interaction
 model), so the block carries the full parameter set, not just a toggle. The **data-free golden still
 uses `noise: null`** so signal-path parity starts on the pure forward model + centroider. Noise
-parity turned out byte-exact: `sim-core` ports the RNG verbatim (§5).
+parity is **statistical**: `sim-core` draws the same distributions from its own random streams
+(§5), so a seed reproduces a run within one implementation, not across C# and Rust.
 
 Field names below mirror the C# model properties exactly, so a spec round-trips to the real
 `NoiseFloorModel` / `SignalToNoiseDistribution` / `PeakJitterModel`. Defaults shown are the measured
@@ -80,8 +81,8 @@ Orbitrap values.
 
 ```jsonc
 "noise": {
-  "seed": 0,                                 // low 32 bits used; SplitMix64(seed, scan, stream) seeds a
-                                             // .NET System.Random per scan — floor + jitter reproducible
+  "seed": 0,                                 // floor + jitter reproducible per implementation. C# uses the
+                                             // low 32 bits (int noiseSeed); Rust uses all 64
   "floor": {                                 // Noise/NoiseFloorModel.cs
     "noiseLevelAtReferenceMz": 1120.0,       //   amplitude at ReferenceMz (650 Th); per-run knob
     "densityScale": 1.0,                     //   DensityScale (0 = no added floor; ~16900 peaks/scan at 1.0)
@@ -173,9 +174,12 @@ Generator lives in `mzLib/Test/TopDownSimulator/` and writes the fixture under
 copy lives in `crates/sim-core/parity/golden/` (the averagine table in `crates/sim-core/data/`,
 embedded at build time).
 
-Parity tolerance (Phase 1): m/z match within 1e-6 Th, intensity within 1e-4 relative. **Achieved:
-bit-exact** on this golden and on three `Simulator.PrepareMs1` goldens alongside it (`reduced-v1`,
-`noise-jitter-v1`, `noise-nojitter-v1` — same models, through reduction and noise ± jitter).
+Parity tolerance (Phase 1): m/z match within 1e-6 Th, intensity within 1e-4 relative. **Achieved:**
+bit-exact on this golden (Rust's exact centroider path). Three `Simulator.PrepareMs1` goldens sit
+alongside it, same models through reduction and noise ± jitter: `reduced-v1` matches within
+tolerance (Rust's faster pipeline prunes far-sub-floor Gaussians); `noise-jitter-v1` and
+`noise-nojitter-v1` match statistically (Rust uses its own random streams). An earlier,
+deliberately slower port matched all three bit for bit.
 
 ## 6. Versioning
 

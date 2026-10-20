@@ -83,7 +83,7 @@ Project: `mzLib/TopDownSimulator/` (net10.0). Lightly-coupled numeric core to po
 | Forward model | `Model/ForwardModel.cs` | `I(t,mz)=Σ_p A_p·g_p(t)·Σ_z f_p(z)·φ(...)` |
 | Centroider | `Simulation/ProfileCentroider.cs` | one centroid per local max; Newton polish on S'(x)=0 |
 | Reduction | `Simulation/SimulatedScanReducer.cs` | relative+absolute intensity floor |
-| Noise | `Noise/*` | empirical; Poisson density, Box–Muller; SplitMix64 derives a per-scan seed for .NET's legacy seeded `System.Random` (Knuth subtractive) — both ported verbatim |
+| Noise | `Noise/*` | empirical; Poisson density, Box–Muller. C# seeds .NET's legacy `System.Random` per scan via SplitMix64; Rust uses native xoshiro256++ streams (same distributions, statistically equal output) |
 
 **Costly edges, deferred:** MS2 (`Ms2/*`, depends on `Omics` fragment chemistry) and the
 fitting/extraction front end (`Extraction/*`, `Fitting/*`). Both stay in C# for now.
@@ -112,21 +112,35 @@ needs as library calls: **(a) one scan** (`simulate_scan(spec, scanIndex)`) and 
 
 **Delivered:** `crates/sim-core` — `spec` (SimSpec v1 serde + validation), `averagine` (the
 exported table, embedded), `model`, `centroider` (`ProfileCentroider`), `noise` (floor, jitter,
-collapse, SplitMix64 + .NET `Random`), and `lib.rs` (`Simulator`, `simulate_scan`, `simulate_run`
-= C# `PrepareMs1`: centroid → reduce → noise). `Simulator::centroid_scan`/`centroid_run` stop
-after centroiding (= C# `SimulateCentroided`).
-**Parity — bit-exact, every peak** (`tests/golden_parity.rs`): `golden-v1` (signal, 44 386 peaks)
-plus three C#-generated `PrepareMs1` goldens in `parity/golden/` — `reduced-v1` (8 476),
-`noise-jitter-v1` (26 291), `noise-nojitter-v1` (24 290). The live and commit paths agree scan for
-scan. Bit-exactness relies on the platform libm (`exp`/`ln`/`cos`/`powf`) matching .NET's; the
-assertions use the contract tolerances, so a libm difference elsewhere degrades to ~ulp, not failure.
-**Timing** (`examples/simulate_timing.rs`, 1000 proteoforms, z 3–60, full-density noise):
-`Simulator::new` ~200 ms (first call parses the 3 MB averagine table), `simulate_scan` ~300 ms,
-`simulate_run` ~50 s for 3000 scans (105 M peaks). Centroiding dominates the live path: ~97k
-unreduced peaks per scan, most below the floor. **Phase-3 lever:** prune components that cannot
-reach the detection floor before centroiding, and keep one `Simulator` alive across edits that
-don't touch the proteoform list — trading bit-exactness for speed, so gate it behind the goldens'
-tolerance.
+collapse), and `lib.rs` (`Simulator`, `simulate_scan`, `simulate_run` = C# `PrepareMs1`: centroid
+→ reduce → noise). `Simulator::centroid_scan`/`centroid_run` stop after centroiding with the
+exact C# algorithm (= `SimulateCentroided`).
+
+**Two paths, by design.** The first port was bit-exact everywhere, noise included (verified, then
+deliberately relaxed for speed on 2026-10-20):
+- *Exact path* (`centroid_scan`/`centroid_run`): the C# centroider, **bit-exact** against
+  `golden-v1` (44 386 peaks). Kept as the parity anchor.
+- *Fast path* (`simulate_scan`/`simulate_run`): `ProfileCentroider::centroid_above` drops Gaussians
+  < 1e-6 of the floor, skips grid evaluations whose reachable Gaussians sum to < ½ the floor,
+  walks a single scan's clusters in parallel, and widens the 6σ interaction reach locally where a
+  giant's tail would otherwise be cut (C#'s 6σ rule is only safe while tiny Gaussians chain
+  clusters together; pruning removes them). Noise uses native xoshiro256++ streams per (seed, scan,
+  stream), with all 64 seed bits.
+- *How the fast path is verified:* `reduced-v1` within contract tolerance (max rel 8e-8);
+  noise goldens statistically (peak count and intensity/m/z quantiles within a few %, C# vs Rust);
+  and `tests/fast_path_exactness.rs` on a crowded 300-proteoform run against both the exact path
+  and a brute-force true profile. ~0.1–0.2 % of kept peaks differ from the exact path beyond the
+  contract tolerance; the test proves each is explained by the true profile (a spot too flat for
+  the σ/4 grid, a real maximum the exact path misses, or an exact-path artefact on a giant's
+  slope) and fails on any real maximum the fast path misses. A mutation check (removing the
+  reach fix) makes it fail as intended.
+
+**Timing** (`examples/simulate_timing.rs`, 1000 proteoforms, z 3–60, full-density noise, 24
+logical cores): `simulate_scan` **~300 → ~28 ms**; `Simulator::new` ~165 → ~45–70 ms (envelopes
+built in parallel; first call also parses the 3 MB averagine table); `simulate_run` (3000 scans,
+105 M peaks) **~50 → ~23.6 s**. A live edit (new `Simulator` + one scan) is now ~75–100 ms.
+**Phase-3 levers:** keep one `Simulator` alive and rebuild only the edited proteoform's envelopes;
+the run is now dominated by the grid walk inside genuinely crowded clusters.
 **Gotcha for Phase 2:** without noise, the reduction floor is relative to the brightest peak of the
 *whole run*, so `simulate_scan` on a fresh `Simulator` centroids every scan once to find it. With
 noise on (the realistic case) the floor is the noise model's and the live path touches one scan.
@@ -167,8 +181,9 @@ Phases 1–3 deliver the stated goal. Phase 4 is additive.
    identical table or envelopes drift. Handled by exporting the table in Phase 0.
 2. **Reader abstraction (Phase 2).** `get_spectrum_at_rt`/`get_ms2_spectrum` read through the
    per-handle `reader`; an in-memory source must satisfy the same surface. Minimal new trait/enum.
-3. ~~**Noise bit-reproducibility.**~~ Resolved in Phase 1: the RNG was ported verbatim and noise
-   output is bit-exact against C#.
+3. ~~**Noise bit-reproducibility.**~~ Resolved, then deliberately dropped: a verbatim RNG port was
+   bit-exact against C#, and was replaced with native streams for speed. Rust noise now matches C#
+   statistically; a given seed is reproducible within Rust but not against C#.
 4. **C# "jitter disabled" ≠ contract.** `SimNoiseJitter.ToModel()` returns null when disabled, and
    `PrepareMs1`/`WriteMzml` replace a null jitter with `PeakJitterModel.Orbitrap` — so in C#,
    `enabled: false` currently means *default* jitter. Rust follows the contract (no jitter). Fix on
