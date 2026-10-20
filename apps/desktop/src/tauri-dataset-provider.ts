@@ -8,6 +8,7 @@ import { tableFromIPC, type Table } from "apache-arrow";
 import type {
   DatasetMetadata,
   DatasetProvider,
+  NumericRange,
   OpenResult,
   Precursor,
   ProgressEvent,
@@ -16,6 +17,7 @@ import type {
   SpectrumPeak,
   TicPoint
 } from "./contract";
+import type { SimSpec } from "./sim-spec";
 
 const toTable = (buf: ArrayBuffer): Table => tableFromIPC(new Uint8Array(buf));
 
@@ -31,6 +33,44 @@ export async function openDataset(
     onProgress: channel
   });
 
+  return { handle, provider: providerForHandle(handle) };
+}
+
+/**
+ * Commit path (workbench interaction model): simulate a whole run in the backend and open it as a
+ * dataset. The returned provider is the same `DatasetProvider` as a real run's, so the viewer
+ * shows a simulated run in a slot with no other changes. For the per-edit live preview use
+ * {@link simulateScan}, not this.
+ */
+export async function openSimulatedDataset(
+  spec: SimSpec
+): Promise<{ handle: number; provider: DatasetProvider }> {
+  const { handle } = await invoke<OpenResult>("open_simulated_dataset", { spec });
+  return { handle, provider: providerForHandle(handle) };
+}
+
+/**
+ * Live path (workbench interaction model): one fully simulated scan, decoded as a {@link Spectrum}.
+ * Stateless — no handle, no stored dataset — so the parameter panel can call it on every edit and
+ * repaint just the viewed scan.
+ */
+export async function simulateScan(
+  spec: SimSpec,
+  scanIndex: number,
+  opts: { mzRange?: NumericRange; maxPeaks?: number } = {}
+): Promise<Spectrum> {
+  const buf = await invoke<ArrayBuffer>("simulate_scan", {
+    spec,
+    scanIndex,
+    mzMin: opts.mzRange?.min,
+    mzMax: opts.mzRange?.max,
+    maxPeaks: opts.maxPeaks
+  });
+  return decodeSpectrum(toTable(buf));
+}
+
+/** Build a `DatasetProvider` over Tauri IPC for an already-open dataset `handle`. */
+function providerForHandle(handle: number): DatasetProvider {
   const arrow = (cmd: string, args: object): Promise<Table> =>
     invoke<ArrayBuffer>(cmd, { handle, ...args }).then(toTable);
 
@@ -99,7 +139,7 @@ export async function openDataset(
       invoke("get_ms2_for_precursor", { handle, mz, ms1ScanIndex })
   };
 
-  return { handle, provider };
+  return provider;
 }
 
 // `trace` schema — shared by get_tic_trace and get_range_xic.
