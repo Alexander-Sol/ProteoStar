@@ -324,6 +324,17 @@ export function SimPanel({
 
   const proteoformCount = spec?.proteoforms.length ?? 0;
   const sel = wb.selected;
+
+  // List order: most abundant first. Re-sorted when a spec starts or a proteoform is added or
+  // removed, not on every edit, so a row doesn't jump while its abundance slider is dragged. An
+  // edit keeps `scanTimes` (the panel never changes it), so it marks a newly started spec.
+  const scanTimes = spec?.scanTimes;
+  const listOrder = useMemo(() => {
+    const proteoforms = spec?.proteoforms ?? [];
+    return proteoforms
+      .map((_, i) => i)
+      .sort((a, b) => proteoforms[b].abundance - proteoforms[a].abundance);
+  }, [scanTimes, proteoformCount]);
   const viewedRt =
     spec && wb.viewedIndex !== null ? spec.scanTimes[wb.viewedIndex] : null;
 
@@ -432,24 +443,29 @@ export function SimPanel({
                     </tr>
                   </thead>
                   <tbody>
-                    {spec.proteoforms.slice(0, PROTEOFORM_LIST_CAP).map((p, i) => (
-                      <tr
-                        key={i}
-                        ref={i === sel ? selectedRowRef : undefined}
-                        onClick={() => setSelected(i)}
-                        style={i === sel ? rowSelectedStyle : rowStyle}
-                      >
-                        <td style={tdStyle}>{p.identifier ?? `#${i + 1}`}</td>
-                        <td style={tdRightStyle}>{p.monoisotopicMass.toFixed(1)}</td>
-                        <td style={tdRightStyle}>{p.rt.mu.toFixed(2)}</td>
-                        <td style={tdRightStyle}>{p.abundance.toExponential(2)}</td>
-                      </tr>
-                    ))}
+                    {listOrder.slice(0, PROTEOFORM_LIST_CAP).map((i) => {
+                      const p = spec.proteoforms[i];
+                      return (
+                        <tr
+                          key={i}
+                          ref={i === sel ? selectedRowRef : undefined}
+                          onClick={() => setSelected(i)}
+                          style={i === sel ? rowSelectedStyle : rowStyle}
+                        >
+                          <td style={tdIdStyle} title={p.identifier}>
+                            {p.identifier ?? `#${i + 1}`}
+                          </td>
+                          <td style={tdRightStyle}>{p.monoisotopicMass.toFixed(1)}</td>
+                          <td style={tdRightStyle}>{p.rt.mu.toFixed(2)}</td>
+                          <td style={tdRightStyle}>{p.abundance.toExponential(2)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
                 {proteoformCount > PROTEOFORM_LIST_CAP ? (
                   <div style={noteStyle}>
-                    Listing the first {PROTEOFORM_LIST_CAP} of {proteoformCount}.
+                    Listing the {PROTEOFORM_LIST_CAP} most abundant of {proteoformCount}.
                   </div>
                 ) : null}
               </div>
@@ -1064,3 +1080,5 @@ const rowStyle: CSSProperties = { cursor: "pointer", borderBottom: "1px solid #e
 const rowSelectedStyle: CSSProperties = { ...rowStyle, background: "#f7e3dd" };
 const tdStyle: CSSProperties = { padding: "2px 6px", whiteSpace: "nowrap" };
 const tdRightStyle: CSSProperties = { ...tdStyle, textAlign: "right" };
+/** Identifiers can be whole sequences; cut short so mass, RT and abundance stay in view. */
+const tdIdStyle: CSSProperties = { ...tdStyle, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis" };
