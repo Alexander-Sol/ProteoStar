@@ -295,17 +295,30 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   const allPeaks = traces.flatMap((t) => t.peaks);
 
   const peakTraces: PlotData[] = traces.flatMap((trace) => {
-    // The 0.001-m/z-wide bars are the visual, but far too thin to hover or click. Overlay an
-    // invisible wide-marker scatter at each peak apex to give Plotly a reliable hover/click
-    // hit-target (mirrors the TIC's line+markers approach). The bar itself skips hover so the
-    // tooltip and click both resolve to the marker trace's customdata.
+    // The sticks are one WebGL line trace, a zero-to-apex segment per peak broken by nulls: a
+    // noisy scan has ~20k peaks, and as SVG bars every re-render (each live simulation edit)
+    // rebuilt them all. The sticks are too thin to hover or click, so an invisible wide-marker
+    // scatter at each apex is the hover/click hit-target (mirrors the TIC's line+markers
+    // approach); the sticks skip hover so both resolve to the marker trace's customdata.
     const y = trace.peaks.map((p) => drawnY(p.intensity, trace.mirrored));
+    const stickX = new Array<number | null>(trace.peaks.length * 3);
+    const stickY = new Array<number | null>(trace.peaks.length * 3);
+    for (let i = 0; i < trace.peaks.length; i++) {
+      const mz = trace.peaks[i].mz;
+      stickX[3 * i] = mz;
+      stickX[3 * i + 1] = mz;
+      stickX[3 * i + 2] = null;
+      stickY[3 * i] = 0;
+      stickY[3 * i + 1] = y[i];
+      stickY[3 * i + 2] = null;
+    }
     const bar = {
-      type: "bar",
-      x: trace.peaks.map((p) => p.mz),
-      y,
-      marker: { color: trace.color },
-      width: 0.001,
+      type: "scattergl",
+      mode: "lines",
+      x: stickX,
+      y: stickY,
+      line: { color: trace.color, width: 1 },
+      connectgaps: false,
       hoverinfo: "skip"
     } as unknown as PlotData;
     const hit = {

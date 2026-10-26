@@ -1174,9 +1174,14 @@ export function App() {
     // The live simulated scan, mirrored under the real one. Only beside an MS1 scan (or alone):
     // the simulator has no MS2 to compare against a fragment spectrum.
     if (sim.liveSpectrum && (!spectrum || spectrum.msLevel === 1)) {
+      // Beside a real scan, only the m/z range it covers (its acquisition window, e.g. 600–2000):
+      // the simulator renders every charge state, wherever it lands.
+      const real = spectrum?.peaks ?? [];
+      const lo = real.length > 0 ? Math.floor(real[0].mz) : -Infinity;
+      const hi = real.length > 0 ? Math.ceil(real[real.length - 1].mz) : Infinity;
       traces.push({
         slotIndex: 1,
-        peaks: sim.liveSpectrum.peaks,
+        peaks: sim.liveSpectrum.peaks.filter((p) => p.mz >= lo && p.mz <= hi),
         color: SIM_COLOR,
         mirrored: true,
         label: "Simulated"
@@ -1189,13 +1194,14 @@ export function App() {
   // charge. Only for MS1 spectra, and suppressed during the walkthrough (its comb overlay already
   // annotates the ladder, so peak labels would just clutter it).
   const spectrumAnnotations = useMemo<PeakAnnotation[]>(() => {
-    if (!spectrum || spectrum.msLevel !== 1 || walkthrough) return [];
+    // Not in the demo, which compares raw spectra (the labels are a charge deconvolution).
+    if (!spectrum || spectrum.msLevel !== 1 || walkthrough || demo) return [];
     return computePeakLabels(spectrum.peaks, {
       xMin: spectrumViewport.xMin,
       xMax: spectrumViewport.xMax,
       maxLabels: 6
     });
-  }, [spectrum, spectrumViewport, walkthrough]);
+  }, [spectrum, spectrumViewport, walkthrough, demo]);
 
   const selectedFeature =
     selected !== null
@@ -1442,7 +1448,7 @@ export function App() {
                 ? `Scan ${spectrum.oneBasedScanNumber} · RT ${spectrum.retentionTime.toFixed(2)} min${
                     walkthrough
                       ? " · click a peak to seed the charge-ladder"
-                      : showScanFeatures
+                      : showScanFeatures && !demo
                         ? ` · ${scanEluting.length} feature${scanEluting.length === 1 ? "" : "s"} eluting${scanEluting.length > SCAN_FEATURE_CAP ? ` (showing strongest ${SCAN_FEATURE_CAP})` : ""}`
                         : selectedFeature
                           ? " · shaded columns mark matched isotope peaks"

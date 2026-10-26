@@ -22,9 +22,10 @@ them (131 proteoforms).
 
 Things to try
 -------------
+- Drag "Noise level" and "Noise density" at the top of the panel. Untick Noise > enabled
+  to see the clean simulation.
 - Click a proteoform in the panel's list and change its abundance, mass, RT or charge
   distribution. The simulated spectrum updates as you drag a slider.
-- Untick Noise > enabled to see the clean simulation, or change the noise settings.
 - Change "Peak width k" under Run.
 - Press the left/right arrow keys to move between scans. The simulated scan follows.
 - Zoom with the zoom tool in the plot's top-right toolbar, then drag. Double-click to reset.

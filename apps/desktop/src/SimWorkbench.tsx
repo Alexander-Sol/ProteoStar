@@ -341,6 +341,38 @@ export function SimPanel({
                   }${wb.liveMs !== null ? ` · ${wb.liveMs.toFixed(0)} ms` : ""}`}
             </div>
 
+            <Section
+              title="Noise"
+              action={
+                <label style={checkLabelStyle}>
+                  <input
+                    type="checkbox"
+                    checked={!!spec.noise}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      wb.update((s) => {
+                        if (!on && s.noise) lastNoise.current = s.noise;
+                        return { ...s, noise: on ? lastNoise.current ?? orbitrapNoiseDefaults(0) : undefined };
+                      });
+                    }}
+                  />
+                  enabled
+                </label>
+              }
+            >
+              {spec.noise ? (
+                <NoiseEditor
+                  noise={spec.noise}
+                  onChange={setNoise}
+                  onReset={() => setNoise((n) => orbitrapNoiseDefaults(n.seed))}
+                />
+              ) : (
+                <div style={noteStyle}>
+                  Clean analytical simulation, reduced against the run&apos;s brightest centroid.
+                </div>
+              )}
+            </Section>
+
             <Section title="Proteoforms">
               <div style={listStyle}>
                 <table style={tableStyle}>
@@ -497,38 +529,6 @@ export function SimPanel({
                 </div>
               ) : null}
             </Section>
-
-            <Section
-              title="Noise"
-              action={
-                <label style={checkLabelStyle}>
-                  <input
-                    type="checkbox"
-                    checked={!!spec.noise}
-                    onChange={(e) => {
-                      const on = e.target.checked;
-                      wb.update((s) => {
-                        if (!on && s.noise) lastNoise.current = s.noise;
-                        return { ...s, noise: on ? lastNoise.current ?? orbitrapNoiseDefaults(0) : undefined };
-                      });
-                    }}
-                  />
-                  enabled
-                </label>
-              }
-            >
-              {spec.noise ? (
-                <NoiseEditor
-                  noise={spec.noise}
-                  onChange={setNoise}
-                  onReset={() => setNoise((n) => orbitrapNoiseDefaults(n.seed))}
-                />
-              ) : (
-                <div style={noteStyle}>
-                  Clean analytical simulation, reduced against the run&apos;s brightest centroid.
-                </div>
-              )}
-            </Section>
           </>
         )}
       </div>
@@ -648,39 +648,34 @@ function NoiseEditor({
   const j = noise.jitter;
   return (
     <>
-      <div style={pairStyle}>
-        <NumberField
-          label="Seed"
-          value={noise.seed}
-          step={1}
-          onChange={(seed) => onChange((n) => ({ ...n, seed: Math.round(seed) }))}
-        />
-        <div style={{ alignSelf: "end" }}>
-          <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
-            Orbitrap defaults
-          </SmallButton>
-        </div>
-      </div>
       <NumberField
-        label="Noise level at reference m/z"
+        label="Noise level"
+        hint="height at the reference m/z"
         value={noise.floor.noiseLevelAtReferenceMz}
         slider={{ min: 10, max: 1e6, log: true }}
         onChange={(v) => floor((f) => ({ ...f, noiseLevelAtReferenceMz: v }))}
       />
+      <NumberField
+        label="Noise density"
+        hint="× the measured peaks per scan"
+        value={noise.floor.densityScale}
+        step={0.05}
+        slider={{ min: 0, max: 5 }}
+        onChange={(v) => floor((f) => ({ ...f, densityScale: v }))}
+      />
       <div style={pairStyle}>
-        <NumberField
-          label="Density scale"
-          value={noise.floor.densityScale}
-          step={0.05}
-          slider={{ min: 0, max: 5 }}
-          onChange={(v) => floor((f) => ({ ...f, densityScale: v }))}
-        />
         <NumberField
           label="Level dispersion"
           value={noise.floor.levelDispersion}
           step={0.01}
           slider={{ min: 0, max: 1 }}
           onChange={(v) => floor((f) => ({ ...f, levelDispersion: v }))}
+        />
+        <NumberField
+          label="Seed"
+          value={noise.seed}
+          step={1}
+          onChange={(seed) => onChange((n) => ({ ...n, seed: Math.round(seed) }))}
         />
       </div>
       <div style={pairStyle}>
@@ -702,6 +697,11 @@ function NoiseEditor({
             floor((f) => ({ ...f, signalToNoise: { ...f.signalToNoise, meanExcess: v } }))
           }
         />
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
+          Orbitrap defaults
+        </SmallButton>
       </div>
 
       <label style={{ ...checkLabelStyle, marginTop: 8 }}>
