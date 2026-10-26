@@ -29,8 +29,13 @@ import {
 } from "@msbrowser/ui";
 
 import { demoDataset, openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
-import { SIM_COLOR, SIM_SELECTED_COLOR, SimPanel, useSimWorkbench } from "./SimWorkbench";
-import type { SimSpec } from "./sim-spec";
+import {
+  SIM_COLOR,
+  SIM_SELECTED_COLOR,
+  SimPanel,
+  abundanceAtRt,
+  useSimWorkbench
+} from "./SimWorkbench";
 import {
   loadFeatures,
   exportMs1Features,
@@ -864,12 +869,10 @@ export function App() {
       await sim.start(spec);
       // Select the proteoform brightest at the viewed scan, so its highlight shows from the start.
       if (mid) {
-        const t = mid.retentionTime;
-        const weight = (p: SimSpec["proteoforms"][number]) =>
-          p.abundance * Math.exp(-0.5 * ((t - p.rt.mu) / p.rt.sigma) ** 2);
+        const atScan = spec.proteoforms.map((p) => abundanceAtRt(p, mid.retentionTime));
         let best = 0;
-        spec.proteoforms.forEach((p, i) => {
-          if (weight(p) > weight(spec.proteoforms[best])) best = i;
+        atScan.forEach((y, i) => {
+          if (y > atScan[best]) best = i;
         });
         sim.setSelected(best);
       }

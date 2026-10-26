@@ -77,6 +77,35 @@ function defaultProteoform(rt: number, identifier: string): SimProteoform {
   };
 }
 
+/**
+ * A proteoform's share of the scan at retention time `t`: its abundance times its unit-area
+ * elution profile there. The profile mirrors sim-core's `EmgProfile::evaluate` (the
+ * exponentially-modified Gaussian, with the same A&S erf), so the ranking matches what is drawn.
+ */
+export function abundanceAtRt(p: SimProteoform, t: number): number {
+  const { mu, sigma, tau } = p.rt;
+  const gaussian = () => Math.exp(-0.5 * ((t - mu) / sigma) ** 2) / (sigma * Math.sqrt(2 * Math.PI));
+  if (tau <= 0) return p.abundance * gaussian();
+  const arg = (mu - t) / tau + (sigma * sigma) / (2 * tau * tau);
+  const z = (t - mu - (sigma * sigma) / tau) / (sigma * Math.SQRT2);
+  const g = (Math.exp(arg) / (2 * tau)) * (1 - erf(-z));
+  // A tiny τ overflows exp(arg) (∞·0); the profile is then the Gaussian it tends to.
+  return p.abundance * (Number.isFinite(g) ? g : gaussian());
+}
+
+/** Abramowitz & Stegun 7.1.26, as sim-core and the C# use. */
+function erf(x: number): number {
+  const sign = Math.sign(x);
+  const ax = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * ax);
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+      t *
+      Math.exp(-ax * ax);
+  return sign * y;
+}
+
 /** Index of the scan time nearest `rt` (scan times ascend). */
 function nearestScanIndex(scanTimes: readonly number[], rt: number): number {
   let lo = 0;
@@ -324,19 +353,21 @@ export function SimPanel({
 
   const proteoformCount = spec?.proteoforms.length ?? 0;
   const sel = wb.selected;
+  const viewedRt =
+    spec && wb.viewedIndex !== null ? spec.scanTimes[wb.viewedIndex] : null;
 
-  // List order: most abundant first. Re-sorted when a spec starts or a proteoform is added or
-  // removed, not on every edit, so a row doesn't jump while its abundance slider is dragged. An
-  // edit keeps `scanTimes` (the panel never changes it), so it marks a newly started spec.
+  // List order: brightest in the viewed scan first (abundance × elution profile at its RT).
+  // Re-sorted when the viewed scan changes, a spec starts, or a proteoform is added or removed —
+  // not on every edit, so a row doesn't jump while its slider is dragged. An edit keeps
+  // `scanTimes` (the panel never changes it), so it marks a newly started spec.
   const scanTimes = spec?.scanTimes;
   const listOrder = useMemo(() => {
     const proteoforms = spec?.proteoforms ?? [];
-    return proteoforms
-      .map((_, i) => i)
-      .sort((a, b) => proteoforms[b].abundance - proteoforms[a].abundance);
-  }, [scanTimes, proteoformCount]);
-  const viewedRt =
-    spec && wb.viewedIndex !== null ? spec.scanTimes[wb.viewedIndex] : null;
+    const order = proteoforms.map((_, i) => i);
+    if (viewedRt === null) return order;
+    const atScan = proteoforms.map((p) => abundanceAtRt(p, viewedRt));
+    return order.sort((a, b) => atScan[b] - atScan[a]);
+  }, [scanTimes, proteoformCount, viewedRt]);
 
   const setProteoform = (i: number, edit: (p: SimProteoform) => SimProteoform) =>
     wb.update((s) => ({
@@ -439,7 +470,12 @@ export function SimPanel({
                       <th style={thStyle}>id</th>
                       <th style={thRightStyle}>mass</th>
                       <th style={thRightStyle}>RT μ</th>
-                      <th style={thRightStyle}>abundance</th>
+                      <th
+                        style={thRightStyle}
+                        title="Abundance × elution profile at the viewed scan's RT: its share of this scan"
+                      >
+                        in scan
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -457,7 +493,9 @@ export function SimPanel({
                           </td>
                           <td style={tdRightStyle}>{p.monoisotopicMass.toFixed(1)}</td>
                           <td style={tdRightStyle}>{p.rt.mu.toFixed(2)}</td>
-                          <td style={tdRightStyle}>{p.abundance.toExponential(2)}</td>
+                          <td style={tdRightStyle}>
+                            {(viewedRt === null ? p.abundance : abundanceAtRt(p, viewedRt)).toExponential(2)}
+                          </td>
                         </tr>
                       );
                     })}
@@ -465,7 +503,7 @@ export function SimPanel({
                 </table>
                 {proteoformCount > PROTEOFORM_LIST_CAP ? (
                   <div style={noteStyle}>
-                    Listing the {PROTEOFORM_LIST_CAP} most abundant of {proteoformCount}.
+                    Listing the {PROTEOFORM_LIST_CAP} brightest in this scan of {proteoformCount}.
                   </div>
                 ) : null}
               </div>
