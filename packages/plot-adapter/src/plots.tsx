@@ -289,6 +289,33 @@ function buildPeakAnnotations(
   }));
 }
 
+/** Trace captions, stacked down from the top left (upright traces) and up from the bottom left
+ *  (mirrored ones), in paper coordinates so they stay put through zoom and pan. */
+function buildTraceCaptions(
+  traces: SpectrumPlotProps["traces"]
+): NonNullable<Partial<Layout>["annotations"]> {
+  const CAPTION_STEP = 0.05;
+  let up = 0;
+  let down = 0;
+  return traces
+    .filter((t) => t.caption)
+    .map((t) => {
+      const i = t.mirrored ? down++ : up++;
+      return {
+        xref: "paper" as const,
+        yref: "paper" as const,
+        x: 0.01,
+        y: t.mirrored ? 0.02 + i * CAPTION_STEP : 0.98 - i * CAPTION_STEP,
+        text: `<b>${t.caption}</b>`,
+        showarrow: false,
+        xanchor: "left" as const,
+        yanchor: t.mirrored ? ("bottom" as const) : ("top" as const),
+        bgcolor: "rgba(255,255,255,0.8)",
+        font: { size: 13, color: t.color, family: "Inter, Arial, sans-serif" }
+      };
+    });
+}
+
 export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
   const { traces, viewport, rangeSelectionEnabled, envelope, highlights, annotations, onEvent } =
     props;
@@ -317,7 +344,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       mode: "lines",
       x: stickX,
       y: stickY,
-      line: { color: trace.color, width: 1 },
+      line: { color: trace.color, width: trace.lineWidth ?? 1 },
       connectgaps: false,
       hoverinfo: "skip"
     } as unknown as PlotData;
@@ -367,7 +394,7 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     // the caller bumps it to intentionally re-apply the range props (reframe).
     uirevision: props.uirevision,
     shapes: buildEnvelopeShapes(envelope),
-    annotations: buildPeakAnnotations(annotations),
+    annotations: [...(buildPeakAnnotations(annotations) ?? []), ...buildTraceCaptions(traces)],
     showlegend: false,
     hovermode: "closest",
     barmode: "overlay"

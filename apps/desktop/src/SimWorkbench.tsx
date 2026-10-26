@@ -20,10 +20,12 @@ import {
   type SimProteoform,
   type SimSpec
 } from "./sim-spec";
-import { SimSession, closeDataset } from "./tauri-dataset-provider";
+import { SimSession, closeDataset, simulateScan } from "./tauri-dataset-provider";
 
 /** The simulated run's colour wherever it is drawn (mirror traces, panel accents). */
 export const SIM_COLOR = "#b5482f";
+/** The selected proteoform's own envelope, drawn over the simulated scan. */
+export const SIM_SELECTED_COLOR = "#e8a317";
 
 /** A synthetic gradient for a spec with no real run to borrow scan times from: 60 min, 1.2 s. */
 const BLANK_RUN_MINUTES = 60;
@@ -108,6 +110,11 @@ export interface SimWorkbench {
   step(delta: number): void;
   viewedIndex: number | null;
   liveSpectrum: Spectrum | null;
+  /** The proteoform being edited (index into `spec.proteoforms`), or null with none. */
+  selected: number | null;
+  setSelected(index: number): void;
+  /** The selected proteoform alone at the viewed scan, noise-free: where its envelope lands. */
+  selectedSpectrum: Spectrum | null;
   /** Round-trip time of the last live scan, ms. */
   liveMs: number | null;
   error: string | null;
@@ -155,6 +162,30 @@ export function useSimWorkbench(): SimWorkbench {
         if (sessionRef.current === session) setError(errText(err));
       });
   }, [spec, viewedIndex, sessionVersion]);
+
+  const [selectedRaw, setSelected] = useState(0);
+  const proteoformCount = spec?.proteoforms.length ?? 0;
+  const selected = proteoformCount > 0 ? Math.min(selectedRaw, proteoformCount - 1) : null;
+
+  // The selected proteoform simulated alone (stateless: one proteoform is cheap to build), so the
+  // plot can pick its envelope out of the full scan. Stale results are dropped by sequence.
+  const [selectedSpectrum, setSelectedSpectrum] = useState<Spectrum | null>(null);
+  const selectedSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++selectedSeq.current;
+    const p = selected !== null ? spec?.proteoforms[selected] : undefined;
+    if (!spec || !p || viewedIndex === null) {
+      setSelectedSpectrum(null);
+      return;
+    }
+    simulateScan({ ...spec, proteoforms: [p], background: [], noise: undefined }, viewedIndex)
+      .then((s) => {
+        if (seq === selectedSeq.current) setSelectedSpectrum(s);
+      })
+      .catch(() => {
+        if (seq === selectedSeq.current) setSelectedSpectrum(null);
+      });
+  }, [spec, selected, viewedIndex]);
 
   const replaceCommitted = useCallback((next: CommittedSim | null) => {
     const prev = committedRef.current;
@@ -240,6 +271,9 @@ export function useSimWorkbench(): SimWorkbench {
     step,
     viewedIndex,
     liveSpectrum,
+    selected,
+    setSelected,
+    selectedSpectrum,
     liveMs,
     error,
     committed,
@@ -270,13 +304,26 @@ export function SimPanel({
   /** Accept only draws the simulated TIC, so a layout without the TIC leaves it out. */
   showAccept?: boolean;
 }) {
-  const { spec } = wb;
-  const [selected, setSelected] = useState(0);
+  const { spec, setSelected } = wb;
+  // Keep the selected row in view when the selection changes from outside the list. Scrolls the
+  // list only (not scrollIntoView, which would also scroll the drawer).
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const selectedRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    const list = listRef.current;
+    const row = selectedRowRef.current;
+    if (!list || !row) return;
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < list.scrollTop + row.offsetHeight || bottom > list.scrollTop + list.clientHeight) {
+      list.scrollTop = top - list.clientHeight / 2;
+    }
+  }, [wb.selected]);
   // The noise block last switched off, so switching it back on restores the user's settings.
   const lastNoise = useRef<SimNoise | null>(null);
 
   const proteoformCount = spec?.proteoforms.length ?? 0;
-  const sel = proteoformCount > 0 ? Math.min(selected, proteoformCount - 1) : null;
+  const sel = wb.selected;
   const viewedRt =
     spec && wb.viewedIndex !== null ? spec.scanTimes[wb.viewedIndex] : null;
 
@@ -374,7 +421,7 @@ export function SimPanel({
             </Section>
 
             <Section title="Proteoforms">
-              <div style={listStyle}>
+              <div style={listStyle} ref={listRef}>
                 <table style={tableStyle}>
                   <thead>
                     <tr>
@@ -388,6 +435,7 @@ export function SimPanel({
                     {spec.proteoforms.slice(0, PROTEOFORM_LIST_CAP).map((p, i) => (
                       <tr
                         key={i}
+                        ref={i === sel ? selectedRowRef : undefined}
                         onClick={() => setSelected(i)}
                         style={i === sel ? rowSelectedStyle : rowStyle}
                       >
@@ -663,107 +711,110 @@ function NoiseEditor({
         slider={{ min: 0, max: 5 }}
         onChange={(v) => floor((f) => ({ ...f, densityScale: v }))}
       />
-      <div style={pairStyle}>
-        <NumberField
-          label="Level dispersion"
-          value={noise.floor.levelDispersion}
-          step={0.01}
-          slider={{ min: 0, max: 1 }}
-          onChange={(v) => floor((f) => ({ ...f, levelDispersion: v }))}
-        />
-        <NumberField
-          label="Seed"
-          value={noise.seed}
-          step={1}
-          onChange={(seed) => onChange((n) => ({ ...n, seed: Math.round(seed) }))}
-        />
-      </div>
-      <div style={pairStyle}>
-        <NumberField
-          label="S/N threshold"
-          value={noise.floor.signalToNoise.threshold}
-          step={0.01}
-          slider={{ min: 0.5, max: 10 }}
-          onChange={(v) =>
-            floor((f) => ({ ...f, signalToNoise: { ...f.signalToNoise, threshold: v } }))
-          }
-        />
-        <NumberField
-          label="S/N mean excess"
-          value={noise.floor.signalToNoise.meanExcess}
-          step={0.01}
-          slider={{ min: 0.1, max: 10 }}
-          onChange={(v) =>
-            floor((f) => ({ ...f, signalToNoise: { ...f.signalToNoise, meanExcess: v } }))
-          }
-        />
-      </div>
-      <div style={{ marginTop: 6 }}>
-        <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
-          Orbitrap defaults
-        </SmallButton>
-      </div>
-
-      <label style={{ ...checkLabelStyle, marginTop: 8 }}>
-        <input
-          type="checkbox"
-          checked={j.enabled}
-          onChange={(e) => jitter((x) => ({ ...x, enabled: e.target.checked }))}
-        />
-        Peak jitter
-      </label>
-      {j.enabled ? (
-        <>
-          <div style={pairStyle}>
-            <NumberField
-              label="m/z ppm @ S/N 1"
-              value={j.mzPpmAtUnitSignalToNoise}
-              step={0.1}
-              onChange={(v) => jitter((x) => ({ ...x, mzPpmAtUnitSignalToNoise: v }))}
-            />
-            <NumberField
-              label="m/z ppm floor"
-              value={j.mzPpmFloor}
-              step={0.05}
-              onChange={(v) => jitter((x) => ({ ...x, mzPpmFloor: v }))}
-            />
-          </div>
+      <details style={advancedStyle}>
+        <summary style={advancedSummaryStyle}>Advanced options</summary>
+        <div style={pairStyle}>
           <NumberField
-            label="Common-mode m/z ppm"
-            value={j.commonModeMzPpm}
-            step={0.1}
-            onChange={(v) => jitter((x) => ({ ...x, commonModeMzPpm: v }))}
-          />
-          <div style={pairStyle}>
-            <NumberField
-              label="log-I σ @ S/N 1"
-              value={j.logIntensitySigmaAtUnitSignalToNoise}
-              step={0.01}
-              onChange={(v) => jitter((x) => ({ ...x, logIntensitySigmaAtUnitSignalToNoise: v }))}
-            />
-            <NumberField
-              label="log-I σ floor"
-              value={j.logIntensitySigmaFloor}
-              step={0.01}
-              onChange={(v) => jitter((x) => ({ ...x, logIntensitySigmaFloor: v }))}
-            />
-          </div>
-          <NumberField
-            label="Common-mode log-I σ"
-            value={j.commonModeLogIntensitySigma}
+            label="Level dispersion"
+            value={noise.floor.levelDispersion}
             step={0.01}
-            onChange={(v) => jitter((x) => ({ ...x, commonModeLogIntensitySigma: v }))}
+            slider={{ min: 0, max: 1 }}
+            onChange={(v) => floor((f) => ({ ...f, levelDispersion: v }))}
           />
-          <label style={checkLabelStyle}>
-            <input
-              type="checkbox"
-              checked={j.dropPeaksFallingBelowFloor}
-              onChange={(e) => jitter((x) => ({ ...x, dropPeaksFallingBelowFloor: e.target.checked }))}
+          <NumberField
+            label="Seed"
+            value={noise.seed}
+            step={1}
+            onChange={(seed) => onChange((n) => ({ ...n, seed: Math.round(seed) }))}
+          />
+        </div>
+        <div style={pairStyle}>
+          <NumberField
+            label="S/N threshold"
+            value={noise.floor.signalToNoise.threshold}
+            step={0.01}
+            slider={{ min: 0.5, max: 10 }}
+            onChange={(v) =>
+              floor((f) => ({ ...f, signalToNoise: { ...f.signalToNoise, threshold: v } }))
+            }
+          />
+          <NumberField
+            label="S/N mean excess"
+            value={noise.floor.signalToNoise.meanExcess}
+            step={0.01}
+            slider={{ min: 0.1, max: 10 }}
+            onChange={(v) =>
+              floor((f) => ({ ...f, signalToNoise: { ...f.signalToNoise, meanExcess: v } }))
+            }
+          />
+        </div>
+        <div style={{ marginTop: 6 }}>
+          <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
+            Orbitrap defaults
+          </SmallButton>
+        </div>
+
+        <label style={{ ...checkLabelStyle, marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={j.enabled}
+            onChange={(e) => jitter((x) => ({ ...x, enabled: e.target.checked }))}
+          />
+          Peak jitter
+        </label>
+        {j.enabled ? (
+          <>
+            <div style={pairStyle}>
+              <NumberField
+                label="m/z ppm @ S/N 1"
+                value={j.mzPpmAtUnitSignalToNoise}
+                step={0.1}
+                onChange={(v) => jitter((x) => ({ ...x, mzPpmAtUnitSignalToNoise: v }))}
+              />
+              <NumberField
+                label="m/z ppm floor"
+                value={j.mzPpmFloor}
+                step={0.05}
+                onChange={(v) => jitter((x) => ({ ...x, mzPpmFloor: v }))}
+              />
+            </div>
+            <NumberField
+              label="Common-mode m/z ppm"
+              value={j.commonModeMzPpm}
+              step={0.1}
+              onChange={(v) => jitter((x) => ({ ...x, commonModeMzPpm: v }))}
             />
-            Drop peaks jittered below the floor
-          </label>
-        </>
-      ) : null}
+            <div style={pairStyle}>
+              <NumberField
+                label="log-I σ @ S/N 1"
+                value={j.logIntensitySigmaAtUnitSignalToNoise}
+                step={0.01}
+                onChange={(v) => jitter((x) => ({ ...x, logIntensitySigmaAtUnitSignalToNoise: v }))}
+              />
+              <NumberField
+                label="log-I σ floor"
+                value={j.logIntensitySigmaFloor}
+                step={0.01}
+                onChange={(v) => jitter((x) => ({ ...x, logIntensitySigmaFloor: v }))}
+              />
+            </div>
+            <NumberField
+              label="Common-mode log-I σ"
+              value={j.commonModeLogIntensitySigma}
+              step={0.01}
+              onChange={(v) => jitter((x) => ({ ...x, commonModeLogIntensitySigma: v }))}
+            />
+            <label style={checkLabelStyle}>
+              <input
+                type="checkbox"
+                checked={j.dropPeaksFallingBelowFloor}
+                onChange={(e) => jitter((x) => ({ ...x, dropPeaksFallingBelowFloor: e.target.checked }))}
+              />
+              Drop peaks jittered below the floor
+            </label>
+          </>
+        ) : null}
+      </details>
     </>
   );
 }
@@ -956,6 +1007,8 @@ const acceptDisabledStyle: CSSProperties = {
 const noteStyle: CSSProperties = { color: "#5a6b80", margin: "4px 0", lineHeight: 1.4 };
 const errorStyle: CSSProperties = { ...noteStyle, color: "#b02a37" };
 const sectionStyle: CSSProperties = { borderTop: "1px solid #e3e9f2", marginTop: 8, paddingTop: 6 };
+const advancedStyle: CSSProperties = { marginTop: 6 };
+const advancedSummaryStyle: CSSProperties = { cursor: "pointer", fontSize: "0.72rem", color: "#4a5d75" };
 const sectionHeaderStyle: CSSProperties = {
   display: "flex",
   justifyContent: "space-between",

@@ -54,6 +54,11 @@ export interface SpectrumPlotTrace {
   mirrored?: boolean;
   /** Hover-series name, e.g. "Simulated" (optional). */
   label?: string;
+  /** A caption in the trace's colour, in its corner of the plot: top left, or bottom left for a
+   *  mirrored trace. Labels the halves of a mirror plot. */
+  caption?: string;
+  /** Stick width in px (default 1); wider to emphasise a trace drawn over another. */
+  lineWidth?: number;
 }
 
 // A feature-finding result rendered on the TIC as a marker at its apex RT (the

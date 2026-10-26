@@ -29,7 +29,8 @@ import {
 } from "@msbrowser/ui";
 
 import { demoDataset, openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
-import { SIM_COLOR, SimPanel, useSimWorkbench } from "./SimWorkbench";
+import { SIM_COLOR, SIM_SELECTED_COLOR, SimPanel, useSimWorkbench } from "./SimWorkbench";
+import type { SimSpec } from "./sim-spec";
 import {
   loadFeatures,
   exportMs1Features,
@@ -859,7 +860,19 @@ export function App() {
         sim.setTargetRt(mid.retentionTime);
         setSpectrum(await opened.provider.getSpectrumAtRt(mid.retentionTime));
       }
-      await loadSimSpecFromPath(bundled.simSpec);
+      const spec = await readSimSpec(bundled.simSpec);
+      await sim.start(spec);
+      // Select the proteoform brightest at the viewed scan, so its highlight shows from the start.
+      if (mid) {
+        const t = mid.retentionTime;
+        const weight = (p: SimSpec["proteoforms"][number]) =>
+          p.abundance * Math.exp(-0.5 * ((t - p.rt.mu) / p.rt.sigma) ** 2);
+        let best = 0;
+        spec.proteoforms.forEach((p, i) => {
+          if (weight(p) > weight(spec.proteoforms[best])) best = i;
+        });
+        sim.setSelected(best);
+      }
       setPsmDrawerOpen(false);
       setDrawerOpen(false);
       setDecoyDrawerOpen(false);
@@ -1168,27 +1181,49 @@ export function App() {
   const spectrumEnvelope = walkthrough ? ladderEnvelope : [];
 
   const spectrumTraces = useMemo<SpectrumPlotTrace[]>(() => {
-    const traces: SpectrumPlotTrace[] = spectrum
-      ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }]
-      : [];
     // The live simulated scan, mirrored under the real one. Only beside an MS1 scan (or alone):
     // the simulator has no MS2 to compare against a fragment spectrum.
-    if (sim.liveSpectrum && (!spectrum || spectrum.msLevel === 1)) {
+    const showSim = sim.liveSpectrum !== null && (!spectrum || spectrum.msLevel === 1);
+    const traces: SpectrumPlotTrace[] = spectrum
+      ? [
+          {
+            slotIndex: 0,
+            peaks: spectrum.peaks,
+            color: SLOT_COLOR,
+            caption: showSim ? "Real data" : undefined
+          }
+        ]
+      : [];
+    if (showSim && sim.liveSpectrum) {
       // Beside a real scan, only the m/z range it covers (its acquisition window, e.g. 600–2000):
       // the simulator renders every charge state, wherever it lands.
       const real = spectrum?.peaks ?? [];
       const lo = real.length > 0 ? Math.floor(real[0].mz) : -Infinity;
       const hi = real.length > 0 ? Math.ceil(real[real.length - 1].mz) : Infinity;
+      const inWindow = (p: { mz: number }) => p.mz >= lo && p.mz <= hi;
       traces.push({
         slotIndex: 1,
-        peaks: sim.liveSpectrum.peaks.filter((p) => p.mz >= lo && p.mz <= hi),
+        peaks: sim.liveSpectrum.peaks.filter(inWindow),
         color: SIM_COLOR,
         mirrored: true,
-        label: "Simulated"
+        label: "Simulated",
+        caption: "Simulated data"
       });
+      // The proteoform selected in the panel, alone and noise-free, over the simulated scan.
+      if (sim.selectedSpectrum) {
+        traces.push({
+          slotIndex: 1,
+          peaks: sim.selectedSpectrum.peaks.filter(inWindow),
+          color: SIM_SELECTED_COLOR,
+          mirrored: true,
+          label: "Selected proteoform",
+          caption: "Selected proteoform",
+          lineWidth: 2.5
+        });
+      }
     }
     return traces;
-  }, [spectrum, sim.liveSpectrum]);
+  }, [spectrum, sim.liveSpectrum, sim.selectedSpectrum]);
 
   // MS1 peak labels: annotate the most prominent peaks in the current x-window with m/z + inferred
   // charge. Only for MS1 spectra, and suppressed during the walkthrough (its comb overlay already
