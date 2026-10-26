@@ -257,7 +257,8 @@ export function SimPanel({
   runName,
   onLoad,
   onSave,
-  onClose
+  onClose,
+  showAccept = true
 }: {
   wb: SimWorkbench;
   /** The open real run's MS1 scan times, to seed a spec that aligns scan for scan. */
@@ -266,6 +267,8 @@ export function SimPanel({
   onLoad: () => void;
   onSave: () => void;
   onClose: () => void;
+  /** Accept only draws the simulated TIC, so a layout without the TIC leaves it out. */
+  showAccept?: boolean;
 }) {
   const { spec } = wb;
   const [selected, setSelected] = useState(0);
@@ -530,7 +533,7 @@ export function SimPanel({
         )}
       </div>
 
-      {spec ? (
+      {spec && showAccept ? (
         <div style={footerStyle}>
           <button
             type="button"

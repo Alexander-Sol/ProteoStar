@@ -28,7 +28,7 @@ import {
   MetricReadout
 } from "@msbrowser/ui";
 
-import { openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
+import { demoDataset, openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
 import { SIM_COLOR, SimPanel, useSimWorkbench } from "./SimWorkbench";
 import {
   loadFeatures,
@@ -265,8 +265,10 @@ export function App() {
       // ms1ScanCount is 0 until the background index lands; the effect below flips this off.
       setIndexing(meta.ms1ScanCount === 0);
       setLoad({ status: "ready" });
+      return { provider: p, tic };
     } catch (err) {
       setLoad({ status: "error", message: errMessage(err) });
+      return null;
     }
   }, [reframeTic]);
 
@@ -836,6 +838,36 @@ export function App() {
     };
   }, [loadSimSpecFromPath]);
 
+  // Demo build: open the bundled real run at its middle scan, its IDs and the SimSpec fitted to them,
+  // with the simulation panel open — ready to tune. A normal build gets `null` and starts empty.
+  // The demo shows the spectrum alone, full height: real scan above, simulated scan mirrored below.
+  const [demo, setDemo] = useState(false);
+  const demoStartedRef = useRef(false);
+  useEffect(() => {
+    if (demoStartedRef.current) return;
+    demoStartedRef.current = true;
+    void (async () => {
+      const bundled = await demoDataset().catch(() => null);
+      if (!bundled) return;
+      setDemo(true);
+      const opened = await openPath(bundled.mzml);
+      if (!opened) return;
+      await loadPsmsFromPath(bundled.psms);
+      // The middle scan: the slice's TIC apex sits on its edge, where tails run out of the window.
+      const mid = opened.tic[opened.tic.length >> 1];
+      if (mid) {
+        sim.setTargetRt(mid.retentionTime);
+        setSpectrum(await opened.provider.getSpectrumAtRt(mid.retentionTime));
+      }
+      await loadSimSpecFromPath(bundled.simSpec);
+      setPsmDrawerOpen(false);
+      setDrawerOpen(false);
+      setDecoyDrawerOpen(false);
+      setSimDrawerOpen(true);
+    })().catch((err) => setLoad({ status: "error", message: errMessage(err) }));
+    // Once at launch; the callbacks it uses are stable for that first run.
+  }, []);
+
   const handleSaveSimSpec = useCallback(async () => {
     if (!sim.spec) return;
     const stem = (metadata?.fileName ?? "simulation").replace(/\.[^.]+$/, "");
@@ -1176,9 +1208,14 @@ export function App() {
     <>
     {dragOver ? <DropOverlay /> : null}
     <ViewerShell
-      title="MsViewer — feature finder"
-      subtitle="Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
+      title={demo ? "MsViewer — simulation workbench" : "MsViewer — feature finder"}
+      subtitle={
+        demo
+          ? "A real top-down MS1 scan (blue) above its simulation (red, mirrored). Tune the simulation in the panel on the right."
+          : "Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
+      }
       rightInset={drawerVisible ? drawerWidth + DRAWER_INSET_GAP : 0}
+      singlePanel={demo}
       toolbar={
         <>
           {metadata ? (
@@ -1307,6 +1344,7 @@ export function App() {
         </>
       }
     >
+      {demo ? null : (
       <Panel
         active={ticPinned}
         header={
@@ -1392,6 +1430,7 @@ export function App() {
           />
         )}
       </Panel>
+      )}
 
       <Panel
         active={spectrumPinned}
@@ -1437,8 +1476,15 @@ export function App() {
           />
         }
       >
-        {spectrumTraces.length === 0 ? (
-          <StatusBanner tone="muted">No spectrum selected.</StatusBanner>
+        {/* The demo has no TIC panel, so the load status shows here instead. */}
+        {demo && load.status === "error" ? (
+          <StatusBanner tone="error">Failed: {load.message}</StatusBanner>
+        ) : spectrumTraces.length === 0 ? (
+          demo ? (
+            <StatusBanner tone="info">Loading the example…</StatusBanner>
+          ) : (
+            <StatusBanner tone="muted">No spectrum selected.</StatusBanner>
+          )
         ) : (
           <SpectrumPlot
             traces={spectrumTraces}
@@ -1487,6 +1533,7 @@ export function App() {
             onLoad={() => void handleLoadSimSpec()}
             onSave={() => void handleSaveSimSpec()}
             onClose={() => setSimDrawerOpen(false)}
+            showAccept={!demo}
           />
         </ResizableDrawer>
       ) : walkthrough ? (

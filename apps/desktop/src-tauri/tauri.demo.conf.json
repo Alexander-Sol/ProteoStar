@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MsViewer Demo",
+  "app": {
+    "windows": [
+      {
+        "title": "MsViewer — simulation workbench demo",
+        "width": 1440,
+        "height": 900
+      }
+    ]
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "resources": {
+      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML",
+      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45_Proteoforms.psmtsv": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45_Proteoforms.psmtsv",
+      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45.simspec.json": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45.simspec.json"
+    }
+  }
+}

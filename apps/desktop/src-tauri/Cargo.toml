@@ -19,6 +19,9 @@ tauri-build = { version = "2", features = [] }
 # `tauri/dynamic-acl` is needed so main.rs can register the playwright capability
 # at runtime instead of in the always-compiled capabilities/ dir.
 e2e-testing = ["dep:tauri-plugin-playwright", "tauri/dynamic-acl"]
+# Demo build: open the bundled Jurkat top-down example and its fitted SimSpec at launch. Build it
+# with `--features demo --config src-tauri/tauri.demo.conf.json`; the config bundles the files.
+demo = []
 
 [dependencies]
 tauri = { version = "2", features = [] }

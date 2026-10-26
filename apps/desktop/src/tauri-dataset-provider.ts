@@ -83,6 +83,17 @@ export function writeSimSpec(path: string, spec: SimSpec): Promise<void> {
   return invoke("write_sim_spec", { path, spec });
 }
 
+/** The demo build's bundled inputs to open at launch; `null` in a normal build. */
+export interface DemoDataset {
+  mzml: string;
+  psms: string;
+  simSpec: string;
+}
+
+export function demoDataset(): Promise<DemoDataset | null> {
+  return invoke<DemoDataset | null>("demo_dataset");
+}
+
 type ScanOpts = { mzRange?: NumericRange; maxPeaks?: number };
 
 interface PendingScan {

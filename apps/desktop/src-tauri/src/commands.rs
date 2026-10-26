@@ -933,6 +933,43 @@ pub async fn write_sim_spec(path: String, spec: sim_core::spec::SimSpec) -> Resu
     spec.write(&path).map_err(sim_err)
 }
 
+// ------------------------------------------------------------------------ demo
+
+/// The bundled demo inputs: a real run, its proteoform IDs and the SimSpec fitted to them.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoDataset {
+    mzml: String,
+    psms: String,
+    sim_spec: String,
+}
+
+/// The demo inputs to open at launch: `Some` only in a `demo` build whose bundle carries them
+/// (see `tauri.demo.conf.json`), so a normal build starts empty.
+#[tauri::command]
+pub fn demo_dataset(app: tauri::AppHandle) -> Option<DemoDataset> {
+    #[cfg(not(feature = "demo"))]
+    {
+        let _ = app;
+        None
+    }
+    #[cfg(feature = "demo")]
+    {
+        use tauri::Manager;
+        const STEM: &str = "02-18-20_jurkat_td_rep2_fract7.rt44-45";
+        let dir = app.path().resource_dir().ok()?.join("demo");
+        let file = |name: String| {
+            let p = dir.join(name);
+            p.is_file().then(|| p.to_string_lossy().into_owned())
+        };
+        Some(DemoDataset {
+            mzml: file(format!("{STEM}.mzML"))?,
+            psms: file(format!("{STEM}_Proteoforms.psmtsv"))?,
+            sim_spec: file(format!("{STEM}.simspec.json"))?,
+        })
+    }
+}
+
 // ------------------------------------------------------------- feature overlay
 
 /// One observed isotope-peak m/z for a specific charge state of a resolved feature.

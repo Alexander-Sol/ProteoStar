@@ -31,6 +31,7 @@ fn main() {
             commands::close_sim_session,
             commands::read_sim_spec,
             commands::write_sim_spec,
+            commands::demo_dataset,
             commands::load_features,
             commands::export_ms1_features,
             commands::load_psms,

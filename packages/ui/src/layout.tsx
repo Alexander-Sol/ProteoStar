@@ -5,7 +5,8 @@ export function ViewerShell({
   subtitle,
   toolbar,
   children,
-  rightInset = 0
+  rightInset = 0,
+  singlePanel = false
 }: {
   title: string;
   subtitle: string;
@@ -16,6 +17,8 @@ export function ViewerShell({
    * (otherwise a fixed-position drawer covers the plots and their action buttons).
    */
   rightInset?: number;
+  /** One panel taking the whole content area instead of two equal rows. */
+  singlePanel?: boolean;
 }) {
   return (
     <main style={rightInset > 0 ? { ...shellStyle, paddingRight: rightInset } : shellStyle}>
@@ -27,7 +30,7 @@ export function ViewerShell({
         </div>
         {toolbar ? <div style={toolbarStyle}>{toolbar}</div> : null}
       </header>
-      <section style={contentStyle}>{children}</section>
+      <section style={singlePanel ? singleContentStyle : contentStyle}>{children}</section>
     </main>
   );
 }
@@ -146,6 +149,8 @@ const contentStyle: CSSProperties = {
   minHeight: 0,
   overflow: "hidden"
 };
+
+const singleContentStyle: CSSProperties = { ...contentStyle, gridTemplateRows: "minmax(0, 1fr)" };
 
 const panelStyle: CSSProperties = {
   display: "grid",

@@ -1,0 +1,55 @@
+# Builds the simulation workbench demo for macOS: a universal (Apple Silicon + Intel) MsViewer
+# Demo.app that opens the bundled Jurkat top-down example at launch, zipped as a workflow
+# artifact. Ad-hoc signed, not notarized: on first open, right-click > Open (or run
+# `xattr -cr "MsViewer Demo.app"`).
+name: macOS demo
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [sim-workbench-demo]
+    paths:
+      - ".github/workflows/macos-demo.yml"
+      - "apps/**"
+      - "packages/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "bun.lock"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build the demo app
+        working-directory: apps/desktop
+        run: >
+          bun run tauri build
+          --features demo
+          --config src-tauri/tauri.demo.conf.json
+          --target universal-apple-darwin
+          --bundles app
+
+      # ditto, not upload-artifact's own zip: it keeps the app's executable bits and symlinks.
+      - name: Zip the app
+        run: |
+          mkdir "MsViewer Demo"
+          ditto "target/universal-apple-darwin/release/bundle/macos/MsViewer Demo.app" "MsViewer Demo/MsViewer Demo.app"
+          cp apps/desktop/demo/README-macOS.txt "MsViewer Demo/README.txt"
+          ditto -c -k --keepParent "MsViewer Demo" MsViewer-Demo-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MsViewer-Demo-macOS
+          path: MsViewer-Demo-macOS.zip
