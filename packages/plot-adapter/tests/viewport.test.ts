@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDefaultViewport,
+  fitSpectrumTracesYRange,
   fitSpectrumYRange,
   hasPersistedY,
+  resolveSpectrumTracesYRange,
   resolveSpectrumYRange
 } from "../src/viewport";
 import type { SpectrumPlotPeak } from "../src/types";
@@ -52,5 +54,37 @@ describe("resolveSpectrumYRange", () => {
   it("auto-fits when no persisted y-range is set", () => {
     const vp = createDefaultViewport();
     expect(resolveSpectrumYRange(vp, peaks)).toEqual([0, 1050]);
+  });
+});
+
+describe("fitSpectrumTracesYRange", () => {
+  const sim: SpectrumPlotPeak[] = [
+    { mz: 450, intensity: 2000 },
+    { mz: 600, intensity: 50 }
+  ];
+  const real = { slotIndex: 0 as const, peaks, color: "#000" };
+  const mirrored = { slotIndex: 1 as const, peaks: sim, color: "#f00", mirrored: true };
+
+  it("matches fitSpectrumYRange without a mirrored trace", () => {
+    expect(fitSpectrumTracesYRange([real], null, null)).toEqual([0, 1050]);
+  });
+
+  it("extends below zero by the tallest mirrored peak", () => {
+    expect(fitSpectrumTracesYRange([real, mirrored], null, null)).toEqual([-2100, 1050]);
+  });
+
+  it("windows each direction independently", () => {
+    const [lo, hi] = fitSpectrumTracesYRange([real, mirrored], 560, 620)!;
+    expect(lo).toBeCloseTo(-52.5);
+    expect(hi).toBeCloseTo(315);
+  });
+
+  it("fits a mirrored trace alone", () => {
+    expect(fitSpectrumTracesYRange([mirrored], null, null)).toEqual([-2100, 0]);
+  });
+
+  it("resolves to a persisted y-range when present", () => {
+    const vp = { xMin: null, xMax: null, yMin: -10, yMax: 10 };
+    expect(resolveSpectrumTracesYRange(vp, [real, mirrored])).toEqual([-10, 10]);
   });
 });

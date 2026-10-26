@@ -1,0 +1,2038 @@
+{
+  "schemaVersion": 1,
+  "instrument": {
+    "polarity": "Positive",
+    "analyzer": "Orbitrap",
+    "msLevel": 1
+  },
+  "chargeRange": {
+    "min": 8,
+    "max": 28
+  },
+  "peakWidthModel": {
+    "kind": "Orbitrap",
+    "k": 3.5E-07
+  },
+  "scanTimes": [
+    44.017028,
+    44.078763,
+    44.127377,
+    44.176016,
+    44.237814,
+    44.286403,
+    44.321099,
+    44.360932,
+    44.409529,
+    44.453744,
+    44.502366,
+    44.529637,
+    44.569466,
+    44.596735,
+    44.63768,
+    44.664959,
+    44.699686,
+    44.726957,
+    44.78869,
+    44.850429,
+    44.880747,
+    44.942495
+  ],
+  "proteoforms": [
+    {
+      "monoisotopicMass": 15348.45924,
+      "abundance": 402050.9298500901,
+      "rt": {
+        "mu": 45.014446186072114,
+        "sigma": 0.12450895161188949,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.59306380136189,
+        "sigmaZ": 4.1332606505303415
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]FQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3016"
+    },
+    {
+      "monoisotopicMass": 15361.50863,
+      "abundance": 223709.9665246425,
+      "rt": {
+        "mu": 43.75950319479719,
+        "sigma": 0.1295129784200115,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.359643876501746,
+        "sigmaZ": 4.101852764151974
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRK[Less Common:Carbamidomethyl on K]QLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2862"
+    },
+    {
+      "monoisotopicMass": 15385.43752,
+      "abundance": 47465.518231693655,
+      "rt": {
+        "mu": 43.863672341370204,
+        "sigma": 0.13431096688616323,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.176719156589225,
+        "sigmaZ": 4.057446215083427
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQR[Common Biological:Citrullination on R]LVREIAQDFKT[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15404.48545,
+      "abundance": 109009.91458436662,
+      "rt": {
+        "mu": 43.81459484057222,
+        "sigma": 0.13703330890632454,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.587374378035435,
+        "sigmaZ": 4.606341700615596
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2876"
+    },
+    {
+      "monoisotopicMass": 15421.512,
+      "abundance": 194808.84505739808,
+      "rt": {
+        "mu": 43.72613301376725,
+        "sigma": 0.131920958822299,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.405204095713867,
+        "sigmaZ": 4.7501446336173005
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Common Biological:Hydroxylation on P]ATGGVK[UniProt:N6,N6-dimethyllysine on K]KPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2862"
+    },
+    {
+      "monoisotopicMass": 15360.45924,
+      "abundance": 106619.83176480583,
+      "rt": {
+        "mu": 45.04501235579857,
+        "sigma": 0.14373512367681096,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.788273044262887,
+        "sigmaZ": 4.2054225010789015
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKS[Less Common:Dehydroalanine on S]APATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLR[Common Biological:Citrullination on R]FQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3020"
+    },
+    {
+      "monoisotopicMass": 15291.49192,
+      "abundance": 177323.10524812594,
+      "rt": {
+        "mu": 43.92334568135143,
+        "sigma": 0.12138591899685901,
+        "tau": 0.0797981516911285
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.761873444310492,
+        "sigmaZ": 4.016405493549836
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2909"
+    },
+    {
+      "monoisotopicMass": 15346.49773,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.94428335509265,
+        "sigma": 0.12665545370962425,
+        "tau": 0.0706187835673239
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.62577873009241,
+        "sigmaZ": 4.193997190628581
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRK[UniProt:N6-acetyllysine on K]QLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2909"
+    },
+    {
+      "monoisotopicMass": 15376.49054,
+      "abundance": 536419.3210394735,
+      "rt": {
+        "mu": 45.34104961427939,
+        "sigma": 0.10612385680503639,
+        "tau": 0.07917926444588368
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.837795154915902,
+        "sigmaZ": 4.267901378149814
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-acetyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Methylation on C]AIHAKRVTIMPKDIQLARRIRGERA:3079"
+    },
+    {
+      "monoisotopicMass": 15457.512,
+      "abundance": 159996.71591200275,
+      "rt": {
+        "mu": 43.804452147153185,
+        "sigma": 0.1314428104713976,
+        "tau": 0.04679857458625107
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.731977839449463,
+        "sigmaZ": 4.600664862770076
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15378.50619,
+      "abundance": 354944.3550636734,
+      "rt": {
+        "mu": 44.93719948545889,
+        "sigma": 0.14297629154984876,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.55019558242128,
+        "sigmaZ": 3.996327061193156
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVK[UniProt:N6,N6,N6-trimethyllysine on K]KPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3004"
+    },
+    {
+      "monoisotopicMass": 15306.43956,
+      "abundance": 567953.3489276624,
+      "rt": {
+        "mu": 45.08242364540781,
+        "sigma": 0.13265527585783715,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.758934287140953,
+        "sigmaZ": 3.9924275897101955
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]AAIGALQEASEAYLVGLFEDT[Less Common:Dehydrobutyrine on T]NLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3030"
+    },
+    {
+      "monoisotopicMass": 15371.47522,
+      "abundance": 98441.39454862927,
+      "rt": {
+        "mu": 43.87631543458956,
+        "sigma": 0.13251918879359387,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.388911458432432,
+        "sigmaZ": 3.9957302105304136
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQKST[Less Common:Dehydrobutyrine on T]ELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15416.42557,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.821332204575306,
+        "sigma": 0.1333488246423118,
+        "tau": 0.033255217046135876
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.23872531658707,
+        "sigmaZ": 4.588354420600676
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKS[UniProt:Phosphoserine on S]TELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15293.44431,
+      "abundance": 386224.3579523781,
+      "rt": {
+        "mu": 45.090658580461096,
+        "sigma": 0.13022812698652747,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.730730060209698,
+        "sigmaZ": 3.9948024764943755
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]SAVMALQEASEAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:3030"
+    },
+    {
+      "monoisotopicMass": 15247.46571,
+      "abundance": 139661.1950115844,
+      "rt": {
+        "mu": 45.08771043213766,
+        "sigma": 0.13727206553303842,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.893982120164267,
+        "sigmaZ": 3.853447612670636
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQD[Less Common:Reduction on D]FKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3030"
+    },
+    {
+      "monoisotopicMass": 15263.46062,
+      "abundance": 196645.34607946535,
+      "rt": {
+        "mu": 45.08754281404701,
+        "sigma": 0.13491133716838397,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 22.054227633847624,
+        "sigmaZ": 3.877361776523776
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQD[Less Common:Reduction on D]FKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dioxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3030"
+    },
+    {
+      "monoisotopicMass": 15317.48894,
+      "abundance": 289992.02689825697,
+      "rt": {
+        "mu": 43.759697326679536,
+        "sigma": 0.13775644331750847,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.72341674165848,
+        "sigmaZ": 4.117937123401741
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-glutaryllysine on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2859"
+    },
+    {
+      "monoisotopicMass": 15389.47911,
+      "abundance": 194714.98008677573,
+      "rt": {
+        "mu": 43.73603951482778,
+        "sigma": 0.13144786337266073,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.242486020300824,
+        "sigmaZ": 4.147566577551422
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIR[Common Biological:Citrullination on R]KLPFQRLVREIAQDFKTDLR[Common Biological:Decoy Methylation on R]FQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2862"
+    },
+    {
+      "monoisotopicMass": 15286.4766,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.80654358769409,
+        "sigma": 0.13148851505839748,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.665069824896452,
+        "sigmaZ": 3.898485018851052
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGT[Less Common:Dehydrobutyrine on T]VALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2869"
+    },
+    {
+      "monoisotopicMass": 15305.47118,
+      "abundance": 306764.11058503744,
+      "rt": {
+        "mu": 43.928793278914064,
+        "sigma": 0.12196288947027636,
+        "tau": 0.07696321953001348
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.564962189350418,
+        "sigmaZ": 3.9602622162278145
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-acetyllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2909"
+    },
+    {
+      "monoisotopicMass": 15434.49602,
+      "abundance": 217965.0063953246,
+      "rt": {
+        "mu": 45.39232176495891,
+        "sigma": 0.13006789223145052,
+        "tau": 0.06065248122073642
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.066537019493275,
+        "sigmaZ": 4.416848875003613
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-succinyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Methylation on C]AIHAKRVTIMPKDIQLARRIRGERA:3079"
+    },
+    {
+      "monoisotopicMass": 15402.50619,
+      "abundance": 287984.81873293023,
+      "rt": {
+        "mu": 44.975637503697385,
+        "sigma": 0.14231049816465122,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.77125760432304,
+        "sigmaZ": 4.660175029908568
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Methylation on C]AIHAKRVTIMPKDIQLARRIRGERA:3013"
+    },
+    {
+      "monoisotopicMass": 15469.45212,
+      "abundance": 39777.19434418408,
+      "rt": {
+        "mu": 43.80848628523228,
+        "sigma": 0.13163738281210302,
+        "tau": 0.043799934984880315
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.505605748601923,
+        "sigmaZ": 4.506114049123122
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKT[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15389.47911,
+      "abundance": 156220.46914619187,
+      "rt": {
+        "mu": 45.03707368509736,
+        "sigma": 0.14535767453165627,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.722490726765173,
+        "sigmaZ": 4.46900364835131
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[Common Biological:Decoy Acetylation on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3019"
+    },
+    {
+      "monoisotopicMass": 15333.50248,
+      "abundance": 351209.5504294922,
+      "rt": {
+        "mu": 45.052171781025976,
+        "sigma": 0.1369499785336996,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.629347568908514,
+        "sigmaZ": 3.9161150725628096
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Butyrylation on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3021"
+    },
+    {
+      "monoisotopicMass": 15321.50248,
+      "abundance": 576311.1465511644,
+      "rt": {
+        "mu": 45.088340436935546,
+        "sigma": 0.13527651108781963,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.783179761987963,
+        "sigmaZ": 3.933228889251124
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dioxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3030"
+    },
+    {
+      "monoisotopicMass": 15267.44976,
+      "abundance": 77229.99749282625,
+      "rt": {
+        "mu": 43.76389623670352,
+        "sigma": 0.14022686980865695,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.75942268412095,
+        "sigmaZ": 3.9417115269162117
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTD[Metal:Sodium on D]LR[Common Biological:Citrullination on R]FQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2859"
+    },
+    {
+      "monoisotopicMass": 15274.46993,
+      "abundance": 409284.49516968697,
+      "rt": {
+        "mu": 43.811621296298426,
+        "sigma": 0.13355834980732093,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.869257923024602,
+        "sigmaZ": 3.9413615842845204
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLR[Common Biological:Decoy Methylation on R]FQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2869"
+    },
+    {
+      "monoisotopicMass": 15348.45924,
+      "abundance": 292287.9046730638,
+      "rt": {
+        "mu": 43.83280196539965,
+        "sigma": 0.14055103950838177,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.601800875411534,
+        "sigmaZ": 4.16476445311768
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2873"
+    },
+    {
+      "monoisotopicMass": 15336.45924,
+      "abundance": 177686.46852077064,
+      "rt": {
+        "mu": 43.84876399779642,
+        "sigma": 0.12633163649732057,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.60310847747879,
+        "sigmaZ": 4.070427673337011
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2876"
+    },
+    {
+      "monoisotopicMass": 15329.47574,
+      "abundance": 116599.4092824232,
+      "rt": {
+        "mu": 44.22489256422708,
+        "sigma": 0.11036821092657928,
+        "tau": 0.07951619067349017
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.736597040140808,
+        "sigmaZ": 4.190494697391738
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Decoy Acetylation on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Biological:Nitrosylation on C]AIHAKRVTIMPKDIQLARRIRGERA:2944"
+    },
+    {
+      "monoisotopicMass": 15302.47152,
+      "abundance": 264177.2614922703,
+      "rt": {
+        "mu": 45.08312399993807,
+        "sigma": 0.13200366497218155,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.67262263880685,
+        "sigmaZ": 3.9534301622901706
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRY[Less Common:Didehydro on Y]RPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3027"
+    },
+    {
+      "monoisotopicMass": 15273.49911,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.76574267788704,
+        "sigma": 0.13771125123196787,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.843759824829938,
+        "sigmaZ": 3.9401794783873405
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Butyrylation on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2859"
+    },
+    {
+      "monoisotopicMass": 15332.51847,
+      "abundance": 415930.2901335609,
+      "rt": {
+        "mu": 43.75104509610789,
+        "sigma": 0.14132968922666495,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.775735966267202,
+        "sigmaZ": 4.11691577931438
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARK[UniProt:N6,N6-dimethyllysine on K]SAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2859"
+    },
+    {
+      "monoisotopicMass": 15377.49231,
+      "abundance": 246553.16222863243,
+      "rt": {
+        "mu": 43.821337562383825,
+        "sigma": 0.14290979905797377,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.460180786334487,
+        "sigmaZ": 4.068101567731915
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-glutaryllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2873"
+    },
+    {
+      "monoisotopicMass": 15273.49911,
+      "abundance": 0,
+      "rt": {
+        "mu": 45.06066256760943,
+        "sigma": 0.13059795084468825,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.876110409923925,
+        "sigmaZ": 3.9664133015041663
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQ[Common Artifact:Deamidation on Q]DFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3020"
+    },
+    {
+      "monoisotopicMass": 15349.4974,
+      "abundance": 532016.2759505119,
+      "rt": {
+        "mu": 45.04595289737845,
+        "sigma": 0.14022832826386153,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.697404787687788,
+        "sigmaZ": 4.164474602281947
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-(2-hydroxyisobutyryl)lysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3020"
+    },
+    {
+      "monoisotopicMass": 15318.44868,
+      "abundance": 286608.7473259834,
+      "rt": {
+        "mu": 45.085998292407346,
+        "sigma": 0.13494672074654496,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.68449493148883,
+        "sigmaZ": 3.8714079243716872
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKS[Less Common:Dehydroalanine on S]APATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3027"
+    },
+    {
+      "monoisotopicMass": 15354.50282,
+      "abundance": 61128.273791376836,
+      "rt": {
+        "mu": 44.8525141454173,
+        "sigma": 0.1306094242127359,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.833238654172476,
+        "sigmaZ": 4.1105659228995926
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2991"
+    },
+    {
+      "monoisotopicMass": 15339.49647,
+      "abundance": 47905.16179475309,
+      "rt": {
+        "mu": 44.859090901583585,
+        "sigma": 0.12967287908153474,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.872664150206994,
+        "sigmaZ": 4.2264332204919794
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[Common Biological:Decoy Acetylation on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2991"
+    },
+    {
+      "monoisotopicMass": 15405.4807,
+      "abundance": 265646.9053212927,
+      "rt": {
+        "mu": 44.81877052786268,
+        "sigma": 0.13340645053641398,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.56527110980936,
+        "sigmaZ": 4.513807724293345
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Common Biological:Hydroxylation on P]ATGGVKKP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]HRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2992"
+    },
+    {
+      "monoisotopicMass": 15419.49635,
+      "abundance": 0,
+      "rt": {
+        "mu": 44.81117410638397,
+        "sigma": 0.13386008589939055,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.662348811745094,
+        "sigmaZ": 4.777644763621843
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRK[UniProt:N6-acetyllysine on K]QLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2991"
+    },
+    {
+      "monoisotopicMass": 15360.45924,
+      "abundance": 39886.56735466208,
+      "rt": {
+        "mu": 43.9513448265184,
+        "sigma": 0.12783607164083868,
+        "tau": 0.06742431414094513
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.39001449854753,
+        "sigmaZ": 4.128884701787641
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQR[Common Biological:Citrullination on R]LVREIAQDFKTDLRFQSS[Less Common:Dehydroalanine on S]AVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2909"
+    },
+    {
+      "monoisotopicMass": 15288.4168,
+      "abundance": 127007.66154311052,
+      "rt": {
+        "mu": 43.83836419198411,
+        "sigma": 0.13037644742746157,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.541387084648598,
+        "sigmaZ": 3.8664934233655592
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNL[Less Common:Methylation on L]C[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2872"
+    },
+    {
+      "monoisotopicMass": 15271.41406,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.84655679963498,
+        "sigma": 0.13069010153882907,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.789097452046626,
+        "sigmaZ": 3.9431276816506973
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[Common Biological:Butyrylation on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNL[Less Common:Methylation on L]C[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2872"
+    },
+    {
+      "monoisotopicMass": 15433.54839,
+      "abundance": 200967.02671650928,
+      "rt": {
+        "mu": 43.80198959167087,
+        "sigma": 0.12860758334875189,
+        "tau": 0.047907430441674295
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.64549346219478,
+        "sigmaZ": 4.828714599541105
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTN[Less Common:Dimethylation on N]LC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2882"
+    },
+    {
+      "monoisotopicMass": 15450.49093,
+      "abundance": 233220.69748368816,
+      "rt": {
+        "mu": 44.86167306597602,
+        "sigma": 0.13702090220417437,
+        "tau": 0.03745031897229293
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.63830619840814,
+        "sigmaZ": 4.654896144214644
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-glutaryllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3004"
+    },
+    {
+      "monoisotopicMass": 15362.51128,
+      "abundance": 386141.4921283297,
+      "rt": {
+        "mu": 44.99642548000627,
+        "sigma": 0.1401450270240847,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.702444534675458,
+        "sigmaZ": 4.159613054763904
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTN[Less Common:Dimethylation on N]LC[Less Common:Methylation on C]AIHAKRVTIMPKDIQLARRIRGERA:3013"
+    },
+    {
+      "monoisotopicMass": 15344.51847,
+      "abundance": 116410.32853652858,
+      "rt": {
+        "mu": 45.08512109585137,
+        "sigma": 0.13859646108896673,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.75939178605277,
+        "sigmaZ": 4.1069090094837035
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Butyrylation on K]TD[Less Common:Decarboxylation on D]LRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3027"
+    },
+    {
+      "monoisotopicMass": 15431.48967,
+      "abundance": 0,
+      "rt": {
+        "mu": 44.886853178366955,
+        "sigma": 0.14175696296260426,
+        "tau": 0.014758854504231539
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.715080893059376,
+        "sigmaZ": 4.814982433459818
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRR[Common Biological:Citrullination on R]YQK[Common Biological:Decoy Acetylation on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3005"
+    },
+    {
+      "monoisotopicMass": 15387.50652,
+      "abundance": 232490.50223376288,
+      "rt": {
+        "mu": 44.92985964494351,
+        "sigma": 0.14235546047095607,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.440721441999543,
+        "sigmaZ": 4.073302661269018
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKS[Less Common:Dehydroalanine on S]APATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3005"
+    },
+    {
+      "monoisotopicMass": 15423.50384,
+      "abundance": 125829.70095639747,
+      "rt": {
+        "mu": 44.90976369311822,
+        "sigma": 0.14184805583414464,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.604729884119983,
+        "sigmaZ": 4.701233342609247
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3005"
+    },
+    {
+      "monoisotopicMass": 15316.48717,
+      "abundance": 177624.18730821446,
+      "rt": {
+        "mu": 45.13880874025935,
+        "sigma": 0.12522561338234348,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.68356375046417,
+        "sigmaZ": 3.8417659531385593
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3039"
+    },
+    {
+      "monoisotopicMass": 15330.5392,
+      "abundance": 521814.2077340956,
+      "rt": {
+        "mu": 45.1428841171063,
+        "sigma": 0.12570779164626614,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.59640722289761,
+        "sigmaZ": 3.882629060598147
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQS[Less Common:Reduction on S]SAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3039"
+    },
+    {
+      "monoisotopicMass": 15243.38276,
+      "abundance": 65435.93221215295,
+      "rt": {
+        "mu": 43.828561481887334,
+        "sigma": 0.14357613013411555,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.595650777570746,
+        "sigmaZ": 4.200358724607338
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[Common Biological:Butyrylation on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Common Artifact:Carbamyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2872"
+    },
+    {
+      "monoisotopicMass": 15323.48721,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.8402324170862,
+        "sigma": 0.13357657750795646,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.64896433035519,
+        "sigmaZ": 4.097872347999163
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQD[Metal:Sodium on D]FKTDLRFQSAAIGALQEAS[Less Common:Carbamidomethyl on S]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2872"
+    },
+    {
+      "monoisotopicMass": 15343.42695,
+      "abundance": 286403.5464851125,
+      "rt": {
+        "mu": 45.162763890374734,
+        "sigma": 0.12850792918041778,
+        "tau": 0.04812750305437839
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.669528185541044,
+        "sigmaZ": 4.021732147247575
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKT[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3049"
+    },
+    {
+      "monoisotopicMass": 15419.53274,
+      "abundance": 268725.1843810838,
+      "rt": {
+        "mu": 44.90662153996287,
+        "sigma": 0.14263785909158885,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.60270194002265,
+        "sigmaZ": 4.7177645375310915
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVK[UniProt:N6,N6-dimethyllysine on K]KPHRYR[Common Biological:Methylation on R]PGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3004"
+    },
+    {
+      "monoisotopicMass": 15393.4807,
+      "abundance": 332349.2933840243,
+      "rt": {
+        "mu": 44.92948864006929,
+        "sigma": 0.1429565451083282,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.507388079458956,
+        "sigmaZ": 4.23869987353746
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRK[Less Common:Carbamidomethyl on K]LPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3004"
+    },
+    {
+      "monoisotopicMass": 15373.52121,
+      "abundance": 0,
+      "rt": {
+        "mu": 45.22793625698871,
+        "sigma": 0.13811534053194763,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.79946254259706,
+        "sigmaZ": 4.3175445850721195
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:3049"
+    },
+    {
+      "monoisotopicMass": 15444.52131,
+      "abundance": 228869.3698733405,
+      "rt": {
+        "mu": 44.85623614643936,
+        "sigma": 0.1356546867560368,
+        "tau": 0.04132624004614583
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 22.025397346978924,
+        "sigmaZ": 4.908698475899618
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYR[Common Biological:Methylation on R]PGTVALREIRRYQK[Common Biological:Decoy Acetylation on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3004"
+    },
+    {
+      "monoisotopicMass": 15274.46993,
+      "abundance": 282643.2117558399,
+      "rt": {
+        "mu": 45.09187010926179,
+        "sigma": 0.13090912499342067,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.92326367189348,
+        "sigmaZ": 4.008342463456641
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Decoy Methylation on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3027"
+    },
+    {
+      "monoisotopicMass": 15401.52131,
+      "abundance": 0,
+      "rt": {
+        "mu": 43.83255721555345,
+        "sigma": 0.1422882787453372,
+        "tau": 0.043543808296611135
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.449532299812866,
+        "sigmaZ": 4.449931333408399
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-succinyllysine on K]TDLRFQS[Less Common:Carbamidomethyl on S]AAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2889"
+    },
+    {
+      "monoisotopicMass": 15242.46815,
+      "abundance": 115293.04346915225,
+      "rt": {
+        "mu": 43.96528530071146,
+        "sigma": 0.1314871976651053,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.53799759739894,
+        "sigmaZ": 4.119054368493223
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREI[Less Common:Oxidation on I]AQD[Less Common:Water loss on D]FKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2894"
+    },
+    {
+      "monoisotopicMass": 15378.4698,
+      "abundance": 172004.86719021204,
+      "rt": {
+        "mu": 44.99876503498271,
+        "sigma": 0.14171208068290236,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.5861376338613,
+        "sigmaZ": 4.177188980406608
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-acetyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3009"
+    },
+    {
+      "monoisotopicMass": 15337.44326,
+      "abundance": 463820.85360325547,
+      "rt": {
+        "mu": 45.05488041122875,
+        "sigma": 0.13703450178886853,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.573163631257433,
+        "sigmaZ": 3.8735395242063495
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLR[Common Biological:Citrullination on R]FQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3022"
+    },
+    {
+      "monoisotopicMass": 15287.47838,
+      "abundance": 247308.15805578377,
+      "rt": {
+        "mu": 45.090136204539945,
+        "sigma": 0.13014262590853204,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.81525083278516,
+        "sigmaZ": 4.027085721515556
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAK[UniProt:N6-acetyllysine on K]R[Common Biological:Citrullination on R]VTIMPKDIQLARRIRGERA:3029"
+    },
+    {
+      "monoisotopicMass": 15358.49105,
+      "abundance": 475981.47446657467,
+      "rt": {
+        "mu": 45.23110811618059,
+        "sigma": 0.13226476298730966,
+        "tau": 0.052672852240102486
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.75738803546309,
+        "sigmaZ": 4.152604023600044
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVR[Common Biological:Citrullination on R]EIAQDFK[Common Biological:Decoy Acetylation on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3058"
+    },
+    {
+      "monoisotopicMass": 15359.42187,
+      "abundance": 0,
+      "rt": {
+        "mu": 45.22123127194609,
+        "sigma": 0.13917793006985832,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.745706803679944,
+        "sigmaZ": 4.185736856303823
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKT[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dioxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3049"
+    },
+    {
+      "monoisotopicMass": 15371.54713,
+      "abundance": 239852.8533554532,
+      "rt": {
+        "mu": 43.91692469496433,
+        "sigma": 0.12858925082370157,
+        "tau": 0.035488840249279494
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.373256972990678,
+        "sigmaZ": 4.016015792788631
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Butyrylation on K]TDLRFQSAAIGALQEASEAYLVGLFEDT[Less Common:Carbamidomethyl on T]NLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2897"
+    },
+    {
+      "monoisotopicMass": 15358.49105,
+      "abundance": 260449.00377622776,
+      "rt": {
+        "mu": 44.17793968747201,
+        "sigma": 0.11461560380023114,
+        "tau": 0.08132415807456539
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.328188303722307,
+        "sigmaZ": 4.033616036565166
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQR[Common Biological:Citrullination on R]LVREIAQDFK[Common Biological:Decoy Acetylation on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2941"
+    },
+    {
+      "monoisotopicMass": 15358.53412,
+      "abundance": 382816.0835021907,
+      "rt": {
+        "mu": 43.95844866298237,
+        "sigma": 0.1321991476069966,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.36566741827912,
+        "sigmaZ": 4.022254908963204
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Butyrylation on K]TDLRFQS[Less Common:Reduction on S]SAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2897"
+    },
+    {
+      "monoisotopicMass": 15372.51338,
+      "abundance": 222977.31324626194,
+      "rt": {
+        "mu": 44.091180946537236,
+        "sigma": 0.1207926419512749,
+        "tau": 0.08085609534097057
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.49836918720649,
+        "sigmaZ": 4.316810145917166
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARK[UniProt:N6-crotonyllysine on K]SAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2933"
+    },
+    {
+      "monoisotopicMass": 15343.42695,
+      "abundance": 210713.014269576,
+      "rt": {
+        "mu": 43.91939499352237,
+        "sigma": 0.12789860400570702,
+        "tau": 0.034157426358608065
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.53013307313206,
+        "sigmaZ": 4.137104595502009
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]SAVMALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2897"
+    },
+    {
+      "monoisotopicMass": 15230.35113,
+      "abundance": 33388.026373467386,
+      "rt": {
+        "mu": 44.242048399280506,
+        "sigma": 0.1179214689339687,
+        "tau": 0.07386617812673343
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 20.95271935069306,
+        "sigmaZ": 4.254199510993654
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAK[UniProt:N6-acetyllysine on K]R[Common Biological:Citrullination on R]VTIMPKDIQLARRIRGERA:2946"
+    },
+    {
+      "monoisotopicMass": 15126.3515,
+      "abundance": 251093.24299132434,
+      "rt": {
+        "mu": 43.52932780671581,
+        "sigma": 0.11154113936557251,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 19.567795952217754,
+        "sigmaZ": 2.917717955397279
+      },
+      "identifier": "P16104:S[UniProt:Phosphoserine on S]GRGKTGGK[UniProt:N6-acetyllysine on K]ARAKAKSRSSRAGLQFPVGRVHRLLRKGHYAERVGAGAPVYLAAVLEYLTAEILELAGNAARDNKKTRIIPRHLQLAIRNDEELNKLLGGVTIAQGGVLPNIQAVLLPKKTSATVGPKAPSGGKKATQASQEY:2843"
+    },
+    {
+      "monoisotopicMass": 15258.49945,
+      "abundance": 224464.4130380846,
+      "rt": {
+        "mu": 43.911341308256624,
+        "sigma": 0.13748172611761306,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.850576230879327,
+        "sigmaZ": 4.242374915181923
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARK[UniProt:N6-methyllysine on K]SAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2887"
+    },
+    {
+      "monoisotopicMass": 15400.44841,
+      "abundance": 128797.76927289263,
+      "rt": {
+        "mu": 43.992045731001916,
+        "sigma": 0.12684200721913896,
+        "tau": 0.07413007428061072
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.348283892428924,
+        "sigmaZ": 4.61479136518446
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]S[Less Common:Oxidation on S]AVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2916"
+    },
+    {
+      "monoisotopicMass": 15372.45924,
+      "abundance": 591882.7970569074,
+      "rt": {
+        "mu": 45.183271822587244,
+        "sigma": 0.14168525489050707,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.836415728018054,
+        "sigmaZ": 4.352957627756134
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]FQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTN[Common Artifact:Ammonia loss on N]LC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3040"
+    },
+    {
+      "monoisotopicMass": 15438.48182,
+      "abundance": 118692.91804362717,
+      "rt": {
+        "mu": 44.137292910961214,
+        "sigma": 0.13892480505262422,
+        "tau": 0.060413193087869764
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.634703760881038,
+        "sigmaZ": 4.446970946050425
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-glutaryllysine on K]T[UniProt:Phosphothreonine on T]DLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2933"
+    },
+    {
+      "monoisotopicMass": 15302.52566,
+      "abundance": 409453.4678242038,
+      "rt": {
+        "mu": 43.81604719440012,
+        "sigma": 0.12268547963553228,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.58840909734844,
+        "sigmaZ": 3.9622406585513885
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNL[Less Common:Oxidation on L]C[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2870"
+    },
+    {
+      "monoisotopicMass": 15366.49708,
+      "abundance": 106761.71512251909,
+      "rt": {
+        "mu": 44.784189340007046,
+        "sigma": 0.12588858117220003,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 22.017830933420598,
+        "sigmaZ": 4.330277256579959
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQS[UniProt:Phosphoserine on S]AAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2984"
+    },
+    {
+      "monoisotopicMass": 15366.44294,
+      "abundance": 129015.3353800204,
+      "rt": {
+        "mu": 44.84036217482995,
+        "sigma": 0.13242273700610074,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.770393003450742,
+        "sigmaZ": 3.9736382094544216
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDT[UniProt:Phosphothreonine on T]NLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2993"
+    },
+    {
+      "monoisotopicMass": 15352.45415,
+      "abundance": 0,
+      "rt": {
+        "mu": 44.95162915302017,
+        "sigma": 0.1361371048059577,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.799395399119568,
+        "sigmaZ": 4.1343388405270955
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Common Biological:Hydroxylation on P]ATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3000"
+    },
+    {
+      "monoisotopicMass": 15414.46406,
+      "abundance": 446868.94122179085,
+      "rt": {
+        "mu": 45.142211539671635,
+        "sigma": 0.14272447151906864,
+        "tau": 0.024646844383219665
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.542967066915708,
+        "sigmaZ": 4.69359917703916
+      },
+      "identifier": "P84243:MARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]AAIGALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3041"
+    },
+    {
+      "monoisotopicMass": 15390.52395,
+      "abundance": 92782.53258994286,
+      "rt": {
+        "mu": 43.931428689980585,
+        "sigma": 0.11868384162447894,
+        "tau": 0.06285986021422738
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.330851723588413,
+        "sigmaZ": 4.333460104766676
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGK[UniProt:N6-(2-hydroxyisobutyryl)lysine on K]APRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2907"
+    },
+    {
+      "monoisotopicMass": 15286.49436,
+      "abundance": 141173.69278365187,
+      "rt": {
+        "mu": 44.2734275044343,
+        "sigma": 0.10705828665074026,
+        "tau": 0.07521153806107458
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.45967610845201,
+        "sigmaZ": 3.928726993121669
+      },
+      "identifier": "P84243:ARTKQTARKSTGGK[UniProt:N6-acetyllysine on K]APRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2952"
+    },
+    {
+      "monoisotopicMass": 15470.49028,
+      "abundance": 195264.48339598416,
+      "rt": {
+        "mu": 44.79333498552188,
+        "sigma": 0.13500352628852388,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.690438781046577,
+        "sigmaZ": 4.422636851959271
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-(2-hydroxyisobutyryl)lysine on K]T[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2989"
+    },
+    {
+      "monoisotopicMass": 15430.54204,
+      "abundance": 351912.03917785466,
+      "rt": {
+        "mu": 45.127833005287535,
+        "sigma": 0.14077208983546552,
+        "tau": 0.035733598949816536
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.554412451770272,
+        "sigmaZ": 4.464902134622317
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLR[Common Biological:Decoy Methylation on R]FQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3040"
+    },
+    {
+      "monoisotopicMass": 15389.47911,
+      "abundance": 173828.198560761,
+      "rt": {
+        "mu": 44.10613285141454,
+        "sigma": 0.12772137914249676,
+        "tau": 0.07495760327873835
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.436828499086193,
+        "sigmaZ": 4.378420683179617
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQ[Common Artifact:Deamidation on Q]RLVREIAQDFK[Common Biological:Decoy Methylation on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2933"
+    },
+    {
+      "monoisotopicMass": 15500.54752,
+      "abundance": 118379.69131638322,
+      "rt": {
+        "mu": 44.59990594582829,
+        "sigma": 0.13680576028294242,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.534250607212805,
+        "sigmaZ": 4.439934148916249
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[Common Biological:Butyrylation on K]STELLIRKLPFQRLVREIAQDFK[Common Biological:Decoy Acetylation on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2968"
+    },
+    {
+      "monoisotopicMass": 15485.48342,
+      "abundance": 130811.38044437792,
+      "rt": {
+        "mu": 44.59990181539024,
+        "sigma": 0.13640246363815037,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.55120348246168,
+        "sigmaZ": 4.4401845703544405
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRY[UniProt:Phosphotyrosine on Y]RPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2968"
+    },
+    {
+      "monoisotopicMass": 15415.51252,
+      "abundance": 61358.42745121066,
+      "rt": {
+        "mu": 44.76078363527361,
+        "sigma": 0.13305926510734603,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.819742851889828,
+        "sigmaZ": 4.415366596527134
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-succinyllysine on K]TDLR[Common Biological:Decoy Methylation on R]FQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2983"
+    },
+    {
+      "monoisotopicMass": 15435.49127,
+      "abundance": 238908.08211052747,
+      "rt": {
+        "mu": 44.80446286002428,
+        "sigma": 0.13551666367800602,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.604911482223926,
+        "sigmaZ": 4.790603297025935
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Common Biological:Hydroxylation on P]ATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-acetyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2993"
+    },
+    {
+      "monoisotopicMass": 15439.44156,
+      "abundance": 4277.012909914879,
+      "rt": {
+        "mu": 44.75244977530756,
+        "sigma": 0.1342649464274449,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.669498835088515,
+        "sigmaZ": 4.479160277144168
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKS[Less Common:Dehydroalanine on S]APATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]SAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2982"
+    },
+    {
+      "monoisotopicMass": 15402.56033,
+      "abundance": 190180.40911401872,
+      "rt": {
+        "mu": 43.8381581545517,
+        "sigma": 0.14368061048051228,
+        "tau": 0.03917021068805161
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.318879682800922,
+        "sigmaZ": 4.4354483791938195
+      },
+      "identifier": "Q5TEC6:ARTKQTARK[UniProt:N6-acetyllysine on K]STGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQEFK[UniProt:N6-methyllysine on K]TDLRFQSSAVMALQEAREAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLVSRIRGERA:2888"
+    },
+    {
+      "monoisotopicMass": 15277.49403,
+      "abundance": 6766.663928909238,
+      "rt": {
+        "mu": 44.27055066563351,
+        "sigma": 0.10591430640896488,
+        "tau": 0.0762752796957171
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.484644507243747,
+        "sigmaZ": 3.7751246327351384
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Less Common:Trioxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2952"
+    },
+    {
+      "monoisotopicMass": 15356.4222,
+      "abundance": 0,
+      "rt": {
+        "mu": 44.12475264122377,
+        "sigma": 0.1182565466029096,
+        "tau": 0.08306031416186564
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.431191518991383,
+        "sigmaZ": 3.9604252334079866
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQS[UniProt:Phosphoserine on S]SAVMALQEASEAYLVGLFEDTNLC[Common Biological:Nitrosylation on C]AIHAKRVTIMPKDIQLARRIRGERA:2937"
+    },
+    {
+      "monoisotopicMass": 15458.43614,
+      "abundance": 101558.93872154223,
+      "rt": {
+        "mu": 44.05917865291902,
+        "sigma": 0.1274389552524971,
+        "tau": 0.06492625575869876
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.19581106810195,
+        "sigmaZ": 4.080306278981864
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKS[UniProt:Phosphoserine on S]TELLIRKLPFQR[Common Biological:Citrullination on R]LVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2923"
+    },
+    {
+      "monoisotopicMass": 15331.5284,
+      "abundance": 89922.37380052396,
+      "rt": {
+        "mu": 44.22711864876881,
+        "sigma": 0.11153515169592593,
+        "tau": 0.07873106169656928
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.737682494168503,
+        "sigmaZ": 4.203225090974987
+      },
+      "identifier": "P84243:ARTKQTARKSTGGK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]APRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2945"
+    },
+    {
+      "monoisotopicMass": 15313.49403,
+      "abundance": 164757.80242279416,
+      "rt": {
+        "mu": 44.33412232504285,
+        "sigma": 0.1137153000458618,
+        "tau": 0.07934804176857665
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.26608276611025,
+        "sigmaZ": 4.010282422071735
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-succinyllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2956"
+    },
+    {
+      "monoisotopicMass": 15473.5433,
+      "abundance": 246028.79744356018,
+      "rt": {
+        "mu": 45.319241654308364,
+        "sigma": 0.14136920759106789,
+        "tau": 0.0334916143083874
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.494459338973655,
+        "sigmaZ": 4.572899732978176
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVK[UniProt:N6,N6-dimethyllysine on K]KPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3065"
+    },
+    {
+      "monoisotopicMass": 15275.38517,
+      "abundance": 131709.98578243662,
+      "rt": {
+        "mu": 44.22439274060801,
+        "sigma": 0.10991761898852725,
+        "tau": 0.079380241256434
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.47146497197351,
+        "sigmaZ": 3.948667617177503
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTN[Common Artifact:Deamidation on N]LC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2946"
+    },
+    {
+      "monoisotopicMass": 15270.48169,
+      "abundance": 89975.52136916951,
+      "rt": {
+        "mu": 44.33393177751138,
+        "sigma": 0.11283979924722495,
+        "tau": 0.0785574408676295
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.59003541066288,
+        "sigmaZ": 4.08169186634718
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKT[Less Common:Dehydrobutyrine on T]D[Less Common:Reduction on D]LRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2956"
+    },
+    {
+      "monoisotopicMass": 15424.46617,
+      "abundance": 149073.23223735276,
+      "rt": {
+        "mu": 44.05276642160891,
+        "sigma": 0.12646651719588825,
+        "tau": 0.06705510892464658
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.967497171675227,
+        "sigmaZ": 5.2088551932930995
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-succinyllysine on K]T[UniProt:Phosphothreonine on T]DLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2923"
+    },
+    {
+      "monoisotopicMass": 15327.50968,
+      "abundance": 53502.24040349261,
+      "rt": {
+        "mu": 44.34643371254171,
+        "sigma": 0.11987168419475669,
+        "tau": 0.07515528346049491
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.423040192811047,
+        "sigmaZ": 4.114445494667287
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-glutaryllysine on K]TDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2956"
+    },
+    {
+      "monoisotopicMass": 15427.50144,
+      "abundance": 125070.18132053688,
+      "rt": {
+        "mu": 44.75711220190276,
+        "sigma": 0.13367822691879033,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.50866940655349,
+        "sigmaZ": 4.247033130608918
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDT[Less Common:Dehydrobutyrine on T]NLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2980"
+    },
+    {
+      "monoisotopicMass": 15471.4981,
+      "abundance": 120245.74184235038,
+      "rt": {
+        "mu": 43.89655944499283,
+        "sigma": 0.1297529286962169,
+        "tau": 0.04721489418671067
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.894947953885477,
+        "sigmaZ": 4.752723709324419
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]T[UniProt:Phosphothreonine on T]DLRFQSSAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2900"
+    },
+    {
+      "monoisotopicMass": 15414.46406,
+      "abundance": 224402.80621103407,
+      "rt": {
+        "mu": 43.893297731066035,
+        "sigma": 0.12748265296168018,
+        "tau": 0.05032928465527094
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.194965769308013,
+        "sigmaZ": 4.432147878252619
+      },
+      "identifier": "P84243:MARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKT[UniProt:Phosphothreonine on T]DLRFQSAAIGALQEASEAYLVGLFEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2895"
+    },
+    {
+      "monoisotopicMass": 15386.56542,
+      "abundance": 160326.48372728372,
+      "rt": {
+        "mu": 43.80614546364448,
+        "sigma": 0.1445684733156956,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.264709152489555,
+        "sigmaZ": 4.1882420995927445
+      },
+      "identifier": "Q5TEC6:ARTKQTARKSTGGKAPRK[UniProt:N6-butyryllysine on K]QLATKAARKSAPATGGVKKPHRYRP[Less Common:Pyrrolidinone on P]GTVALREIRRYQKSTELLIRKLPFQRLVREIAQEFKTDLRFQSSAVMALQEAREAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLVSRIRGERA:2874"
+    },
+    {
+      "monoisotopicMass": 15230.46815,
+      "abundance": 121372.96983967446,
+      "rt": {
+        "mu": 44.139805439801926,
+        "sigma": 0.12190524804238746,
+        "tau": 0.07756409743788145
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.959659297260743,
+        "sigmaZ": 4.382458190859407
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTD[Less Common:Decarboxylation on D]LRFQSAAIGALQEASEAYLVGLFEDTNL[Less Common:Oxidation on L]C[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2939"
+    },
+    {
+      "monoisotopicMass": 15297.54005,
+      "abundance": 57446.95567966058,
+      "rt": {
+        "mu": 44.32917264075224,
+        "sigma": 0.11021840031088538,
+        "tau": 0.08038001595024524
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.391708701827174,
+        "sigmaZ": 3.949397418721609
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLR[Common Biological:Decoy Methylation on R]FQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2957"
+    },
+    {
+      "monoisotopicMass": 15447.56404,
+      "abundance": 35995.84315096494,
+      "rt": {
+        "mu": 44.74424762868482,
+        "sigma": 0.13467362158119991,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.997230357592287,
+        "sigmaZ": 4.774108010444443
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVK[UniProt:N6,N6-dimethyllysine on K]KPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2980"
+    },
+    {
+      "monoisotopicMass": 15319.41744,
+      "abundance": 559152.4750924326,
+      "rt": {
+        "mu": 43.91254315503634,
+        "sigma": 0.12475357741571082,
+        "tau": 0.03929218893414227
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.58533959780148,
+        "sigmaZ": 4.070619821683229
+      },
+      "identifier": "Q6NXT2:MARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6,N6,N6-trimethyllysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2896"
+    },
+    {
+      "monoisotopicMass": 15298.4766,
+      "abundance": 102012.16095125828,
+      "rt": {
+        "mu": 44.284602853384186,
+        "sigma": 0.12386815262996947,
+        "tau": 0.0895479868369652
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.484061829872168,
+        "sigmaZ": 4.017675103175508
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Less Common:Dehydroalanine on C]AIHAKRVTIMPKDIQLARRIRGERA:2954"
+    },
+    {
+      "monoisotopicMass": 15247.44708,
+      "abundance": 116187.35187947698,
+      "rt": {
+        "mu": 43.9660861122413,
+        "sigma": 0.13248569531293689,
+        "tau": 0.06076649218210084
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.69132119293503,
+        "sigmaZ": 4.094204821543002
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVGLFEDTNLC[Less Common:Dioxidation on C]AIHAKRVTIM[Less Common:Oxidation and then loss on oxidized M side chain]PKDIQLARRIRGERA:2908"
+    },
+    {
+      "monoisotopicMass": 15960.55746,
+      "abundance": 39383.89784674866,
+      "rt": {
+        "mu": 44.16413508652259,
+        "sigma": 0.13395931914212938,
+        "tau": 0.06789429876726434
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 24.693062252123834,
+        "sigmaZ": 3.957471600719233
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKS[UniProt:ADP-ribosylserine on S]APATGGVK[UniProt:N6-acetyllysine on K]KPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2937"
+    },
+    {
+      "monoisotopicMass": 15397.50623,
+      "abundance": 41081.45007399747,
+      "rt": {
+        "mu": 43.89259958780398,
+        "sigma": 0.12623875678024016,
+        "tau": 0.05101099352584461
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.2527547524339,
+        "sigmaZ": 4.218362339113473
+      },
+      "identifier": "P84243:MARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVRE[Metal:Sodium on E]IAQDFKTDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2895"
+    },
+    {
+      "monoisotopicMass": 15391.40218,
+      "abundance": 707059.8128626684,
+      "rt": {
+        "mu": 45.272775776246974,
+        "sigma": 0.12338817225661369,
+        "tau": 0.060201380176195224
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.341351420188126,
+        "sigmaZ": 4.15524895923218
+      },
+      "identifier": "Q6NXT2:MARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6-glutaryllysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3069"
+    },
+    {
+      "monoisotopicMass": 15302.37226,
+      "abundance": 291388.0757797633,
+      "rt": {
+        "mu": 45.129631071721114,
+        "sigma": 0.11981102705310771,
+        "tau": 0.06634564205019801
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.47963077047901,
+        "sigmaZ": 3.93337311499613
+      },
+      "identifier": "Q6NXT2:ARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6-glutaryllysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKR[Common Biological:Citrullination on R]VTIMPKDIQLARRIRGERA:3045"
+    },
+    {
+      "monoisotopicMass": 15487.55895,
+      "abundance": 238918.47442462537,
+      "rt": {
+        "mu": 45.32646481122828,
+        "sigma": 0.1431749417435886,
+        "tau": 0.029060693209655233
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 20.95994176788931,
+        "sigmaZ": 4.28998470268751
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVK[UniProt:N6,N6,N6-trimethyllysine on K]KPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3066"
+    },
+    {
+      "monoisotopicMass": 15341.51212,
+      "abundance": 181301.1582652686,
+      "rt": {
+        "mu": 44.12199606441599,
+        "sigma": 0.1168635627960379,
+        "tau": 0.08321255547811829
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.461697997139005,
+        "sigmaZ": 3.896515061155842
+      },
+      "identifier": "Q71DI3:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[Common Biological:Decoy Acetylation on K]TDLRFQS[Less Common:Reduction on S]SAVMALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2938"
+    },
+    {
+      "monoisotopicMass": 15254.50453,
+      "abundance": 103020.54575299296,
+      "rt": {
+        "mu": 44.17754725227089,
+        "sigma": 0.11239982339836226,
+        "tau": 0.07949896051197644
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.79217874082128,
+        "sigmaZ": 3.9214154669964167
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6-dimethyllysine on K]TDLRFQS[Less Common:Dehydroalanine on S]AAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2942"
+    },
+    {
+      "monoisotopicMass": 15464.50658,
+      "abundance": 200548.32546078885,
+      "rt": {
+        "mu": 45.30821998083912,
+        "sigma": 0.1390516757417417,
+        "tau": 0.042252599456824705
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.65060467223231,
+        "sigmaZ": 4.424679993495776
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-(2-hydroxyisobutyryl)lysine on K]STELLIRKLPFQRLVREIAQDFKTDLR[Common Biological:Citrullination on R]FQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3066"
+    },
+    {
+      "monoisotopicMass": 15475.52257,
+      "abundance": 133081.988726839,
+      "rt": {
+        "mu": 43.676405488655924,
+        "sigma": 0.12515725526531163,
+        "tau": 0.041275409797575636
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.76452479612824,
+        "sigmaZ": 4.738752065621335
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAP[Less Common:Proline pyrrole to pyrrolidine six member ring on P]ATGGVK[UniProt:N6-(2-hydroxyisobutyryl)lysine on K]KPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2865"
+    },
+    {
+      "monoisotopicMass": 15287.51476,
+      "abundance": 298400.9456188938,
+      "rt": {
+        "mu": 45.18784875632292,
+        "sigma": 0.1209404471022133,
+        "tau": 0.07308782374649003
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.76995806901229,
+        "sigmaZ": 3.9041404348764517
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLR[Common Biological:Citrullination on R]FQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:3060"
+    },
+    {
+      "monoisotopicMass": 15459.52765,
+      "abundance": 155033.38265772673,
+      "rt": {
+        "mu": 44.65075693989899,
+        "sigma": 0.14228990897199956,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.761493501310234,
+        "sigmaZ": 4.195402153758558
+      },
+      "identifier": "P68431:ARTKQTARKSTGGKAPRKQLATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQK[UniProt:N6-crotonyllysine on K]STELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEAC[Common Fixed:Carbamidomethyl on C]EAYLVGLFEDT[Less Common:Methylation on T]NLC[Common Fixed:Carbamidomethyl on C]AIHAKRVTIMPKDIQLARRIRGERA:2972"
+    },
+    {
+      "monoisotopicMass": 15364.41509,
+      "abundance": 352212.26403864764,
+      "rt": {
+        "mu": 45.268851182359676,
+        "sigma": 0.12100465444594176,
+        "tau": 0.061216042239750704
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.651514830455763,
+        "sigmaZ": 4.153179880717896
+      },
+      "identifier": "Q6NXT2:MARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[UniProt:N6-(beta-hydroxybutyryl)lysine on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:3067"
+    },
+    {
+      "monoisotopicMass": 15287.51476,
+      "abundance": 431713.0856148252,
+      "rt": {
+        "mu": 43.88055424681461,
+        "sigma": 0.12560154929455247,
+        "tau": 0
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.767815511878577,
+        "sigmaZ": 3.994231006705241
+      },
+      "identifier": "P84243:ARTKQTARKSTGGKAPRKQLATKAARKSAPSTGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFK[UniProt:N6,N6,N6-trimethyllysine on K]TDLRFQSAAIGALQEASEAYLVGLFEDTNLC[Common Fixed:Carbamidomethyl on C]AIHAKR[Common Biological:Citrullination on R]VTIMPKDIQLARRIRGERA:2885"
+    },
+    {
+      "monoisotopicMass": 15347.41235,
+      "abundance": 106589.0947867739,
+      "rt": {
+        "mu": 43.98419615308398,
+        "sigma": 0.11954060970189002,
+        "tau": 0.07466061701140383
+      },
+      "charge": {
+        "kind": "Gaussian",
+        "muZ": 21.450548227833814,
+        "sigmaZ": 4.276107429421284
+      },
+      "identifier": "Q6NXT2:MARTKQTARKSTGGKAPRKQLATKAARKSTPSTC[Common Fixed:Carbamidomethyl on C]GVKPHRYRPGTVALREIRRYQK[Common Biological:Butyrylation on K]STELLIRKLPFQRLVREIAQDFNTDLRFQSAAVGALQEASEAYLVGLLEDTNLC[Less Common:Oxidation on C]AIHAKRVTIMPKDIQLARRIRGERA:2917"
+    }
+  ],
+  "generator": {
+    "tool": "TopDownSimulator",
+    "writtenUtc": "2026-10-20T20:17:55.9131171Z"
+  },
+  "sourceRun": {
+    "fileName": "02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML",
+    "description": "Fitted to the q\u003C=0.01 proteoforms of 02-18-20_jurkat_td_rep2_fract7 eluting 43.5-45.5 min; MS1 scan times of 44-45 min"
+  },
+  "noise": {
+    "seed": 0,
+    "floor": {
+      "noiseLevelAtReferenceMz": 1120,
+      "densityScale": 1,
+      "levelDispersion": 0.25,
+      "signalToNoise": {
+        "threshold": 1.94,
+        "meanExcess": 1.165
+      }
+    },
+    "jitter": {
+      "enabled": true,
+      "mzPpmAtUnitSignalToNoise": 9.06,
+      "mzPpmFloor": 0.81,
+      "commonModeMzPpm": 1.887,
+      "logIntensitySigmaAtUnitSignalToNoise": 1.026,
+      "logIntensitySigmaFloor": 0.165,
+      "commonModeLogIntensitySigma": 0,
+      "dropPeaksFallingBelowFloor": true
+    }
+  },
+  "background": []
+}

@@ -3,8 +3,10 @@ export const PLOT_ADAPTER_NAME = "plot-adapter";
 export { TicPlot, SpectrumPlot } from "./plots";
 export {
   createDefaultViewport,
+  fitSpectrumTracesYRange,
   fitSpectrumYRange,
   hasPersistedY,
+  resolveSpectrumTracesYRange,
   resolveSpectrumYRange
 } from "./viewport";
 export type {

@@ -29,6 +29,8 @@ fn main() {
             commands::sim_session_scan,
             commands::commit_sim_session,
             commands::close_sim_session,
+            commands::read_sim_spec,
+            commands::write_sim_spec,
             commands::load_features,
             commands::export_ms1_features,
             commands::load_psms,

@@ -6,7 +6,7 @@ import {
   TicPlot,
   SpectrumPlot,
   createDefaultViewport,
-  fitSpectrumYRange,
+  fitSpectrumTracesYRange,
   hasPersistedY
 } from "@msbrowser/plot-adapter";
 import type {
@@ -28,7 +28,8 @@ import {
   MetricReadout
 } from "@msbrowser/ui";
 
-import { openDataset } from "./tauri-dataset-provider";
+import { openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
+import { SIM_COLOR, SimPanel, useSimWorkbench } from "./SimWorkbench";
 import {
   loadFeatures,
   exportMs1Features,
@@ -221,6 +222,17 @@ export function App() {
   const [focusCharge, setFocusCharge] = useState<number | null>(null);
   const [ladderBusy, setLadderBusy] = useState(false);
 
+  // ------------------------------------------------------ simulation workbench
+  // A simulated run beside the real one: the live simulated scan mirrored under the real spectrum,
+  // the last accepted run's TIC mirrored under the real TIC. Its state outlives the drawer.
+  const sim = useSimWorkbench();
+  const [simDrawerOpen, setSimDrawerOpen] = useState(false);
+  // One right-side drawer at a time: any other drawer opening (however it opens — a toolbar
+  // toggle, a feature load, a peak click) takes over from the simulation panel.
+  useEffect(() => {
+    if (walkthrough || drawerOpen || decoyDrawerOpen || psmDrawerOpen) setSimDrawerOpen(false);
+  }, [walkthrough, drawerOpen, decoyDrawerOpen, psmDrawerOpen]);
+
   // ------------------------------------------------------------ open raw/mzML
   // Open a dataset by path — the shared core of both the "Open file…" button and
   // the E2E hook below.
@@ -374,6 +386,7 @@ export function App() {
   // `useResizeHandler` only listens to *window* resize, so the plots don't reflow on their own
   // when the drawer opens/closes — nudge them with a synthetic resize once the layout has painted.
   const drawerVisible =
+    simDrawerOpen ||
     walkthrough ||
     (psmDrawerOpen && psms.length > 0) ||
     (drawerOpen && features.length > 0) ||
@@ -504,12 +517,7 @@ export function App() {
   }, [loadFeaturesFromPath, loadDecoysFromPath]);
 
   // ---------------------------------------------------------------- load PSMs
-  const handleLoadPsms = useCallback(async () => {
-    const picked = await openFileDialog({
-      multiple: false,
-      filters: [{ name: "PSM TSV", extensions: ["psmtsv", "tsv", "txt"] }]
-    });
-    if (typeof picked !== "string") return;
+  const loadPsmsFromPath = useCallback(async (picked: string) => {
     try {
       const loaded = await loadPsms(picked);
       setPsms(loaded);
@@ -520,6 +528,28 @@ export function App() {
       setLoad({ status: "error", message: errMessage(err) });
     }
   }, []);
+
+  const handleLoadPsms = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "PSM TSV", extensions: ["psmtsv", "tsv", "txt"] }]
+    });
+    if (typeof picked !== "string") return;
+    await loadPsmsFromPath(picked);
+  }, [loadPsmsFromPath]);
+
+  // E2E hook: load a .psmtsv by path, skipping the native file dialog (see `__msviewerOpenPath`).
+  useEffect(() => {
+    const w = window as typeof window & {
+      __PW_ACTIVE__?: boolean;
+      __msviewerLoadPsmsPath?: (p: string) => void;
+    };
+    if (!w.__PW_ACTIVE__) return;
+    w.__msviewerLoadPsmsPath = (p: string) => void loadPsmsFromPath(p);
+    return () => {
+      delete w.__msviewerLoadPsmsPath;
+    };
+  }, [loadPsmsFromPath]);
 
   // -------------------------------------------------- run detection in-app
   const handleRunDetection = useCallback(async () => {
@@ -681,10 +711,13 @@ export function App() {
   // Click the TIC background → nearest scan's spectrum (unless the spectrum is pinned).
   const handleAreaClick = useCallback(
     async (rt: number) => {
-      if (!provider || spectrumPinned) return;
+      if (spectrumPinned) return;
       // Clicking a new RT is a fresh selection — drop any frozen y-range so the new scan auto-fits
       // (arrow-stepping keeps the frozen range; picking a new scan re-frames it).
       setSpectrumViewport((v) => ({ ...v, yMin: null, yMax: null }));
+      // The simulated side follows the click too (and alone, when there is no real run).
+      sim.setTargetRt(rt);
+      if (!provider) return;
       try {
         // On-demand read by RT — works during indexing (no peak index needed).
         setSpectrum(await provider.getSpectrumAtRt(rt));
@@ -692,8 +725,15 @@ export function App() {
         setLoad({ status: "error", message: errMessage(err) });
       }
     },
-    [provider, spectrumPinned]
+    [provider, spectrumPinned, sim.setTargetRt]
   );
+
+  // The simulated scan tracks the displayed real MS1 scan — by nearest RT, which is the same scan
+  // index when the spec was seeded from this run's scan times.
+  const setSimTargetRt = sim.setTargetRt;
+  useEffect(() => {
+    if (spectrum && spectrum.msLevel === 1) setSimTargetRt(spectrum.retentionTime);
+  }, [spectrum, setSimTargetRt]);
 
   // Step `delta` MS1 scans from the currently displayed one, holding the zoom constant. Navigates
   // by retention time via the MS1 scan summaries (RT-ordered) rather than by scanIndex: the
@@ -708,7 +748,14 @@ export function App() {
       // x-zoomed — at full-spectrum view the natural per-scan autoscale is kept.
       const xZoomed = spectrumViewport.xMin !== null && spectrumViewport.xMax !== null;
       if (xZoomed && !hasPersistedY(spectrumViewport)) {
-        const fit = fitSpectrumYRange(spectrum.peaks, spectrumViewport.xMin, spectrumViewport.xMax);
+        // Over the mirrored simulated scan too, so the frozen range keeps both halves in view.
+        const shown = [
+          { slotIndex: 0 as const, peaks: spectrum.peaks, color: SLOT_COLOR },
+          ...(sim.liveSpectrum
+            ? [{ slotIndex: 1 as const, peaks: sim.liveSpectrum.peaks, color: SIM_COLOR, mirrored: true }]
+            : [])
+        ];
+        const fit = fitSpectrumTracesYRange(shown, spectrumViewport.xMin, spectrumViewport.xMax);
         if (fit) setSpectrumViewport((v) => ({ ...v, yMin: fit[0], yMax: fit[1] }));
       }
       const rt = spectrum.retentionTime;
@@ -729,22 +776,81 @@ export function App() {
         setLoad({ status: "error", message: errMessage(err) });
       }
     },
-    [provider, indexing, spectrum, scanSummaries, spectrumViewport]
+    [provider, indexing, spectrum, scanSummaries, spectrumViewport, sim.liveSpectrum]
   );
 
-  // ← / → step to the previous / next MS1 scan, holding the zoom constant.
+  // ← / → step to the previous / next MS1 scan, holding the zoom constant. With no real spectrum
+  // they step the simulated scan instead.
+  const stepSim = sim.step;
+  const simActive = sim.spec !== null;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if (!spectrum || indexing) return;
-      e.preventDefault();
-      void stepScan(e.key === "ArrowRight" ? 1 : -1);
+      const delta = e.key === "ArrowRight" ? 1 : -1;
+      if (spectrum && !indexing) {
+        e.preventDefault();
+        void stepScan(delta);
+      } else if (!spectrum && simActive) {
+        e.preventDefault();
+        stepSim(delta);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [spectrum, indexing, stepScan]);
+  }, [spectrum, indexing, stepScan, simActive, stepSim]);
+
+  // ----------------------------------------------- simulation spec load / save
+  const loadSimSpecFromPath = useCallback(
+    async (picked: string) => {
+      try {
+        await sim.start(await readSimSpec(picked));
+      } catch (err) {
+        setLoad({ status: "error", message: errMessage(err) });
+      }
+    },
+    [sim.start]
+  );
+
+  const handleLoadSimSpec = useCallback(async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "Simulation spec", extensions: ["json"] }]
+    });
+    if (typeof picked !== "string") return;
+    await loadSimSpecFromPath(picked);
+  }, [loadSimSpecFromPath]);
+
+  // E2E hook: load a .simspec.json by path, skipping the native file dialog. Exposed only under the
+  // tauri-plugin-playwright control server (`window.__PW_ACTIVE__`), like `__msviewerOpenPath`.
+  useEffect(() => {
+    const w = window as typeof window & {
+      __PW_ACTIVE__?: boolean;
+      __msviewerLoadSimSpecPath?: (p: string) => void;
+    };
+    if (!w.__PW_ACTIVE__) return;
+    w.__msviewerLoadSimSpecPath = (p: string) => void loadSimSpecFromPath(p);
+    return () => {
+      delete w.__msviewerLoadSimSpecPath;
+    };
+  }, [loadSimSpecFromPath]);
+
+  const handleSaveSimSpec = useCallback(async () => {
+    if (!sim.spec) return;
+    const stem = (metadata?.fileName ?? "simulation").replace(/\.[^.]+$/, "");
+    const picked = await saveFileDialog({
+      defaultPath: `${stem}.simspec.json`,
+      filters: [{ name: "Simulation spec", extensions: ["json"] }]
+    });
+    if (typeof picked !== "string") return;
+    try {
+      await writeSimSpec(picked, sim.spec);
+      setNotice(`Saved simulation spec → ${picked.split(/[\\/]/).pop() ?? picked}`);
+    } catch (err) {
+      setLoad({ status: "error", message: errMessage(err) });
+    }
+  }, [sim.spec, metadata]);
 
   // -------------------------------------------------- walkthrough: score a seed
   const LADDER_MAX_CHARGE = 30;
@@ -866,8 +972,19 @@ export function App() {
         });
       }
     }
+    // The last accepted simulated run, mirrored under the real TIC.
+    if (sim.committed) {
+      traces.push({
+        slotIndex: 1,
+        points: sim.committed.tic,
+        selectedScanIndex: null,
+        color: SIM_COLOR,
+        mirrored: true,
+        label: "Simulated TIC"
+      });
+    }
     return traces;
-  }, [ticPoints, spectrum, xic, xicIndices, xicMode]);
+  }, [ticPoints, spectrum, xic, xicIndices, xicMode, sim.committed]);
 
   // THE per-feature colour, indexed by position in `features`: cycle the palette in GLOBAL m/z
   // order, so a feature keeps one colour across scans AND across plots (the eluting SET changes
@@ -1018,10 +1135,23 @@ export function App() {
   // diagnostic that must show even the missing teeth); feature overlays use `peakHighlights`.
   const spectrumEnvelope = walkthrough ? ladderEnvelope : [];
 
-  const spectrumTraces = useMemo<SpectrumPlotTrace[]>(
-    () => (spectrum ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }] : []),
-    [spectrum]
-  );
+  const spectrumTraces = useMemo<SpectrumPlotTrace[]>(() => {
+    const traces: SpectrumPlotTrace[] = spectrum
+      ? [{ slotIndex: 0, peaks: spectrum.peaks, color: SLOT_COLOR }]
+      : [];
+    // The live simulated scan, mirrored under the real one. Only beside an MS1 scan (or alone):
+    // the simulator has no MS2 to compare against a fragment spectrum.
+    if (sim.liveSpectrum && (!spectrum || spectrum.msLevel === 1)) {
+      traces.push({
+        slotIndex: 1,
+        peaks: sim.liveSpectrum.peaks,
+        color: SIM_COLOR,
+        mirrored: true,
+        label: "Simulated"
+      });
+    }
+    return traces;
+  }, [spectrum, sim.liveSpectrum]);
 
   // MS1 peak labels: annotate the most prominent peaks in the current x-window with m/z + inferred
   // charge. Only for MS1 spectra, and suppressed during the walkthrough (its comb overlay already
@@ -1150,6 +1280,22 @@ export function App() {
               PSMs ({psms.length})
             </PanelActionButton>
           ) : null}
+          <PanelActionButton
+            pressed={simDrawerOpen}
+            onClick={() =>
+              setSimDrawerOpen((v) => {
+                const next = !v;
+                if (next) {
+                  setDrawerOpen(false);
+                  setDecoyDrawerOpen(false);
+                  setPsmDrawerOpen(false);
+                }
+                return next;
+              })
+            }
+          >
+            {sim.spec ? `Simulation${sim.stale && sim.committed ? " (unaccepted)" : ""}` : "Simulate…"}
+          </PanelActionButton>
           {features.length > 0 ? (
             <PanelActionButton
               pressed={!showScanFeatures}
@@ -1217,7 +1363,7 @@ export function App() {
           <StatusBanner tone="info">{load.message}</StatusBanner>
         ) : load.status === "error" ? (
           <StatusBanner tone="error">Failed: {load.message}</StatusBanner>
-        ) : ticPoints.length === 0 ? (
+        ) : ticTraces.every((t) => t.points.length === 0) ? (
           indexing ? (
             <StatusBanner tone="info">
               Building peak index — the MS1 chromatogram will appear when it’s ready…
@@ -1262,8 +1408,10 @@ export function App() {
                         : selectedFeature
                           ? " · shaded columns mark matched isotope peaks"
                           : ""
-                  }`
-                : walkthrough
+                  }${sim.liveSpectrum && spectrum.msLevel === 1 ? " · simulated scan mirrored below" : ""}`
+                : sim.liveSpectrum && sim.spec && sim.viewedIndex !== null
+                  ? `Simulated scan ${sim.viewedIndex + 1} · RT ${sim.spec.scanTimes[sim.viewedIndex].toFixed(2)} min · ← / → to step`
+                  : walkthrough
                   ? "Click the chromatogram to load a scan, then click a peak to seed"
                   : "Click the chromatogram or a feature to load a scan"
             }
@@ -1328,7 +1476,20 @@ export function App() {
         )}
       </Panel>
 
-      {walkthrough ? (
+      {simDrawerOpen ? (
+        <ResizableDrawer width={drawerWidth} onResize={setDrawerWidth}>
+          <SimPanel
+            wb={sim}
+            runScanTimes={
+              scanSummaries.length > 1 ? scanSummaries.map((s) => s.retentionTime) : null
+            }
+            runName={metadata?.fileName ?? null}
+            onLoad={() => void handleLoadSimSpec()}
+            onSave={() => void handleSaveSimSpec()}
+            onClose={() => setSimDrawerOpen(false)}
+          />
+        </ResizableDrawer>
+      ) : walkthrough ? (
         <LadderDrawer
           ladder={ladder}
           zSeed={zSeed}

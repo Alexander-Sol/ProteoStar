@@ -921,6 +921,18 @@ pub async fn close_sim_session(session: u64, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
+/// Load a `.simspec.json` (schema-checked and validated by sim-core).
+#[tauri::command]
+pub async fn read_sim_spec(path: String) -> Result<sim_core::spec::SimSpec, ViewerError> {
+    sim_core::spec::SimSpec::read(&path).map_err(sim_err)
+}
+
+/// Save the workbench's spec as a `.simspec.json`, in the same shape it is read.
+#[tauri::command]
+pub async fn write_sim_spec(path: String, spec: sim_core::spec::SimSpec) -> Result<(), ViewerError> {
+    spec.write(&path).map_err(sim_err)
+}
+
 // ------------------------------------------------------------- feature overlay
 
 /// One observed isotope-peak m/z for a specific charge state of a resolved feature.

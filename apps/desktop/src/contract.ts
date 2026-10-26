@@ -12,7 +12,8 @@ export interface NumericRange {
 
 export interface DatasetMetadata {
   fileName: string;
-  format: "mzml" | "thermo_raw";
+  /** `simulated`: an in-memory run from the simulation workbench (no backing file). */
+  format: "mzml" | "thermo_raw" | "simulated";
   scanCount: number;
   ms1ScanCount: number;
   msLevelsPresent: number[];

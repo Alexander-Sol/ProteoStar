@@ -18,7 +18,11 @@ import type {
   TicPlotProps,
   TicPlotTrace
 } from "./types";
-import { resolveSpectrumYRange } from "./viewport";
+import { resolveSpectrumTracesYRange } from "./viewport";
+
+/** y as drawn: a mirrored trace hangs below zero. */
+const drawnY = (intensity: number, mirrored: boolean | undefined): number =>
+  mirrored ? -intensity : intensity;
 
 interface PlotPointEvent {
   points?: Array<{ customdata?: unknown }>;
@@ -61,7 +65,9 @@ export function TicPlot(props: TicPlotProps): ReactElement {
       title: { text: yTitle },
       range: visibleYRange(traces, viewport),
       gridcolor: "#dfe7f2",
-      zeroline: false
+      // A mirror plot needs its baseline drawn.
+      zeroline: traces.some((t) => t.mirrored),
+      zerolinecolor: "#8da2bb"
     },
     // Preserve interactive zoom/pan across re-renders while this is stable; the caller bumps it
     // to intentionally re-apply the range props (reframe). Undefined → legacy re-apply-every-render.
@@ -134,14 +140,14 @@ function buildTicTraceData(trace: TicPlotTrace, yTitle: string): PlotData[] {
     // pan drag-layer swallows raw DOM clicks. The line itself is drawn via `line`.
     mode: "lines+markers",
     x: trace.points.map((p) => p.retentionTime),
-    y: trace.points.map((p) => p.intensity),
+    y: trace.points.map((p) => drawnY(p.intensity, trace.mirrored)),
     customdata: trace.points.map((p) => ({
       ...p,
       slotIndex: trace.slotIndex
     })) as unknown as PlotData["customdata"],
     line: { color: trace.color, width: 2 },
     marker: { size: 8, color: "rgba(0,0,0,0)" },
-    hovertemplate: `RT %{x:.3f} min<br>${hoverName} %{y:.0f}<extra></extra>`
+    hovertemplate: `RT %{x:.3f} min<br>${hoverName} %{customdata.intensity:.0f}<extra></extra>`
   } as unknown as PlotData;
 
   return [lineTrace];
@@ -293,10 +299,11 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
     // invisible wide-marker scatter at each peak apex to give Plotly a reliable hover/click
     // hit-target (mirrors the TIC's line+markers approach). The bar itself skips hover so the
     // tooltip and click both resolve to the marker trace's customdata.
+    const y = trace.peaks.map((p) => drawnY(p.intensity, trace.mirrored));
     const bar = {
       type: "bar",
       x: trace.peaks.map((p) => p.mz),
-      y: trace.peaks.map((p) => p.intensity),
+      y,
       marker: { color: trace.color },
       width: 0.001,
       hoverinfo: "skip"
@@ -305,10 +312,11 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       type: "scattergl",
       mode: "markers",
       x: trace.peaks.map((p) => p.mz),
-      y: trace.peaks.map((p) => p.intensity),
+      y,
+      // The true (positive) peak, so hover text and peak-click are the same for a mirrored trace.
       customdata: trace.peaks.map((p) => ({ ...p })) as unknown as PlotData["customdata"],
       marker: { size: 12, color: "rgba(0,0,0,0)" },
-      hovertemplate: "m/z %{x:.4f}<br>Intensity %{y:.0f}<extra></extra>"
+      hovertemplate: `${trace.label ? `${trace.label}<br>` : ""}m/z %{x:.4f}<br>Intensity %{customdata.intensity:.0f}<extra></extra>`
     } as unknown as PlotData;
     return [bar, hit];
   });
@@ -337,9 +345,10 @@ export function SpectrumPlot(props: SpectrumPlotProps): ReactElement {
       title: { text: "Intensity" },
       // Honor a persisted y-range when present (holds envelope height stable across scan steps),
       // else auto-fit to the visible x-window.
-      range: resolveSpectrumYRange(viewport, allPeaks),
+      range: resolveSpectrumTracesYRange(viewport, traces),
       gridcolor: "#dfe7f2",
-      zeroline: false
+      zeroline: traces.some((t) => t.mirrored),
+      zerolinecolor: "#8da2bb"
     },
     // Preserve interactive zoom/pan across re-renders (e.g. arrow-key scan stepping) while stable;
     // the caller bumps it to intentionally re-apply the range props (reframe).
@@ -418,14 +427,22 @@ function visibleYRange(
 ): [number, number] | undefined {
   const scalers = traces.some((t) => t.yScale) ? traces.filter((t) => t.yScale) : traces;
   const { xMin, xMax } = viewport;
-  const points = scalers.flatMap((t) =>
-    xMin !== null && xMax !== null
-      ? t.points.filter((p) => p.retentionTime >= xMin && p.retentionTime <= xMax)
-      : t.points
-  );
-  if (points.length === 0) return undefined;
-  const maxY = Math.max(...points.map((p) => p.intensity));
-  return [0, maxY * 1.05];
+  // A mirrored trace hangs below zero, so the range spans both directions.
+  let maxUp = 0;
+  let maxDown = 0;
+  let any = false;
+  for (const t of scalers) {
+    for (const p of t.points) {
+      if (xMin !== null && xMax !== null && (p.retentionTime < xMin || p.retentionTime > xMax)) {
+        continue;
+      }
+      any = true;
+      if (t.mirrored) maxDown = Math.max(maxDown, p.intensity);
+      else maxUp = Math.max(maxUp, p.intensity);
+    }
+  }
+  if (!any) return undefined;
+  return [maxDown > 0 ? -maxDown * 1.05 : 0, maxUp * 1.05];
 }
 
 function toPlotlyRange(viewport: { xMin: number | null; xMax: number | null }):

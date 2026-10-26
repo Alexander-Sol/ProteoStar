@@ -69,6 +69,20 @@ export async function simulateScan(
   return decodeSpectrum(toTable(buf));
 }
 
+/** Release a dataset handle's backend state (e.g. a superseded committed simulation). */
+export function closeDataset(handle: number): Promise<void> {
+  return invoke("close_dataset", { handle });
+}
+
+/** Load a `.simspec.json`; the backend checks its schema version and validates it. */
+export function readSimSpec(path: string): Promise<SimSpec> {
+  return invoke<SimSpec>("read_sim_spec", { path });
+}
+
+export function writeSimSpec(path: string, spec: SimSpec): Promise<void> {
+  return invoke("write_sim_spec", { path, spec });
+}
+
 type ScanOpts = { mzRange?: NumericRange; maxPeaks?: number };
 
 interface PendingScan {

@@ -40,12 +40,20 @@ export interface TicPlotTrace {
   yScale?: boolean;
   /** Hover-series name for this trace (defaults to the plot's `yTitle`). */
   label?: string;
+  /** Draw downward from zero (a mirror plot: e.g. a simulated run under the real one). Hover still
+   *  reports the true, positive intensity. */
+  mirrored?: boolean;
 }
 
 export interface SpectrumPlotTrace {
   slotIndex: SlotIndex;
   peaks: readonly SpectrumPlotPeak[];
   color: string;
+  /** Draw downward from zero (a mirror plot: e.g. a simulated scan under the real one). Hover and
+   *  click still report the true, positive intensity. */
+  mirrored?: boolean;
+  /** Hover-series name, e.g. "Simulated" (optional). */
+  label?: string;
 }
 
 // A feature-finding result rendered on the TIC as a marker at its apex RT (the

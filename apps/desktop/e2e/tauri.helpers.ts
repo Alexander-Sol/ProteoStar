@@ -91,11 +91,14 @@ export async function clickTicAtRt(page: TauriPage, rt: number): Promise<void> {
   );
 }
 
-/** Wait until the spectrum plot has rendered peaks. */
+/** Wait until the spectrum plot has rendered peaks of a real scan — upright ones: a simulated scan
+ *  from the workbench is drawn mirrored (below zero) and can be on the plot before any real one. */
 export async function waitForSpectrum(page: TauriPage, timeoutMs = 30_000): Promise<void> {
   await page.waitForFunction(
     `(function(){ ${FIND_GD("m/z")}
-       return !!(gd && gd.data && gd.data.some(function(t){ return t.x && t.x.length > 0; }));
+       return !!(gd && gd.data && gd.data.some(function(t){
+         return t.x && t.x.length > 0 && t.y && Array.prototype.some.call(t.y, function(y){ return y > 0; });
+       }));
      })()`,
     timeoutMs,
   );
@@ -254,6 +257,32 @@ export async function dragDrawerResizeTo(page: TauriPage, toClientX: number): Pr
      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: ${toClientX}, clientY: y }));
      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: ${toClientX}, clientY: y }));
      return true;`,
+  );
+}
+
+/** Drop any simulation the workbench holds, so it does not leak into the next spec (the app
+ *  instance is shared). Reopens the simulation panel first if another drawer replaced it. */
+export async function discardSimulation(page: TauriPage): Promise<void> {
+  await ev(
+    page,
+    `var buttons = function(){ return Array.prototype.slice.call(document.querySelectorAll('button')); };
+     var toggle = buttons().find(function(b){ return /^Simulation( \\(unaccepted\\))?$/.test((b.textContent || '').trim()); });
+     if (!toggle) return false;
+     var discard = buttons().find(function(b){ return (b.textContent || '').trim() === 'Discard'; });
+     if (!discard) { toggle.click(); return 'reopened'; }
+     discard.click();
+     return true;`,
+  );
+  // Reopening the panel renders on the next frame; then its Discard is there.
+  await page.waitForFunction(
+    `(function(){
+       var b = Array.prototype.slice.call(document.querySelectorAll('button'))
+         .find(function(x){ return (x.textContent || '').trim() === 'Discard'; });
+       if (b) b.click();
+       return !Array.prototype.slice.call(document.querySelectorAll('button'))
+         .some(function(x){ return /^Simulation( \\(unaccepted\\))?$/.test((x.textContent || '').trim()); });
+     })()`,
+    10_000,
   );
 }
 

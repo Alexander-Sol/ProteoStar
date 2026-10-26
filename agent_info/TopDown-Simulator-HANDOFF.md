@@ -31,7 +31,7 @@ re-render the simulated side **live**. Interaction rule (locked with the user):
 | 1 — `crates/sim-core` (pure-Rust MS1 sim, incl. noise) | ✅ done (another session) | ProteoStar commit `fab92ca`. `simulate_scan` + `simulate_run` → `flashlfq_core::Scan`; 19 tests green (bit-exact signal, statistical noise) |
 | 2 — Tauri commands + sim-as-dataset + TS bindings | ✅ done | ProteoStar commits `7dcb659` (backend) + `3827597` (frontend) |
 | 2.5 — persistent live session (`Simulator::update`, per-scan max cache, session commands, `SimSession`) | ✅ done, **uncommitted** | `agent_info/TopDown-Simulator-Live-Session-Plan.md` |
-| 3 — the workbench UI | ⬜ **next**; build it on `SimSession`, not `simulateScan` | `apps/desktop/src/App.tsx` + `packages/plot-adapter` + a new parameter panel |
+| 3 — the workbench UI | ✅ v1 done | `apps/desktop/src/SimWorkbench.tsx` (hook + panel), wired in `App.tsx`; mirror traces in `packages/plot-adapter`; E2E `e2e/tauri/sim-workbench.spec.ts` | `apps/desktop/src/App.tsx` + `packages/plot-adapter` + a new parameter panel |
 
 Branch `sim-workbench-design` history: `e427c65` (docs) → `fab92ca` (sim-core) → `7dcb659`
 (backend) → `3827597` (frontend). **Nothing is pushed** — all commits are local.
@@ -63,6 +63,35 @@ was never built; only an unused `SlotIndex = 0|1` type survives in `packages/plo
 3. **Live loop.** On every edit → `simulateScan(spec, viewedScanIndex)` → repaint the spectrum
    overlay. **Accept** → `openSimulatedDataset(spec)` → swap the committed sim into slot 1 (close the
    previous sim handle) → TIC/XIC/overlay update.
+
+## Phase 3 v1 — what was built (2026-10-20)
+
+- **Layout: a mirror plot.** The real run is drawn upright and the simulation hangs below zero on
+  the same axes. The live simulated scan sits under the real spectrum, and the last accepted run's
+  TIC under the real TIC. `mirrored` is a trace flag in `plot-adapter`; hover shows the true
+  intensity. `fitSpectrumTracesYRange` sizes the y-axis for both halves.
+- **Panel** (toolbar "Simulate…", a right drawer):
+  - Starting points: New from run (the run's MS1 scan times, so scans align one to one), New
+    blank (60 min at 1.2 s), Load… and Save… of `.simspec.json` (backend `read_sim_spec` /
+    `write_sim_spec`), and Discard.
+  - Proteoforms: a list with add at the viewed RT, duplicate and remove; an editor for mass,
+    abundance (log slider), RT μ/σ/τ and charge μ_z/σ_z.
+  - Run: `k`, the charge range, and the reduction floors when noise is off.
+  - Noise: an on/off toggle that remembers the last settings, plus every floor, S/N and jitter
+    knob and Orbitrap defaults.
+  - Accept, with an "unaccepted" state while the panel differs from the committed run.
+- **Live loop:** `useSimWorkbench` sends every edit through `SimSession.scan` (latest-wins) for
+  the scan nearest the target RT. That RT is the real spectrum's, a TIC click, or ←/→ when no
+  real scan is shown.
+- **Verified:** the E2E spec passes against the real app. With noise the live scan has 17k
+  peaks; with noise off it has 499; doubling the abundance doubles the peaks; Accept draws the
+  simulated TIC; and the sim follows arrow-key steps. The live round trip is ~9 ms on the small
+  yeast run. The full Tauri suite passes 11/12. `feature-overlay` (decoy envelope `shapes`) was
+  already stale: it predates this work, since overlays moved to peak highlights in `1134c71`.
+
+**Not in v1 (candidates):** seeding proteoforms from loaded features (abundance calibration is
+open), editing background proteoforms in the panel (they are kept and simulated, just not
+editable), and a list past 200 proteoforms (the editor only reaches the first 200).
 
 ## Gotchas / open items for Phase 3
 

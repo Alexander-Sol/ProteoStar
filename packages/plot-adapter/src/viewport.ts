@@ -1,4 +1,4 @@
-import type { PlotViewport, SpectrumPlotPeak } from "./types";
+import type { PlotViewport, SpectrumPlotPeak, SpectrumPlotTrace } from "./types";
 
 export function createDefaultViewport(): PlotViewport {
   return {
@@ -53,4 +53,39 @@ export function resolveSpectrumYRange(
     return [viewport.yMin as number, viewport.yMax as number];
   }
   return fitSpectrumYRange(peaks, viewport.xMin, viewport.xMax);
+}
+
+/**
+ * {@link fitSpectrumYRange} over several traces, where `mirrored` traces are drawn downward: the
+ * range runs from `-1.05 ×` the tallest visible mirrored peak to `1.05 ×` the tallest upright one.
+ * With no mirrored trace this is exactly `fitSpectrumYRange` of the upright peaks.
+ */
+export function fitSpectrumTracesYRange(
+  traces: readonly SpectrumPlotTrace[],
+  xMin: number | null,
+  xMax: number | null
+): [number, number] | undefined {
+  const up = fitSpectrumYRange(
+    traces.filter((t) => !t.mirrored).flatMap((t) => t.peaks),
+    xMin,
+    xMax
+  );
+  const down = fitSpectrumYRange(
+    traces.filter((t) => t.mirrored).flatMap((t) => t.peaks),
+    xMin,
+    xMax
+  );
+  if (!up && !down) return undefined;
+  return [down ? -down[1] : 0, up?.[1] ?? 0];
+}
+
+/** {@link resolveSpectrumYRange} for traces that may include mirrored ones. */
+export function resolveSpectrumTracesYRange(
+  viewport: PlotViewport,
+  traces: readonly SpectrumPlotTrace[]
+): [number, number] | undefined {
+  if (hasPersistedY(viewport)) {
+    return [viewport.yMin as number, viewport.yMax as number];
+  }
+  return fitSpectrumTracesYRange(traces, viewport.xMin, viewport.xMax);
 }

@@ -93,6 +93,26 @@ read-result round trip against the real backend. It relies on:
   `TauriPage.evaluate` (find button, emit Plotly's `plotly_click`, read the
   graph div's data) — no reliance on `data-testid`.
 
+### Top-down fixture (`tauri/topdown-workbench.spec.ts`)
+
+The yeast file is bottom-up. Top-down tests use one minute of real Jurkat top-down data
+(rep2 fract7, 44–45 min: 22 MS1 scans, plus the 60 MS2 scans behind its confident IDs, renumbered
+1..82):
+
+- `02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML`: the real slice.
+- `…rt44-45_Proteoforms.psmtsv`: its 157 q ≤ 0.01 target proteoform IDs (MetaMorpheus GPTMD
+  search), with scan numbers remapped to the slice.
+- `…rt44-45.simspec.json`: a SimSpec mzLib fitted to the 131 species eluting at 43.5–45.5 min, on
+  the slice's own MS1 scan times. k = 3.5e-7 is fixed rather than fitted because the raw is
+  centroided; the noise is the Orbitrap defaults.
+
+The spec checks that the simulated scans align with the real ones and that the fitted proteoforms
+land on real peaks (92 % of the 50 tallest simulated peaks are within 10 ppm of one).
+
+To regenerate them, run mzLib's `[Explicit]` test `AnalysisExample.ExportRep2WorkbenchFixture`
+(branch `TopDownSimClean`). It needs `D:\JurkatTopdown`, and `MZLIB_TOPDOWN_SIM_FIXTURE_RT_START`,
+`…_RT_END` and `…_DIR` override the window and the output folder.
+
 ### The `window.__msviewerOpenPath` test hook
 
 The native "Open file…" dialog can't be automated (it's an OS window, not DOM).
