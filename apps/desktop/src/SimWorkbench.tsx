@@ -679,6 +679,7 @@ function ProteoformEditor({
       <NumberField
         label="Abundance"
         value={p.abundance}
+        decimals={0}
         slider={{ min: 1e3, max: 1e12, log: true }}
         onChange={(abundance) => onChange((q) => ({ ...q, abundance }))}
       />
@@ -693,7 +694,8 @@ function ProteoformEditor({
       <NumberField
         label="Mean charge"
         value={p.charge.muZ}
-        step={0.1}
+        step={0.5}
+        decimals={1}
         slider={{ min: chargeRange.min, max: chargeRange.max }}
         onChange={(muZ) => onChange((q) => ({ ...q, charge: { ...q.charge, muZ } }))}
       />
@@ -758,6 +760,7 @@ function NoiseEditor({
         label="Noise level"
         hint="height at the reference m/z"
         value={noise.floor.noiseLevelAtReferenceMz}
+        decimals={0}
         slider={{ min: 10, max: 1e6, log: true }}
         onChange={(v) => floor((f) => ({ ...f, noiseLevelAtReferenceMz: v }))}
       />
@@ -935,6 +938,7 @@ function NumberField({
   hint,
   value,
   step,
+  decimals = 2,
   slider,
   onChange
 }: {
@@ -942,14 +946,19 @@ function NumberField({
   hint?: string;
   value: number;
   step?: number;
+  /** Decimal places shown in the box; the stored value keeps full precision. */
+  decimals?: number;
   slider?: { min: number; max: number; log?: boolean };
   onChange: (v: number) => void;
 }) {
-  const [draft, setDraft] = useState(String(value));
+  const format = (v: number): string =>
+    // Values too small for the fixed places (peak width k ~1e-7) keep three significant figures.
+    v !== 0 && Math.abs(v) < 10 ** -decimals ? v.toPrecision(3) : String(Number(v.toFixed(decimals)));
+  const [draft, setDraft] = useState(format(value));
   const focused = useRef(false);
   useEffect(() => {
     // Follow outside changes (slider, undo-by-load) unless the user is mid-edit here.
-    if (!focused.current) setDraft(String(value));
+    if (!focused.current) setDraft(format(value));
   }, [value]);
 
   const SLIDER_STEPS = 1000;
@@ -965,8 +974,9 @@ function NumberField({
     const { min, max, log } = slider!;
     const f = pos / SLIDER_STEPS;
     const v = log ? Math.exp(Math.log(min) + f * (Math.log(max) - Math.log(min))) : min + f * (max - min);
-    // Three significant figures: slider positions are approximate by nature.
-    return Number(v.toPrecision(3));
+    // Snap to the field's step; otherwise three significant figures, since slider positions are
+    // approximate by nature.
+    return step ? Number((Math.round(v / step) * step).toFixed(10)) : Number(v.toPrecision(3));
   };
 
   return (
@@ -983,7 +993,7 @@ function NumberField({
         onFocus={() => (focused.current = true)}
         onBlur={() => {
           focused.current = false;
-          setDraft(String(value));
+          setDraft(format(value));
         }}
         onChange={(e) => {
           setDraft(e.target.value);
