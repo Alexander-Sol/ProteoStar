@@ -25,8 +25,9 @@ Things to try
 - Drag "Noise level" and "Noise density" at the top of the panel. Untick Noise > enabled
   to see the clean simulation. The rest of the noise model is under "Advanced options".
 - Click a proteoform in the panel's list. Its own envelope is drawn in amber over the
-  simulated scan. Change its abundance, mass, RT or charge distribution; the simulated
-  spectrum updates as you drag a slider.
+  simulated scan. Change its abundance, retention time or mean charge; the simulated
+  spectrum updates as you drag a slider. Elution shape and charge spread are under
+  "Advanced options".
 - Change "Peak width k" under Run.
 - Press the left/right arrow keys to move between scans. The simulated scan follows.
 - Zoom with the zoom tool in the plot's top-right toolbar, then drag. Double-click to reset.

@@ -581,55 +581,58 @@ export function SimPanel({
                   }
                 />
               )}
-              <div style={pairStyle}>
-                <NumberField
-                  label="Charge min"
-                  value={spec.chargeRange.min}
-                  step={1}
-                  onChange={(min) =>
-                    wb.update((s) => ({ ...s, chargeRange: { ...s.chargeRange, min: Math.round(min) } }))
-                  }
-                />
-                <NumberField
-                  label="Charge max"
-                  value={spec.chargeRange.max}
-                  step={1}
-                  onChange={(max) =>
-                    wb.update((s) => ({ ...s, chargeRange: { ...s.chargeRange, max: Math.round(max) } }))
-                  }
-                />
-              </div>
-              {!spec.noise ? (
+              <details style={advancedStyle}>
+                <summary style={advancedSummaryStyle}>Advanced options</summary>
                 <div style={pairStyle}>
                   <NumberField
-                    label="Relative floor"
-                    hint="× brightest centroid"
-                    value={spec.reduction?.relativeIntensityThreshold ?? 1e-4}
-                    onChange={(relativeIntensityThreshold) =>
-                      wb.update((s) => ({
-                        ...s,
-                        reduction: {
-                          absoluteIntensityFloor: s.reduction?.absoluteIntensityFloor ?? 0,
-                          relativeIntensityThreshold
-                        }
-                      }))
+                    label="Charge min"
+                    value={spec.chargeRange.min}
+                    step={1}
+                    onChange={(min) =>
+                      wb.update((s) => ({ ...s, chargeRange: { ...s.chargeRange, min: Math.round(min) } }))
                     }
                   />
                   <NumberField
-                    label="Absolute floor"
-                    value={spec.reduction?.absoluteIntensityFloor ?? 0}
-                    onChange={(absoluteIntensityFloor) =>
-                      wb.update((s) => ({
-                        ...s,
-                        reduction: {
-                          relativeIntensityThreshold: s.reduction?.relativeIntensityThreshold ?? 1e-4,
-                          absoluteIntensityFloor
-                        }
-                      }))
+                    label="Charge max"
+                    value={spec.chargeRange.max}
+                    step={1}
+                    onChange={(max) =>
+                      wb.update((s) => ({ ...s, chargeRange: { ...s.chargeRange, max: Math.round(max) } }))
                     }
                   />
                 </div>
-              ) : null}
+                {!spec.noise ? (
+                  <div style={pairStyle}>
+                    <NumberField
+                      label="Relative floor"
+                      hint="× brightest centroid"
+                      value={spec.reduction?.relativeIntensityThreshold ?? 1e-4}
+                      onChange={(relativeIntensityThreshold) =>
+                        wb.update((s) => ({
+                          ...s,
+                          reduction: {
+                            absoluteIntensityFloor: s.reduction?.absoluteIntensityFloor ?? 0,
+                            relativeIntensityThreshold
+                          }
+                        }))
+                      }
+                    />
+                    <NumberField
+                      label="Absolute floor"
+                      value={spec.reduction?.absoluteIntensityFloor ?? 0}
+                      onChange={(absoluteIntensityFloor) =>
+                        wb.update((s) => ({
+                          ...s,
+                          reduction: {
+                            relativeIntensityThreshold: s.reduction?.relativeIntensityThreshold ?? 1e-4,
+                            absoluteIntensityFloor
+                          }
+                        }))
+                      }
+                    />
+                  </div>
+                ) : null}
+              </details>
             </Section>
           </>
         )}
@@ -673,55 +676,45 @@ function ProteoformEditor({
 }) {
   return (
     <div style={editorStyle}>
-      <TextField
-        label="Identifier"
-        value={p.identifier ?? ""}
-        onChange={(identifier) => onChange((q) => ({ ...q, identifier: identifier || undefined }))}
-      />
       <NumberField
-        label="Monoisotopic mass (Da)"
-        value={p.monoisotopicMass}
-        step={1}
-        slider={{ min: 1000, max: 80000 }}
-        onChange={(monoisotopicMass) => onChange((q) => ({ ...q, monoisotopicMass }))}
-      />
-      <NumberField
-        label="Abundance A"
+        label="Abundance"
         value={p.abundance}
         slider={{ min: 1e3, max: 1e12, log: true }}
         onChange={(abundance) => onChange((q) => ({ ...q, abundance }))}
       />
       <NumberField
-        label="RT μ (min)"
+        label="Retention time (min)"
+        hint="elution apex"
         value={p.rt.mu}
         step={0.01}
         slider={{ min: rtRange.min, max: rtRange.max }}
         onChange={(mu) => onChange((q) => ({ ...q, rt: { ...q.rt, mu } }))}
       />
-      <div style={pairStyle}>
-        <NumberField
-          label="RT σ"
-          value={p.rt.sigma}
-          step={0.01}
-          slider={{ min: 0.01, max: 2 }}
-          onChange={(sigma) => onChange((q) => ({ ...q, rt: { ...q.rt, sigma } }))}
-        />
-        <NumberField
-          label="RT τ"
-          value={p.rt.tau}
-          step={0.01}
-          slider={{ min: 0, max: 2 }}
-          onChange={(tau) => onChange((q) => ({ ...q, rt: { ...q.rt, tau } }))}
-        />
-      </div>
-      <div style={pairStyle}>
-        <NumberField
-          label="Charge μ_z"
-          value={p.charge.muZ}
-          step={0.1}
-          slider={{ min: chargeRange.min, max: chargeRange.max }}
-          onChange={(muZ) => onChange((q) => ({ ...q, charge: { ...q.charge, muZ } }))}
-        />
+      <NumberField
+        label="Mean charge"
+        value={p.charge.muZ}
+        step={0.1}
+        slider={{ min: chargeRange.min, max: chargeRange.max }}
+        onChange={(muZ) => onChange((q) => ({ ...q, charge: { ...q.charge, muZ } }))}
+      />
+      <details style={advancedStyle}>
+        <summary style={advancedSummaryStyle}>Advanced options</summary>
+        <div style={pairStyle}>
+          <NumberField
+            label="RT σ"
+            value={p.rt.sigma}
+            step={0.01}
+            slider={{ min: 0.01, max: 2 }}
+            onChange={(sigma) => onChange((q) => ({ ...q, rt: { ...q.rt, sigma } }))}
+          />
+          <NumberField
+            label="RT τ"
+            value={p.rt.tau}
+            step={0.01}
+            slider={{ min: 0, max: 2 }}
+            onChange={(tau) => onChange((q) => ({ ...q, rt: { ...q.rt, tau } }))}
+          />
+        </div>
         <NumberField
           label="Charge σ_z"
           value={p.charge.sigmaZ}
@@ -729,7 +722,18 @@ function ProteoformEditor({
           slider={{ min: 0.2, max: 15 }}
           onChange={(sigmaZ) => onChange((q) => ({ ...q, charge: { ...q.charge, sigmaZ } }))}
         />
-      </div>
+        <NumberField
+          label="Monoisotopic mass (Da)"
+          value={p.monoisotopicMass}
+          step={1}
+          onChange={(monoisotopicMass) => onChange((q) => ({ ...q, monoisotopicMass }))}
+        />
+        <TextField
+          label="Identifier"
+          value={p.identifier ?? ""}
+          onChange={(identifier) => onChange((q) => ({ ...q, identifier: identifier || undefined }))}
+        />
+      </details>
     </div>
   );
 }
