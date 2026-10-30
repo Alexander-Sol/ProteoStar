@@ -564,6 +564,38 @@ pub async fn get_range_xic(
     Ok(Response::new(bytes))
 }
 
+/// An XIC over a set of peaks rather than one m/z range: per MS1 scan, the sum over `mzs` of the
+/// tallest peak within `ppm` of each — e.g. a simulated proteoform's centroids, extracted from the
+/// real run to set beside its simulated XIC. Every scan, undecimated.
+#[tauri::command]
+pub async fn get_targets_xic(
+    handle: u64,
+    mzs: Vec<f64>,
+    ppm: f64,
+    state: State<'_, AppState>,
+) -> Result<Response, ViewerError> {
+    let (scans, _, _) = indexed_handles(&state, handle)?;
+
+    let (mut rt, mut intensity, mut scan_index) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, s) in scans.iter().enumerate() {
+        let sum: f64 = mzs
+            .iter()
+            .map(|&target| {
+                let tolerance = target * ppm * 1e-6;
+                let a = s.mz.partition_point(|&m| m < target - tolerance);
+                let b = s.mz.partition_point(|&m| m <= target + tolerance);
+                s.intensity[a..b].iter().copied().fold(0.0, f64::max)
+            })
+            .sum();
+        rt.push(s.retention_time as f32);
+        intensity.push(sum as f32);
+        scan_index.push(i as u32);
+    }
+    let bytes = arrow_out::build_trace(rt, intensity, scan_index)
+        .map_err(|e| ViewerError::internal(e.to_string()))?;
+    Ok(Response::new(bytes))
+}
+
 /// Build the Arrow spectrum `Response` for one scan: apply the m/z window, keep the
 /// `max_peaks` most intense (restoring m/z order), and attach the metadata columns. `scan_index`
 /// is what to report as `scanIndex` (the MS1 ordinal for indexed reads, or the file spectrum
@@ -921,6 +953,67 @@ pub async fn close_sim_session(session: u64, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
+// ------------------------------------------------------------ live TIC session
+//
+// The chromatogram view's counterpart of the simulator session: one `TicModel` per view, sent the
+// whole edited spec on every change, returning the run's TIC without simulating its spectra. Kept
+// apart from the simulator sessions so a TIC request never queues behind a scan simulation.
+
+fn tic_session(
+    session: u64,
+    state: &AppState,
+) -> Result<Arc<std::sync::Mutex<sim_core::tic::TicModel>>, ViewerError> {
+    let sessions = state.tic_sessions.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+    sessions.get(&session).cloned().ok_or_else(|| {
+        ViewerError::new("SESSION_NOT_FOUND", format!("no TIC session {session}"))
+    })
+}
+
+/// Start a live TIC session on `spec`; returns its id.
+#[tauri::command]
+pub async fn open_tic_session(
+    spec: sim_core::spec::SimSpec,
+    state: State<'_, AppState>,
+) -> Result<u64, ViewerError> {
+    let model = tauri::async_runtime::spawn_blocking(move || {
+        sim_core::tic::TicModel::new(&spec).map_err(sim_err)
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("TIC task failed: {e}")))??;
+    let session = state.next.fetch_add(1, Ordering::SeqCst) + 1;
+    state
+        .tic_sessions
+        .lock()
+        .map_err(|e| ViewerError::internal(e.to_string()))?
+        .insert(session, Arc::new(std::sync::Mutex::new(model)));
+    Ok(session)
+}
+
+/// Live path: bring the session to `spec`, then return the run's TIC and the XIC of proteoform
+/// `selected`.
+#[tauri::command]
+pub async fn tic_session_trace(
+    session: u64,
+    spec: sim_core::spec::SimSpec,
+    selected: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<sim_core::tic::RunTic, ViewerError> {
+    let model = tic_session(session, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut model = model.lock().map_err(|e| ViewerError::internal(e.to_string()))?;
+        model.update(&spec).map_err(sim_err)?;
+        Ok(model.trace(selected.map(|i| i as usize)))
+    })
+    .await
+    .map_err(|e| ViewerError::internal(format!("TIC task failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn close_tic_session(session: u64, state: State<'_, AppState>) -> Result<(), ViewerError> {
+    state.tic_sessions.lock().map_err(|e| ViewerError::internal(e.to_string()))?.remove(&session);
+    Ok(())
+}
+
 /// Load a `.simspec.json` (schema-checked and validated by sim-core).
 #[tauri::command]
 pub async fn read_sim_spec(path: String) -> Result<sim_core::spec::SimSpec, ViewerError> {
@@ -956,7 +1049,7 @@ pub fn demo_dataset(app: tauri::AppHandle) -> Option<DemoDataset> {
     #[cfg(feature = "demo")]
     {
         use tauri::Manager;
-        const STEM: &str = "02-18-20_jurkat_td_rep2_fract7.rt44-45";
+        const STEM: &str = "02-18-20_jurkat_td_rep2_fract7.rt40-50";
         let dir = app.path().resource_dir().ok()?.join("demo");
         let file = |name: String| {
             let p = dir.join(name);

@@ -20,12 +20,11 @@ import {
   type SimProteoform,
   type SimSpec
 } from "./sim-spec";
-import { SimSession, closeDataset, simulateScan } from "./tauri-dataset-provider";
+import { AddProteoformDialog } from "./AddProteoformDialog";
+import { NumberField, SIM_COLOR, SmallButton, TextField } from "./sim-ui";
+export { SIM_COLOR, SIM_SELECTED_COLOR } from "./sim-ui";
+import { SimSession, TicSession, closeDataset, simulateScan, type RunTic } from "./tauri-dataset-provider";
 
-/** The simulated run's colour wherever it is drawn (mirror traces, panel accents). */
-export const SIM_COLOR = "#b5482f";
-/** The selected proteoform's own envelope, drawn over the simulated scan. */
-export const SIM_SELECTED_COLOR = "#e8a317";
 
 /** A synthetic gradient for a spec with no real run to borrow scan times from: 60 min, 1.2 s. */
 const BLANK_RUN_MINUTES = 60;
@@ -125,8 +124,20 @@ function errText(err: unknown): string {
   return String(err);
 }
 
+/**
+ * What the live loop renders on each edit: the viewed scan, or the whole run's TIC (and the
+ * selected proteoform's XIC), computed without simulating any spectrum.
+ */
+export type SimView = "spectrum" | "chromatogram";
+
 export interface SimWorkbench {
   spec: SimSpec | null;
+  view: SimView;
+  setView(view: SimView): void;
+  /** The live run TIC, while the view is the chromatogram (else the last one computed). */
+  tic: RunTic | null;
+  /** Round-trip time of the last live TIC, ms. */
+  ticMs: number | null;
   /** Replace the spec with an edited copy (the panel's only way to change it). */
   update(edit: (spec: SimSpec) => SimSpec): void;
   /** Start (or restart) the workbench on `spec`. */
@@ -166,6 +177,10 @@ export function useSimWorkbench(): SimWorkbench {
   const [committed, setCommitted] = useState<CommittedSim | null>(null);
   const committedRef = useRef<CommittedSim | null>(null);
   const [committing, setCommitting] = useState(false);
+  const [view, setView] = useState<SimView>("spectrum");
+  const ticSessionRef = useRef<TicSession | null>(null);
+  const [tic, setTic] = useState<RunTic | null>(null);
+  const [ticMs, setTicMs] = useState<number | null>(null);
 
   const viewedIndex = useMemo(() => {
     if (!spec || spec.scanTimes.length === 0) return null;
@@ -174,10 +189,11 @@ export function useSimWorkbench(): SimWorkbench {
   }, [spec, targetRt]);
 
   // The live loop: every spec edit or viewed-scan change asks the session for that scan. The
-  // session is latest-wins, so superseded requests resolve to null and are skipped.
+  // session is latest-wins, so superseded requests resolve to null and are skipped. Paused while
+  // the chromatogram is shown, so the scan does not compete with the TIC for the backend.
   useEffect(() => {
     const session = sessionRef.current;
-    if (!spec || !session || viewedIndex === null) return;
+    if (!spec || !session || viewedIndex === null || view !== "spectrum") return;
     const t0 = performance.now();
     session
       .scan(spec, viewedIndex)
@@ -190,11 +206,30 @@ export function useSimWorkbench(): SimWorkbench {
       .catch((err) => {
         if (sessionRef.current === session) setError(errText(err));
       });
-  }, [spec, viewedIndex, sessionVersion]);
+  }, [spec, viewedIndex, sessionVersion, view]);
 
   const [selectedRaw, setSelected] = useState(0);
   const proteoformCount = spec?.proteoforms.length ?? 0;
   const selected = proteoformCount > 0 ? Math.min(selectedRaw, proteoformCount - 1) : null;
+
+  // The chromatogram's live loop: the run's TIC and the selected proteoform's XIC on every edit,
+  // from the TIC session (latest-wins, like the scan's).
+  useEffect(() => {
+    const session = ticSessionRef.current;
+    if (!spec || !session || view !== "chromatogram") return;
+    const t0 = performance.now();
+    session
+      .trace(spec, selected)
+      .then((t) => {
+        if (!t || ticSessionRef.current !== session) return;
+        setTic(t);
+        setTicMs(performance.now() - t0);
+        setError(null);
+      })
+      .catch((err) => {
+        if (ticSessionRef.current === session) setError(errText(err));
+      });
+  }, [spec, selected, view, sessionVersion]);
 
   // The selected proteoform simulated alone (stateless: one proteoform is cheap to build), so the
   // plot can pick its envelope out of the full scan. Stale results are dropped by sequence.
@@ -207,6 +242,7 @@ export function useSimWorkbench(): SimWorkbench {
       setSelectedSpectrum(null);
       return;
     }
+    if (view !== "spectrum") return;
     simulateScan({ ...spec, proteoforms: [p], background: [], noise: undefined }, viewedIndex)
       .then((s) => {
         if (seq === selectedSeq.current) setSelectedSpectrum(s);
@@ -214,7 +250,7 @@ export function useSimWorkbench(): SimWorkbench {
       .catch(() => {
         if (seq === selectedSeq.current) setSelectedSpectrum(null);
       });
-  }, [spec, selected, viewedIndex]);
+  }, [spec, selected, viewedIndex, view]);
 
   const replaceCommitted = useCallback((next: CommittedSim | null) => {
     const prev = committedRef.current;
@@ -228,12 +264,18 @@ export function useSimWorkbench(): SimWorkbench {
       const old = sessionRef.current;
       sessionRef.current = null;
       if (old) void old.close().catch(() => {});
+      const oldTic = ticSessionRef.current;
+      ticSessionRef.current = null;
+      if (oldTic) void oldTic.close().catch(() => {});
       replaceCommitted(null);
       setLiveSpectrum(null);
+      setTic(null);
       setError(null);
       setSpec(next);
       try {
-        sessionRef.current = await SimSession.open(next);
+        const [session, ticSession] = await Promise.all([SimSession.open(next), TicSession.open(next)]);
+        sessionRef.current = session;
+        ticSessionRef.current = ticSession;
         setSessionVersion((v) => v + 1);
       } catch (err) {
         setError(errText(err));
@@ -246,10 +288,15 @@ export function useSimWorkbench(): SimWorkbench {
     const old = sessionRef.current;
     sessionRef.current = null;
     if (old) void old.close().catch(() => {});
+    const oldTic = ticSessionRef.current;
+    ticSessionRef.current = null;
+    if (oldTic) void oldTic.close().catch(() => {});
     replaceCommitted(null);
     setSpec(null);
     setLiveSpectrum(null);
     setLiveMs(null);
+    setTic(null);
+    setTicMs(null);
     setError(null);
   }, [replaceCommitted]);
 
@@ -293,6 +340,10 @@ export function useSimWorkbench(): SimWorkbench {
 
   return {
     spec,
+    view,
+    setView,
+    tic,
+    ticMs,
     update,
     start,
     discard,
@@ -348,6 +399,7 @@ export function SimPanel({
       list.scrollTop = top - list.clientHeight / 2;
     }
   }, [wb.selected]);
+  const [adding, setAdding] = useState(false);
   // The noise block last switched off, so switching it back on restores the user's settings.
   const lastNoise = useRef<SimNoise | null>(null);
 
@@ -427,7 +479,10 @@ export function SimPanel({
                     wb.viewedIndex !== null && viewedRt !== null
                       ? ` · viewing scan ${wb.viewedIndex + 1} (RT ${viewedRt.toFixed(2)})`
                       : ""
-                  }${wb.liveMs !== null ? ` · ${wb.liveMs.toFixed(0)} ms` : ""}`}
+                  }${(() => {
+                    const ms = wb.view === "chromatogram" ? wb.ticMs : wb.liveMs;
+                    return ms !== null ? ` · ${ms.toFixed(0)} ms` : "";
+                  })()}`}
             </div>
 
             <Section
@@ -509,19 +564,10 @@ export function SimPanel({
               </div>
               <div style={buttonRowStyle}>
                 <SmallButton
-                  onClick={() => {
-                    wb.update((s) => ({
-                      ...s,
-                      proteoforms: [
-                        ...s.proteoforms,
-                        defaultProteoform(viewedRt ?? rtRange.min, `P${s.proteoforms.length + 1}`)
-                      ]
-                    }));
-                    setSelected(proteoformCount);
-                  }}
-                  title="A new proteoform eluting at the viewed scan's RT"
+                  onClick={() => setAdding(true)}
+                  title="A new proteoform from its sequence and modifications"
                 >
-                  + Add at viewed RT
+                  + Add proteoform
                 </SmallButton>
                 {sel !== null ? (
                   <>
@@ -551,6 +597,19 @@ export function SimPanel({
                   </>
                 ) : null}
               </div>
+
+              {adding ? (
+                <AddProteoformDialog
+                  spec={spec}
+                  defaultRt={viewedRt ?? rtRange.min}
+                  onAdd={(p) => {
+                    wb.update((s) => ({ ...s, proteoforms: [...s.proteoforms, p] }));
+                    setSelected(proteoformCount);
+                    setAdding(false);
+                  }}
+                  onClose={() => setAdding(false)}
+                />
+              ) : null}
 
               {sel !== null ? (
                 <ProteoformEditor
@@ -692,6 +751,14 @@ function ProteoformEditor({
         onChange={(mu) => onChange((q) => ({ ...q, rt: { ...q.rt, mu } }))}
       />
       <NumberField
+        label="RT σ (min)"
+        hint="Chromatographic Peak Width"
+        value={p.rt.sigma}
+        step={0.01}
+        slider={{ min: 0.01, max: 2 }}
+        onChange={(sigma) => onChange((q) => ({ ...q, rt: { ...q.rt, sigma } }))}
+      />
+      <NumberField
         label="Mean charge"
         value={p.charge.muZ}
         step={0.5}
@@ -701,34 +768,20 @@ function ProteoformEditor({
       />
       <details style={advancedStyle}>
         <summary style={advancedSummaryStyle}>Advanced options</summary>
-        <div style={pairStyle}>
-          <NumberField
-            label="RT σ"
-            value={p.rt.sigma}
-            step={0.01}
-            slider={{ min: 0.01, max: 2 }}
-            onChange={(sigma) => onChange((q) => ({ ...q, rt: { ...q.rt, sigma } }))}
-          />
-          <NumberField
-            label="RT τ"
-            value={p.rt.tau}
-            step={0.01}
-            slider={{ min: 0, max: 2 }}
-            onChange={(tau) => onChange((q) => ({ ...q, rt: { ...q.rt, tau } }))}
-          />
-        </div>
+        <NumberField
+          label="RT τ"
+          hint="elution tail"
+          value={p.rt.tau}
+          step={0.01}
+          slider={{ min: 0, max: 2 }}
+          onChange={(tau) => onChange((q) => ({ ...q, rt: { ...q.rt, tau } }))}
+        />
         <NumberField
           label="Charge σ_z"
           value={p.charge.sigmaZ}
           step={0.1}
           slider={{ min: 0.2, max: 15 }}
           onChange={(sigmaZ) => onChange((q) => ({ ...q, charge: { ...q.charge, sigmaZ } }))}
-        />
-        <NumberField
-          label="Monoisotopic mass (Da)"
-          value={p.monoisotopicMass}
-          step={1}
-          onChange={(monoisotopicMass) => onChange((q) => ({ ...q, monoisotopicMass }))}
         />
         <TextField
           label="Identifier"
@@ -772,6 +825,11 @@ function NoiseEditor({
         slider={{ min: 0, max: 5 }}
         onChange={(v) => floor((f) => ({ ...f, densityScale: v }))}
       />
+      <div style={{ marginTop: 6 }}>
+        <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
+          Orbitrap defaults
+        </SmallButton>
+      </div>
       <details style={advancedStyle}>
         <summary style={advancedSummaryStyle}>Advanced options</summary>
         <div style={pairStyle}>
@@ -809,12 +867,6 @@ function NoiseEditor({
             }
           />
         </div>
-        <div style={{ marginTop: 6 }}>
-          <SmallButton onClick={onReset} title="The measured Orbitrap floor and jitter">
-            Orbitrap defaults
-          </SmallButton>
-        </div>
-
         <label style={{ ...checkLabelStyle, marginTop: 8 }}>
           <input
             type="checkbox"
@@ -894,127 +946,6 @@ function Section({ title, action, children }: { title: string; action?: ReactNod
   );
 }
 
-function SmallButton({
-  onClick,
-  title,
-  children
-}: {
-  onClick: () => void;
-  title?: string;
-  children: ReactNode;
-}) {
-  return (
-    <button type="button" onClick={onClick} title={title} style={smallButtonStyle}>
-      {children}
-    </button>
-  );
-}
-
-function TextField({
-  label,
-  value,
-  onChange
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label style={fieldStyle}>
-      <span style={fieldLabelStyle}>{label}</span>
-      <input style={inputStyle} value={value} onChange={(e) => onChange(e.target.value)} />
-    </label>
-  );
-}
-
-/**
- * A number input, optionally with a slider (linear or log). The text is a local draft: a value
- * that does not parse to a finite number is shown but never sent, so a half-typed "1e" does not
- * reach the simulator. Values that parse but the backend rejects (σ ≤ 0, min > max) come back as
- * the panel's error line.
- */
-function NumberField({
-  label,
-  hint,
-  value,
-  step,
-  decimals = 2,
-  slider,
-  onChange
-}: {
-  label: string;
-  hint?: string;
-  value: number;
-  step?: number;
-  /** Decimal places shown in the box; the stored value keeps full precision. */
-  decimals?: number;
-  slider?: { min: number; max: number; log?: boolean };
-  onChange: (v: number) => void;
-}) {
-  const format = (v: number): string =>
-    // Values too small for the fixed places (peak width k ~1e-7) keep three significant figures.
-    v !== 0 && Math.abs(v) < 10 ** -decimals ? v.toPrecision(3) : String(Number(v.toFixed(decimals)));
-  const [draft, setDraft] = useState(format(value));
-  const focused = useRef(false);
-  useEffect(() => {
-    // Follow outside changes (slider, undo-by-load) unless the user is mid-edit here.
-    if (!focused.current) setDraft(format(value));
-  }, [value]);
-
-  const SLIDER_STEPS = 1000;
-  const toSlider = (v: number): number => {
-    if (!slider) return 0;
-    const { min, max, log } = slider;
-    const f = log
-      ? (Math.log(Math.max(v, min)) - Math.log(min)) / (Math.log(max) - Math.log(min))
-      : (v - min) / (max - min);
-    return Math.round(Math.max(0, Math.min(1, f)) * SLIDER_STEPS);
-  };
-  const fromSlider = (pos: number): number => {
-    const { min, max, log } = slider!;
-    const f = pos / SLIDER_STEPS;
-    const v = log ? Math.exp(Math.log(min) + f * (Math.log(max) - Math.log(min))) : min + f * (max - min);
-    // Snap to the field's step; otherwise three significant figures, since slider positions are
-    // approximate by nature.
-    return step ? Number((Math.round(v / step) * step).toFixed(10)) : Number(v.toPrecision(3));
-  };
-
-  return (
-    <label style={fieldStyle}>
-      <span style={fieldLabelStyle}>
-        {label}
-        {hint ? <span style={hintStyle}> {hint}</span> : null}
-      </span>
-      <input
-        style={inputStyle}
-        type="number"
-        step={step ?? "any"}
-        value={draft}
-        onFocus={() => (focused.current = true)}
-        onBlur={() => {
-          focused.current = false;
-          setDraft(format(value));
-        }}
-        onChange={(e) => {
-          setDraft(e.target.value);
-          const v = Number(e.target.value);
-          if (e.target.value.trim() !== "" && Number.isFinite(v)) onChange(v);
-        }}
-      />
-      {slider ? (
-        <input
-          type="range"
-          min={0}
-          max={SLIDER_STEPS}
-          value={toSlider(value)}
-          onChange={(e) => onChange(fromSlider(Number(e.target.value)))}
-          style={sliderStyle}
-        />
-      ) : null}
-    </label>
-  );
-}
-
 // ------------------------------------------------------------------ styles
 
 const headerStyle: CSSProperties = {
@@ -1047,14 +978,6 @@ const footerStyle: CSSProperties = {
   gap: 4
 };
 const buttonRowStyle: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 6, margin: "4px 0" };
-const smallButtonStyle: CSSProperties = {
-  border: "1px solid #cbd6e5",
-  background: "#f4f7fb",
-  borderRadius: 4,
-  cursor: "pointer",
-  padding: "2px 8px",
-  fontSize: "0.76rem"
-};
 const acceptStyle: CSSProperties = {
   border: `1px solid ${SIM_COLOR}`,
   background: SIM_COLOR,
@@ -1093,18 +1016,6 @@ const editorStyle: CSSProperties = {
   background: "#fbfcfe"
 };
 const pairStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 };
-const fieldStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, margin: "4px 0" };
-const fieldLabelStyle: CSSProperties = { color: "#3a4a60" };
-const hintStyle: CSSProperties = { color: "#8796a8" };
-const inputStyle: CSSProperties = {
-  fontSize: "0.78rem",
-  padding: "2px 4px",
-  border: "1px solid #cbd6e5",
-  borderRadius: 4,
-  width: "100%",
-  boxSizing: "border-box"
-};
-const sliderStyle: CSSProperties = { width: "100%", accentColor: SIM_COLOR };
 const checkLabelStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",

@@ -43,6 +43,10 @@ export interface TicPlotTrace {
   /** Draw downward from zero (a mirror plot: e.g. a simulated run under the real one). Hover still
    *  reports the true, positive intensity. */
   mirrored?: boolean;
+  /** A caption in the trace's colour, in its corner of the plot (as on {@link SpectrumPlotTrace}). */
+  caption?: string;
+  /** Line width in px (default 2). */
+  lineWidth?: number;
 }
 
 export interface SpectrumPlotTrace {
@@ -128,6 +132,8 @@ export interface TicPlotProps {
   featureRug?: readonly FeatureMarker[];
   /** Shaded RT band(s) — typically the selected feature's elution extent (optional). */
   regions?: readonly RtRegion[];
+  /** A dashed vertical line at this RT — e.g. the scan shown elsewhere (optional). */
+  cursorRt?: number | null;
   /** y-axis label + hover series name (default "TIC"). Set to "XIC" for chromatogram reuse. */
   yTitle?: string;
   /** Plotly `uirevision`. While this value is unchanged, the user's interactive zoom/pan is

@@ -76,5 +76,8 @@ pub struct AppState {
     /// edit only recomputes what it invalidated. `Arc` so a command can drop the map lock before
     /// simulating.
     pub sim_sessions: Mutex<HashMap<u64, Arc<Mutex<sim_core::Simulator>>>>,
+    /// Live TIC sessions (the workbench's chromatogram view): one `TicModel` each, updated in
+    /// place like a simulator session, so an edit only redoes the proteoforms it touched.
+    pub tic_sessions: Mutex<HashMap<u64, Arc<Mutex<sim_core::tic::TicModel>>>>,
     pub next: AtomicU64,
 }

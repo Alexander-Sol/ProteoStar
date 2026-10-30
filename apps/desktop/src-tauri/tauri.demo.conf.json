@@ -15,9 +15,9 @@
       "signingIdentity": "-"
     },
     "resources": {
-      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45.mzML",
-      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45_Proteoforms.psmtsv": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45_Proteoforms.psmtsv",
-      "../e2e/data/02-18-20_jurkat_td_rep2_fract7.rt44-45.simspec.json": "demo/02-18-20_jurkat_td_rep2_fract7.rt44-45.simspec.json"
+      "../demo/data/02-18-20_jurkat_td_rep2_fract7.rt40-50.mzML": "demo/02-18-20_jurkat_td_rep2_fract7.rt40-50.mzML",
+      "../demo/data/02-18-20_jurkat_td_rep2_fract7.rt40-50_Proteoforms.psmtsv": "demo/02-18-20_jurkat_td_rep2_fract7.rt40-50_Proteoforms.psmtsv",
+      "../demo/data/02-18-20_jurkat_td_rep2_fract7.rt40-50.simspec.json": "demo/02-18-20_jurkat_td_rep2_fract7.rt40-50.simspec.json"
     }
   }
 }

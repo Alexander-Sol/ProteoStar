@@ -28,7 +28,13 @@ import {
   MetricReadout
 } from "@msbrowser/ui";
 
-import { demoDataset, openDataset, readSimSpec, writeSimSpec } from "./tauri-dataset-provider";
+import {
+  demoDataset,
+  getTargetsXic,
+  openDataset,
+  readSimSpec,
+  writeSimSpec
+} from "./tauri-dataset-provider";
 import {
   SIM_COLOR,
   SIM_SELECTED_COLOR,
@@ -859,7 +865,7 @@ export function App() {
       const opened = await openPath(bundled.mzml);
       if (!opened) return;
       await loadPsmsFromPath(bundled.psms);
-      // The middle scan: the slice's TIC apex sits on its edge, where tails run out of the window.
+      // The middle scan, where every proteoform fitted near it has both elution flanks in the slice.
       const mid = opened.tic[opened.tic.length >> 1];
       if (mid) {
         sim.setTargetRt(mid.retentionTime);
@@ -1228,6 +1234,116 @@ export function App() {
     return traces;
   }, [spectrum, sim.liveSpectrum, sim.selectedSpectrum]);
 
+  // ------------------------------------------------ simulation chromatogram view
+  // The workbench's other live view: the real run's TIC above the simulated run's, mirrored, with
+  // the selected proteoform's XIC in each. The simulated side is the TIC session's (every scan's
+  // intensity, without simulating a spectrum); the real XIC is extracted at the simulated
+  // proteoform's own centroids, so the two halves measure the same peaks.
+  const [chromViewport, setChromViewport] = useState<PlotViewport>(createDefaultViewport());
+  const [chromUiRev, setChromUiRev] = useState(0);
+  // Scale the y-axis to the selected proteoform's XIC (the TICs run off the top and bottom).
+  const [chromXicZoom, setChromXicZoom] = useState(false);
+
+  const xicTargets = sim.tic?.selected?.targetMzs ?? null;
+  const xicTargetsKey = xicTargets ? xicTargets.join(",") : "";
+  const [realXic, setRealXic] = useState<readonly TicPoint[] | null>(null);
+  useEffect(() => {
+    if (handle === null || indexing || !xicTargets || xicTargets.length === 0) {
+      setRealXic(null);
+      return;
+    }
+    let cancelled = false;
+    getTargetsXic(handle, xicTargets, DETECT_PPM)
+      .then((points) => {
+        if (!cancelled) setRealXic(points);
+      })
+      .catch(() => {
+        if (!cancelled) setRealXic(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the target m/z values, not the array: an abundance or RT edit keeps them.
+  }, [handle, indexing, xicTargetsKey]);
+
+  const chromatogramTraces = useMemo<TicPlotTrace[]>(() => {
+    const traces: TicPlotTrace[] = [];
+    if (scanSummaries.length > 0) {
+      traces.push({
+        slotIndex: 0,
+        // The summed centroids, as the simulated TIC is (not the instrument's profile TIC).
+        points: scanSummaries.map((s) => ({
+          scanIndex: s.scanIndex,
+          retentionTime: s.retentionTime,
+          intensity: s.tic
+        })),
+        selectedScanIndex: null,
+        color: SLOT_COLOR,
+        label: "Real TIC",
+        caption: "Real data"
+      });
+    }
+    if (realXic) {
+      traces.push({
+        slotIndex: 0,
+        points: realXic,
+        selectedScanIndex: null,
+        color: SIM_SELECTED_COLOR,
+        label: "Real XIC",
+        caption: "Selected proteoform",
+        yScale: chromXicZoom
+      });
+    }
+    const tic = sim.tic;
+    const times = sim.spec?.scanTimes;
+    if (tic && times) {
+      const n = Math.min(times.length, tic.signal.length);
+      const points = (y: (i: number) => number): TicPoint[] =>
+        Array.from({ length: n }, (_, i) => ({ scanIndex: i, retentionTime: times[i], intensity: y(i) }));
+      traces.push({
+        slotIndex: 1,
+        points: points((i) => tic.signal[i] + tic.noise[i]),
+        selectedScanIndex: null,
+        color: SIM_COLOR,
+        mirrored: true,
+        label: "Simulated TIC",
+        caption: "Simulated data"
+      });
+      const selected = tic.selected;
+      if (selected) {
+        traces.push({
+          slotIndex: 1,
+          points: points((i) => selected.intensity[i]),
+          selectedScanIndex: null,
+          color: SIM_SELECTED_COLOR,
+          mirrored: true,
+          label: "Simulated XIC",
+          caption: "Selected proteoform",
+          yScale: chromXicZoom
+        });
+      }
+    }
+    return traces;
+  }, [scanSummaries, realXic, sim.tic, sim.spec, chromXicZoom]);
+
+  const chromatogramCursorRt =
+    spectrum?.retentionTime ??
+    (sim.spec && sim.viewedIndex !== null ? sim.spec.scanTimes[sim.viewedIndex] : null);
+  const showChromatogram = sim.spec !== null && sim.view === "chromatogram";
+  const simViewToggle = sim.spec ? (
+    <>
+      <PanelActionButton pressed={sim.view === "spectrum"} onClick={() => sim.setView("spectrum")}>
+        Spectrum
+      </PanelActionButton>
+      <PanelActionButton
+        pressed={sim.view === "chromatogram"}
+        onClick={() => sim.setView("chromatogram")}
+      >
+        Chromatogram
+      </PanelActionButton>
+    </>
+  ) : null;
+
   // MS1 peak labels: annotate the most prominent peaks in the current x-window with m/z + inferred
   // charge. Only for MS1 spectra, and suppressed during the walkthrough (its comb overlay already
   // annotates the ladder, so peak labels would just clutter it).
@@ -1255,7 +1371,9 @@ export function App() {
       title={demo ? "MsViewer — simulation workbench" : "MsViewer — feature finder"}
       subtitle={
         demo
-          ? "A real top-down MS1 scan (blue) above its simulation (red, mirrored). Tune the simulation in the panel on the right."
+          ? showChromatogram
+            ? "The real run's TIC (blue) above its simulation's (red, mirrored); amber is the selected proteoform. Tune the simulation in the panel on the right."
+            : "A real top-down MS1 scan (blue) above its simulation (red, mirrored). Tune the simulation in the panel on the right."
           : "Real raw/mzML over Tauri IPC, with top-down feature-finding results overlaid."
       }
       rightInset={drawerVisible ? drawerWidth + DRAWER_INSET_GAP : 0}
@@ -1476,6 +1594,55 @@ export function App() {
       </Panel>
       )}
 
+      {showChromatogram ? (
+        <Panel
+          active={false}
+          header={
+            <PanelHeader
+              title="Chromatogram · real vs simulated"
+              subtitle={`MS1 TIC (summed centroids)${
+                sim.selected !== null && sim.spec
+                  ? ` · amber: ${shortIdentifier(sim.spec.proteoforms[sim.selected]?.identifier, sim.selected)}`
+                  : ""
+              }${sim.ticMs !== null ? ` · ${sim.ticMs.toFixed(0)} ms` : ""} · click to view a scan`}
+              actions={
+                <>
+                  {simViewToggle}
+                  <PanelActionButton
+                    pressed={chromXicZoom}
+                    onClick={() => setChromXicZoom((v) => !v)}
+                  >
+                    Zoom to proteoform
+                  </PanelActionButton>
+                  <PanelActionButton
+                    onClick={() => {
+                      setChromViewport(createDefaultViewport());
+                      setChromUiRev((r) => r + 1);
+                    }}
+                  >
+                    Reset zoom
+                  </PanelActionButton>
+                </>
+              }
+            />
+          }
+        >
+          {chromatogramTraces.length === 0 ? (
+            <StatusBanner tone="info">Computing the simulated TIC…</StatusBanner>
+          ) : (
+            <TicPlot
+              traces={chromatogramTraces}
+              viewport={chromViewport}
+              uirevision={chromUiRev}
+              cursorRt={chromatogramCursorRt}
+              rangeSelectionEnabled={false}
+              onEvent={(e) => {
+                if (e.type === "area-click") void handleAreaClick(e.retentionTime);
+              }}
+            />
+          )}
+        </Panel>
+      ) : (
       <Panel
         active={spectrumPinned}
         header={
@@ -1500,6 +1667,7 @@ export function App() {
             }
             actions={
               <>
+                {simViewToggle}
                 {spectrumTraces.length > 0 ? (
                   <PanelActionButton onClick={() => reframeSpectrum(createDefaultViewport())}>
                     Reset zoom
@@ -1565,6 +1733,7 @@ export function App() {
           />
         )}
       </Panel>
+      )}
 
       {simDrawerOpen ? (
         <ResizableDrawer width={drawerWidth} onResize={setDrawerWidth}>
@@ -1874,6 +2043,12 @@ function errMessage(err: unknown): string {
     return String((err as { message: unknown }).message);
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+/** A proteoform's identifier cut to fit a subtitle (they can be whole annotated sequences). */
+function shortIdentifier(identifier: string | undefined, index: number): string {
+  if (!identifier) return `#${index + 1}`;
+  return identifier.length > 48 ? `${identifier.slice(0, 47)}…` : identifier;
 }
 
 // True if any m/z in the ascending-sorted `sortedMz` lies within `ppm` of `mz`. Binary search for

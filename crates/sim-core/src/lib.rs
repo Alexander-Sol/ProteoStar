@@ -30,6 +30,7 @@ pub mod centroider;
 pub mod model;
 pub mod noise;
 pub mod spec;
+pub mod tic;
 
 use std::fmt;
 use std::sync::Mutex;

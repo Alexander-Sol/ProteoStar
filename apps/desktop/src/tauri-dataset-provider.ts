@@ -167,6 +167,82 @@ export class SimSession {
   }
 }
 
+/** A simulated run's TIC, per scan of its spec (sim-core `RunTic`). */
+export interface RunTic {
+  /** The proteoforms' summed centroids above the floor. */
+  signal: number[];
+  /** The noise floor's summed peaks; zeros without noise. */
+  noise: number[];
+  /** The selected proteoform's XIC, when one was asked for. */
+  selected: { intensity: number[]; targetMzs: number[] } | null;
+}
+
+interface PendingTic {
+  spec: SimSpec;
+  selected: number | null;
+  resolve: (t: RunTic | null) => void;
+  reject: (e: unknown) => void;
+}
+
+/**
+ * A live TIC session: the chromatogram view's counterpart of {@link SimSession}. One long-lived
+ * backend `TicModel` returns the whole run's TIC without simulating its spectra, redoing only the
+ * proteoforms each edit touched. Latest-wins, like {@link SimSession.scan}.
+ */
+export class TicSession {
+  private inFlight = false;
+  private pending: PendingTic | null = null;
+
+  private constructor(readonly id: number) {}
+
+  static async open(spec: SimSpec): Promise<TicSession> {
+    return new TicSession(await invoke<number>("open_tic_session", { spec }));
+  }
+
+  trace(spec: SimSpec, selected: number | null): Promise<RunTic | null> {
+    return new Promise((resolve, reject) => {
+      this.pending?.resolve(null);
+      this.pending = { spec, selected, resolve, reject };
+      if (!this.inFlight) void this.drain();
+    });
+  }
+
+  private async drain(): Promise<void> {
+    this.inFlight = true;
+    while (this.pending) {
+      const { spec, selected, resolve, reject } = this.pending;
+      this.pending = null;
+      try {
+        resolve(
+          await invoke<RunTic>("tic_session_trace", {
+            session: this.id,
+            spec,
+            selected: selected ?? undefined
+          })
+        );
+      } catch (e) {
+        reject(e);
+      }
+    }
+    this.inFlight = false;
+  }
+
+  close(): Promise<void> {
+    this.pending?.resolve(null);
+    this.pending = null;
+    return invoke("close_tic_session", { session: this.id });
+  }
+}
+
+/**
+ * Per MS1 scan of an open run, the summed tallest peak within `ppm` of each of `mzs`: the real-run
+ * XIC at a simulated proteoform's centroids.
+ */
+export async function getTargetsXic(handle: number, mzs: readonly number[], ppm: number): Promise<TicPoint[]> {
+  const buf = await invoke<ArrayBuffer>("get_targets_xic", { handle, mzs, ppm });
+  return decodeTrace(toTable(buf));
+}
+
 /** Build a `DatasetProvider` over Tauri IPC for an already-open dataset `handle`. */
 function providerForHandle(handle: number): DatasetProvider {
   const arrow = (cmd: string, args: object): Promise<Table> =>

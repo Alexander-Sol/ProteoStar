@@ -72,7 +72,8 @@ export function TicPlot(props: TicPlotProps): ReactElement {
     // Preserve interactive zoom/pan across re-renders while this is stable; the caller bumps it
     // to intentionally re-apply the range props (reframe). Undefined → legacy re-apply-every-render.
     uirevision: props.uirevision,
-    shapes: buildRegionShapes(regions),
+    shapes: [...buildRegionShapes(regions), ...buildCursorShapes(props.cursorRt)],
+    annotations: buildTraceCaptions(traces),
     showlegend: false,
     hovermode: "closest"
   };
@@ -145,7 +146,7 @@ function buildTicTraceData(trace: TicPlotTrace, yTitle: string): PlotData[] {
       ...p,
       slotIndex: trace.slotIndex
     })) as unknown as PlotData["customdata"],
-    line: { color: trace.color, width: 2 },
+    line: { color: trace.color, width: trace.lineWidth ?? 2 },
     marker: { size: 8, color: "rgba(0,0,0,0)" },
     hovertemplate: `RT %{x:.3f} min<br>${hoverName} %{customdata.intensity:.0f}<extra></extra>`
   } as unknown as PlotData;
@@ -189,6 +190,24 @@ function buildRegionShapes(regions: readonly RtRegion[] | undefined): Partial<Sh
     line: { width: 0 },
     layer: "below" as const
   }));
+}
+
+/** A dashed vertical line at the cursor RT, behind the traces. */
+function buildCursorShapes(rt: number | null | undefined): Partial<Shape>[] {
+  if (rt === null || rt === undefined) return [];
+  return [
+    {
+      type: "line" as const,
+      xref: "x" as const,
+      yref: "paper" as const,
+      x0: rt,
+      x1: rt,
+      y0: 0,
+      y1: 1,
+      line: { color: "#8da2bb", width: 1.2, dash: "dash" as const },
+      layer: "below" as const
+    }
+  ];
 }
 
 /** Vertical lines at predicted isotope-peak m/z positions over a spectrum. A `detected` tooth (an
@@ -292,7 +311,7 @@ function buildPeakAnnotations(
 /** Trace captions, stacked down from the top left (upright traces) and up from the bottom left
  *  (mirrored ones), in paper coordinates so they stay put through zoom and pan. */
 function buildTraceCaptions(
-  traces: SpectrumPlotProps["traces"]
+  traces: readonly { caption?: string; mirrored?: boolean; color: string }[]
 ): NonNullable<Partial<Layout>["annotations"]> {
   const CAPTION_STEP = 0.05;
   let up = 0;

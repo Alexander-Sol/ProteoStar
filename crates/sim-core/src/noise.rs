@@ -119,6 +119,25 @@ const RELATIVE_NOISE_LEVEL_PER_BIN: [f64; 14] = [
     1.00, 1.25, 1.51, 1.76, 2.22, 2.30, 2.47, 2.44, 2.51, 2.48, 2.47, 2.50, 2.41, 2.41,
 ];
 
+/// Noise amplitude at `mz` relative to the reference m/z: linear between bin centres, flat outside
+/// the calibrated range.
+#[inline]
+pub fn relative_noise_level_at(mz: f64) -> f64 {
+    let table = &RELATIVE_NOISE_LEVEL_PER_BIN;
+    let last = table.len() - 1;
+    // Bin centres are evenly spaced, so the bracketing pair is found by division.
+    let x = (mz - FIRST_BIN_CENTRE) / BIN_WIDTH;
+    if !(x > 0.0) {
+        table[0]
+    } else if x >= last as f64 {
+        table[last]
+    } else {
+        let i = x as usize;
+        let frac = x - i as f64;
+        table[i] + frac * (table[i + 1] - table[i])
+    }
+}
+
 /// Whether a peak is a forward-model isotopologue or an FT noise peak. Collapse treats them
 /// differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,20 +180,36 @@ impl NoiseFloorModel {
     /// Noise amplitude at `mz`: linear between bin centres, flat outside the calibrated range.
     #[inline]
     pub fn noise_level_at(&self, mz: f64) -> f64 {
-        let table = &RELATIVE_NOISE_LEVEL_PER_BIN;
-        let last = table.len() - 1;
-        // Bin centres are evenly spaced, so the bracketing pair is found by division.
-        let x = (mz - FIRST_BIN_CENTRE) / BIN_WIDTH;
-        let relative = if !(x > 0.0) {
-            table[0]
-        } else if x >= last as f64 {
-            table[last]
-        } else {
-            let i = x as usize;
-            let frac = x - i as f64;
-            table[i] + frac * (table[i + 1] - table[i])
-        };
-        self.noise_level_at_reference_mz * relative
+        self.noise_level_at_reference_mz * relative_noise_level_at(mz)
+    }
+
+    /// The scale of [`Self::detection_floor_at`]: the floor at `mz` is this times
+    /// [`relative_noise_level_at`]`(mz)`.
+    pub fn detection_floor_scale(&self) -> f64 {
+        self.sn_threshold * self.noise_level_at_reference_mz
+    }
+
+    /// The summed intensity of the noise peaks [`Self::sample_scan`] draws from `rng`: the noise
+    /// floor's share of that scan's TIC (collapse merges peaks but keeps their sum).
+    /// Makes exactly [`Self::sample_scan`]'s draws, without storing or sorting the peaks.
+    pub fn sample_scan_tic(&self, rng: &mut Rng) -> f64 {
+        let mut tic = 0.0;
+        for (bin, &peaks) in JURKAT_PEAKS_PER_SCAN_PER_BIN.iter().enumerate() {
+            let expected = peaks * self.density_scale;
+            if expected <= 0.0 {
+                continue;
+            }
+            let bin_start = FIRST_BIN_START + bin as f64 * BIN_WIDTH;
+            for _ in 0..sample_poisson(rng, expected) {
+                let mz = bin_start + rng.next_f64() * BIN_WIDTH;
+                let mut level = self.noise_level_at(mz);
+                if self.level_dispersion > 0.0 {
+                    level *= (self.level_dispersion * rng.normal()).exp();
+                }
+                tic += level * (self.sn_threshold + self.sn_mean_excess * rng.exp1());
+            }
+        }
+        tic
     }
 
     /// The detection limit a peak must clear: S/N threshold × the local noise level.
@@ -494,6 +529,18 @@ mod tests {
         let (mean_sn, _) = mean_sd(&sn);
         assert!((mean_sn - (1.94 + 1.165)).abs() < 0.01, "mean S/N {mean_sn}");
         assert!(sn.iter().all(|&x| x >= 1.94 - 1e-9));
+    }
+
+    #[test]
+    fn scan_tic_sums_the_sampled_peaks() {
+        let model = NoiseFloorModel::from(&SimNoiseFloor::default());
+        for s in 0..5 {
+            let mut peaks = Vec::new();
+            model.sample_scan(&mut stream_for_scan(9, s, NOISE_STREAM), &mut peaks);
+            let summed: f64 = peaks.iter().map(|p| p.intensity).sum();
+            let tic = model.sample_scan_tic(&mut stream_for_scan(9, s, NOISE_STREAM));
+            assert!((tic / summed - 1.0).abs() < 1e-12, "scan {s}: {tic} vs {summed}");
+        }
     }
 
     #[test]
